@@ -1,16 +1,28 @@
 import { readdir, readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { parse } from "yaml";
 import { discoverWorkspaces } from "../workspace/discover-workspaces.mjs";
 
-const requiredScripts = [
-  "type",
-  "lint",
-  "unit",
-  "build",
-  "contract",
-  "dependency-boundary",
-  "basic-security",
-];
+const requiredScripts = new Map([
+  [
+    "type",
+    "node scripts/quality/run-workspace-script.mjs type && tsc --noEmit -p tsconfig.quality.json",
+  ],
+  [
+    "lint",
+    "eslint . --max-warnings=0 --no-warn-ignored --format ./scripts/quality/relative-eslint-formatter.mjs && node scripts/quality/check-test-markers.mjs",
+  ],
+  [
+    "unit",
+    "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
+  ],
+  ["build", "node scripts/quality/run-workspace-script.mjs build"],
+  ["contract", "vitest run --config vitest.contract.config.ts"],
+  ["dependency-boundary", "node scripts/architecture/check-dependency-boundaries.mjs"],
+  ["basic-security", "node scripts/security/check-basic-security.mjs"],
+]);
+const requiredWorkspaceRoots = ["apps/*", "packages/*", "packages/adapters/*"];
 const ignoredDirectoryNames = new Set([
   "node_modules",
   "dist",
@@ -106,14 +118,14 @@ export async function validateRepositoryContract(root) {
   );
 
   if (rootManifest) {
-    for (const script of requiredScripts) {
-      if (typeof rootManifest.scripts?.[script] !== "string") {
+    for (const [script, expectedCommand] of requiredScripts) {
+      if (rootManifest.scripts?.[script] !== expectedCommand) {
         violations.push(
           violation(
             "package.json",
             "root-script-contract",
-            `required root script '${script}' is missing.`,
-            `restore a real fail-closed '${script}' command`,
+            `required root script '${script}' must use its fail-closed implementation.`,
+            `restore '${script}' to '${expectedCommand}'`,
           ),
         );
       }
@@ -166,25 +178,32 @@ export async function validateRepositoryContract(root) {
   }
 
   if (workspaceSource !== null) {
-    for (const pattern of ["apps/*", "packages/*", "packages/adapters/*"]) {
-      if (!workspaceSource.includes(`- '${pattern}'`)) {
-        violations.push(
-          violation(
-            "pnpm-workspace.yaml",
-            "workspace-roots",
-            `workspace root '${pattern}' is missing.`,
-            "restore the exact three workspace roots",
-          ),
-        );
-      }
-    }
-    if (workspaceSource.includes("packages/application/*")) {
+    let workspaceConfig;
+    try {
+      workspaceConfig = parse(workspaceSource);
+    } catch {
       violations.push(
         violation(
           "pnpm-workspace.yaml",
           "workspace-roots",
-          "packages/application must remain one workspace, not a nested workspace root.",
-          "remove packages/application/* from workspace patterns",
+          "pnpm-workspace.yaml is not valid YAML.",
+          "restore valid YAML with the exact three workspace roots",
+        ),
+      );
+    }
+
+    const actualRoots = workspaceConfig?.packages;
+    if (
+      !Array.isArray(actualRoots) ||
+      actualRoots.length !== requiredWorkspaceRoots.length ||
+      !requiredWorkspaceRoots.every((pattern, index) => actualRoots[index] === pattern)
+    ) {
+      violations.push(
+        violation(
+          "pnpm-workspace.yaml",
+          "workspace-roots",
+          "pnpm workspace roots must exactly match apps/*, packages/*, and packages/adapters/*.",
+          "remove extra or nested roots and restore the required order",
         ),
       );
     }
@@ -251,4 +270,15 @@ export async function validateRepositoryContract(root) {
       `${right.relativePath}:${right.rule}`,
     ),
   );
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const violations = await validateRepositoryContract(repositoryRoot);
+  for (const contractViolation of violations) {
+    console.error(
+      `${contractViolation.relativePath}: ${contractViolation.message} Rule: ${contractViolation.rule}. Fix: ${contractViolation.suggestion}.`,
+    );
+  }
+  process.exitCode = violations.length === 0 ? 0 : 1;
 }

@@ -16,7 +16,7 @@
     "role": "client-app"
   },
   "scripts": {
-    "type": "tsc --noEmit -p tsconfig.json",
+    "type": "tsc -b tsconfig.json --pretty false",
     "build": "node esbuild.mjs --production"
   },
   "dependencies": {

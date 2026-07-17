@@ -55,6 +55,17 @@ describe("isolated real failure fixtures", () => {
     expect(`${result.stdout}${result.stderr}`).toContain("expected 1 to be 2");
   });
 
+  it("returns non-zero when Vitest discovers only skipped tests", () => {
+    const result = runNodeModule("node_modules/vitest/vitest.mjs", [
+      "run",
+      "--config",
+      "tests/fixtures/unit-skipped/vitest.config.mjs",
+    ]);
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain("Skipped test is forbidden");
+  });
+
   it("returns non-zero for an esbuild resolution failure", () => {
     const fixtureRoot = path.join(repositoryRoot, "tests/fixtures/build-error");
     const result = runNodeModule(

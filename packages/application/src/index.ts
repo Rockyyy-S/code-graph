@@ -1,2 +1,4 @@
-// Ports and use cases are added by their owning stories; this file keeps the package buildable.
+/**
+ * @file 端口与用例由各自所属用户故事添加；此文件仅确保包可构建。
+ */
 export {};

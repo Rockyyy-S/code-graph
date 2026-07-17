@@ -1,10 +1,18 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "composite": true,
     "declaration": true,
     "declarationMap": true,
     "noEmit": false,
     "outDir": "dist",
     "sourceMap": true
-  }
+  },
+  "references": [
+    { "path": "../../packages/adapters/analyzer-typescript/tsconfig.build.json" },
+    { "path": "../../packages/adapters/git-local/tsconfig.build.json" },
+    { "path": "../../packages/adapters/store-sqlite/tsconfig.build.json" },
+    { "path": "../../packages/application/tsconfig.build.json" },
+    { "path": "../../packages/contracts/tsconfig.build.json" }
+  ]
 }

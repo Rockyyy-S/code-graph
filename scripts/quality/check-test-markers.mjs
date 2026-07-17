@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import ts from "typescript";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -15,13 +16,14 @@ const ignoredSegments = new Set([
   "coverage",
 ]);
 const testRoots = ["tests", "apps", "packages"];
-const forbiddenMarkers = [
-  { label: "focused test", pattern: /\b(?:describe|it|test|suite)\s*\.\s*only\s*\(/g },
-  { label: "skipped test", pattern: /\b(?:describe|it|test|suite)\s*\.\s*skip\s*\(/g },
-  { label: "todo test", pattern: /\b(?:describe|it|test|suite)\s*\.\s*todo\s*\(/g },
-  { label: "focused test", pattern: /\b(?:fdescribe|fit)\s*\(/g },
-  { label: "skipped test", pattern: /\b(?:xdescribe|xit|xtest)\s*\(/g },
-];
+const testFunctionNames = new Set(["describe", "it", "suite", "test"]);
+const directMarkerLabels = new Map([
+  ["fdescribe", "focused test"],
+  ["fit", "focused test"],
+  ["xdescribe", "skipped test"],
+  ["xit", "skipped test"],
+  ["xtest", "skipped test"],
+]);
 
 function toPosix(relativePath) {
   return relativePath.split(path.sep).join("/");
@@ -68,10 +70,44 @@ async function collectFiles(root, relativeDirectory = "") {
   return files;
 }
 
-function lineAndColumn(source, index) {
-  const before = source.slice(0, index);
-  const lines = before.split("\n");
-  return { column: lines.at(-1).length + 1, line: lines.length };
+function accessChain(expression) {
+  const parts = [];
+  let current = expression;
+  while (ts.isPropertyAccessExpression(current)) {
+    parts.unshift(current.name.text);
+    current = current.expression;
+  }
+  if (ts.isIdentifier(current)) {
+    parts.unshift(current.text);
+  }
+  return parts;
+}
+
+function markerLabelForCall(callExpression) {
+  if (ts.isIdentifier(callExpression.expression)) {
+    return directMarkerLabels.get(callExpression.expression.text) ?? null;
+  }
+  if (!ts.isPropertyAccessExpression(callExpression.expression)) {
+    return null;
+  }
+
+  const [root, ...modifiers] = accessChain(callExpression.expression);
+  if (!testFunctionNames.has(root)) {
+    return null;
+  }
+  if (modifiers.includes("skipIf") || modifiers.includes("runIf")) {
+    return "conditional test";
+  }
+  if (modifiers.includes("only")) {
+    return "focused test";
+  }
+  if (modifiers.includes("skip")) {
+    return "skipped test";
+  }
+  if (modifiers.includes("todo")) {
+    return "todo test";
+  }
+  return null;
 }
 
 export async function findForbiddenTestMarkers(root) {
@@ -83,20 +119,37 @@ export async function findForbiddenTestMarkers(root) {
 
   for (const relativePath of files) {
     const source = await readFile(path.join(root, relativePath), "utf8");
-    for (const marker of forbiddenMarkers) {
-      marker.pattern.lastIndex = 0;
-      for (const match of source.matchAll(marker.pattern)) {
-        const location = lineAndColumn(source, match.index ?? 0);
-        findings.push({
-          ...location,
-          label: marker.label,
-          relativePath: toPosix(relativePath),
-        });
+    const sourceFile = ts.createSourceFile(
+      relativePath,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+
+    function visit(node) {
+      if (ts.isCallExpression(node)) {
+        const label = markerLabelForCall(node);
+        if (label) {
+          const location = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          findings.push({
+            column: location.character + 1,
+            label,
+            line: location.line + 1,
+            relativePath: toPosix(relativePath),
+          });
+        }
       }
+      ts.forEachChild(node, visit);
     }
+
+    visit(sourceFile);
   }
 
-  return findings;
+  return findings.sort((left, right) =>
+    `${left.relativePath}:${String(left.line).padStart(8, "0")}:${String(left.column).padStart(8, "0")}`.localeCompare(
+      `${right.relativePath}:${String(right.line).padStart(8, "0")}:${String(right.column).padStart(8, "0")}`,
+    ),
+  );
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -13,7 +13,7 @@
     }
   },
   "scripts": {
-    "type": "tsc --noEmit -p tsconfig.json",
+    "type": "tsc -b tsconfig.build.json --pretty false",
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {

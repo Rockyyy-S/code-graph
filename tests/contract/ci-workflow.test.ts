@@ -31,6 +31,7 @@ describe("architecture-required workflow", () => {
     expect(workflow).toContain("node-version: 24.18.0");
     expect(workflow).toContain("version: 11.12.0");
     expect(workflow).toContain("pnpm install --frozen-lockfile");
+    expect(workflow).toContain("node scripts/contracts/validate-repository-contract.mjs");
     for (const gate of [
       "type",
       "lint",
@@ -43,6 +44,8 @@ describe("architecture-required workflow", () => {
       expect(workflow).toContain(`run: pnpm ${gate}`);
     }
     expect(workflow).not.toMatch(/continue-on-error|\|\|\s*true/);
+    expect(workflow).not.toMatch(/uses:\s+[^\s]+@v\d+/);
+    expect(workflow.match(/uses:\s+[^\s]+@[0-9a-f]{40}/g)).toHaveLength(3);
   });
 
   it("publishes the stable architecture-required job name", async () => {

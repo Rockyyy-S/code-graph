@@ -1,2 +1,4 @@
-// Discovery and connection behavior belong to Story 1.2; no protocol is fabricated here.
+/**
+ * @file 服务发现与连接行为属于用户故事 1.2；此处不伪造任何协议能力。
+ */
 export {};

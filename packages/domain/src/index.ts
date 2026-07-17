@@ -1,2 +1,4 @@
-// Domain behavior is deliberately absent until a Story introduces an owned domain capability.
+/**
+ * @file 在后续用户故事引入职责明确的领域能力前，此处有意不实现领域行为。
+ */
 export {};

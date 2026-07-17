@@ -33,7 +33,12 @@
 
 `pnpm dependency-boundary` 同时检查 workspace manifest 与 TypeScript import 图；
 新 workspace 会被自动发现，未知责任、逆向依赖或非 graph-service 组合 adapter 均失败，
-诊断提供相对 POSIX 路径、规则与修复建议。
+诊断提供相对 POSIX 路径、规则与修复建议。内部依赖必须以规范包名和
+`workspace:*` 声明；第三方依赖按 workspace 角色默认拒绝，引入前必须更新架构所有的
+allowlist。
+
+TypeScript workspace 通过 project references 表达 manifest 依赖，质量 runner 按依赖拓扑
+执行 type/build，保证 clean checkout 不依赖历史 `dist` 产物。
 
 ## 根级质量命令
 
@@ -41,13 +46,14 @@
 | --- | --- |
 | `pnpm type` | 对所有 TypeScript workspace 和质量测试执行真实类型检查 |
 | `pnpm lint` | 检查源码、测试和仓库脚本，并禁止 focused/skip/todo 测试 |
-| `pnpm unit` | 运行具有真实断言的 Vitest 单元测试，零测试或跳过测试失败 |
+| `pnpm unit` | 运行 `tests/unit` 及 apps/packages 共置的 Vitest 测试，零测试或任何跳过测试失败 |
 | `pnpm build` | 构建全部 workspace，并由 esbuild 构建 extension |
 | `pnpm contract` | 验证工具链、workspace、extension 与 CI 仓库合同 |
 | `pnpm dependency-boundary` | 验证 manifest 和 import 的依赖方向 |
-| `pnpm basic-security` | 扫描产品实现/配置中的硬编码秘密和危险占位凭据 |
+| `pnpm basic-security` | 扫描产品实现/配置（含 TSX/JSX 与根 `.env*`）中的硬编码秘密和危险占位凭据 |
 
-GitHub 以稳定 check 名 `architecture-required` always-run 执行以上七条命令。
+GitHub 以稳定 check 名 `architecture-required` always-run 执行以上七条命令，
+workflow 使用完整 commit SHA 固定第三方 Actions。
 真实 required-check 与受控失败证据见 `docs/ci/story-1-1-provider-evidence.md`。
 
 ## VS Code extension 模板来源

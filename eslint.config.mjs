@@ -26,7 +26,12 @@ export default [
     ],
   },
   {
-    files: ["scripts/**/*.{js,mjs,cjs}", "*.{js,mjs,cjs}"],
+    files: [
+      "scripts/**/*.{js,jsx,mjs,cjs}",
+      "apps/**/*.{js,jsx,mjs,cjs}",
+      "packages/**/*.{js,jsx,mjs,cjs}",
+      "*.{js,jsx,mjs,cjs}",
+    ],
     languageOptions: {
       ecmaVersion: "latest",
       globals: {
@@ -36,6 +41,7 @@ export default [
         process: "readonly",
         setTimeout: "readonly",
       },
+      parserOptions: { ecmaFeatures: { jsx: true } },
       sourceType: "module",
     },
     rules: {
@@ -44,7 +50,12 @@ export default [
     },
   },
   {
-    files: ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "*.ts"],
+    files: [
+      "apps/**/*.{ts,tsx,mts,cts}",
+      "packages/**/*.{ts,tsx,mts,cts}",
+      "tests/**/*.{ts,tsx,mts,cts}",
+      "*.{ts,tsx,mts,cts}",
+    ],
     languageOptions: {
       ecmaVersion: "latest",
       parser: typescriptEslint.parser,

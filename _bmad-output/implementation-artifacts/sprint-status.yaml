@@ -1,47 +1,47 @@
-# generated: 2026-07-16T17:38:39.3996805+08:00
-# last_updated: 2026-07-17T10:38:42+08:00
-# project: bmad
-# project_key: NOKEY
-# tracking_system: file-system
-# story_location: _bmad-output/implementation-artifacts
+# 生成时间：2026-07-16T17:38:39.3996805+08:00
+# 最后更新时间：2026-07-17T13:10:52+08:00
+# 项目：bmad
+# 项目标识：NOKEY
+# 跟踪系统：file-system
+# 用户故事位置：_bmad-output/implementation-artifacts
 
 # 状态定义：
 # ==========
-# Epic 状态：
-#   - backlog: Epic 尚未开始
-#   - in-progress: Epic 正在实施
-#   - done: Epic 的全部 Story 已完成
+# 史诗状态：
+#   - `backlog`：史诗尚未开始
+#   - `in-progress`：史诗正在实施
+#   - `done`：史诗的全部用户故事已完成
 #
-# Epic 状态转换：
-#   - backlog → in-progress: 创建首个 Story 文件时自动转换
-#   - in-progress → done: 全部 Story 达到 done 后手动转换
+# 史诗状态转换：
+#   - `backlog` → `in-progress`：创建首个用户故事文件时自动转换
+#   - `in-progress` → `done`：全部用户故事达到 `done` 后手动转换
 #
-# Story 状态：
-#   - backlog: Story 仅存在于 Epic 文件中
-#   - ready-for-dev: Story 文件已创建
-#   - in-progress: 开发者正在实施
-#   - review: 已准备好进行代码审查
-#   - done: Story 已完成
+# 用户故事状态：
+#   - `backlog`：用户故事仅存在于史诗文件中
+#   - `ready-for-dev`：用户故事文件已创建
+#   - `in-progress`：开发者正在实施
+#   - `review`：已准备好进行代码审查
+#   - `done`：用户故事已完成
 #
 # 回顾状态：
-#   - optional: 可执行但非必需
-#   - done: 回顾已完成
+#   - `optional`：可执行但非必需
+#   - `done`：回顾已完成
 #
 # 行动项状态：
-#   - open: 回顾中承诺、尚未处理
-#   - in-progress: 正在处理
-#   - done: 已完成
+#   - `open`：回顾中承诺、尚未处理
+#   - `in-progress`：正在处理
+#   - `done`：已完成
 #
 # 工作流说明：
 # ===========
-# - 创建首个 Story 时，Epic 自动转为 in-progress
-# - 团队容量允许时可并行实施多个 Story
-# - 通常在前一 Story 完成后创建下一 Story，以吸收实施经验
-# - 开发者将 Story 移至 review 后，再使用独立上下文运行代码审查
-# - 回顾产生的行动项写入 action_items，冲刺状态会显示未完成项
+# - 创建首个用户故事时，史诗自动转为 `in-progress`
+# - 团队容量允许时可并行实施多个用户故事
+# - 通常在前一用户故事完成后创建下一用户故事，以吸收实施经验
+# - 开发者将用户故事移至 `review` 后，再使用独立上下文运行代码审查
+# - 回顾产生的行动项写入 `action_items` 字段，冲刺状态会显示未完成项
 
 generated: 2026-07-16T17:38:39.3996805+08:00
-last_updated: 2026-07-17T10:38:42+08:00
+last_updated: 2026-07-17T13:10:52+08:00
 project: bmad
 project_key: NOKEY
 tracking_system: file-system
@@ -49,7 +49,7 @@ story_location: _bmad-output/implementation-artifacts
 
 development_status:
   epic-1: in-progress
-  1-1-建立仓库模板-依赖边界与最小真实-ci: review
+  1-1-建立仓库模板-依赖边界与最小真实-ci: done
   1-2-启动空-graph-service-并完成协议握手: backlog
   1-3-强化-provider-阻断与规划双向追踪门禁: backlog
   1-4-安全初始化首次图谱与最小存储: backlog

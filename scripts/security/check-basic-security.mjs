@@ -34,12 +34,16 @@ const ignoredDirectoryNames = new Set([
 ]);
 const supportedExtensions = new Set([
   ".cjs",
+  ".cts",
   ".env",
   ".js",
+  ".jsx",
   ".json",
   ".mjs",
+  ".mts",
   ".toml",
   ".ts",
+  ".tsx",
   ".yaml",
   ".yml",
 ]);
@@ -86,6 +90,16 @@ async function collectDirectoryFiles(root, relativeDirectory) {
   return files;
 }
 
+async function collectRootEnvironmentFiles(root) {
+  const entries = await readdir(root, { withFileTypes: true });
+  return entries
+    .filter(
+      (entry) =>
+        entry.isFile() && (entry.name === ".env" || entry.name.startsWith(".env.")),
+    )
+    .map((entry) => entry.name);
+}
+
 function locationForIndex(source, index) {
   const preceding = source.slice(0, index).split("\n");
   return { column: preceding.at(-1).length + 1, line: preceding.length };
@@ -122,9 +136,21 @@ function findPatternMatches(source) {
   }
 
   const assignmentPattern =
-    /\b(api[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret|password|secret)\b\s*[:=]\s*["'`]([^"'`\r\n]+)["'`]/gi;
+    /(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z_$][\w$-]*))\s*[:=]\s*["'`]([^"'`\r\n]+)["'`]/g;
   for (const match of source.matchAll(assignmentPattern)) {
-    const value = match[2].trim().toLowerCase();
+    const fieldName = match[1] ?? match[2] ?? match[3] ?? "";
+    const normalizedFieldName = fieldName.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+    const isSensitiveField = [
+      "apikey",
+      "password",
+      "secret",
+      "token",
+    ].some((suffix) => normalizedFieldName.endsWith(suffix));
+    if (!isSensitiveField) {
+      continue;
+    }
+
+    const value = match[4].trim().toLowerCase();
     findings.push({
       ...locationForIndex(source, match.index ?? 0),
       message: placeholderValues.has(value)
@@ -149,7 +175,7 @@ function findPatternMatches(source) {
 }
 
 export async function scanBasicSecurity(root) {
-  const relativeFiles = [];
+  const relativeFiles = await collectRootEnvironmentFiles(root);
   for (const relativeDirectory of includedDirectories) {
     relativeFiles.push(...(await collectDirectoryFiles(root, relativeDirectory)));
   }

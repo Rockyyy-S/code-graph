@@ -3,6 +3,6 @@ packages:
   - 'packages/*'
   - 'packages/adapters/*'
 
-# pnpm 11 默认阻止依赖安装脚本；仅允许本 Story 明确锁定的 bundler 构建原生可执行文件。
+# pnpm 11 默认阻止依赖安装脚本；仅允许本用户故事明确锁定的打包器构建原生可执行文件。
 allowBuilds:
   esbuild: true
