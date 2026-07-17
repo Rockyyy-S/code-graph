@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "codegraph": {
-    "role": "domain"
+    "role": "application"
   },
   "exports": {
     ".": {
