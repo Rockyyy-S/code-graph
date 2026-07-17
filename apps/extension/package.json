@@ -1,0 +1,31 @@
+{
+  "name": "@codegraph/extension",
+  "displayName": "CodeGraph",
+  "description": "Local-first code structure intelligence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "vscode": "^1.125.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {},
+  "codegraph": {
+    "role": "client-app"
+  },
+  "scripts": {
+    "type": "tsc --noEmit -p tsconfig.json",
+    "build": "node esbuild.mjs --production"
+  },
+  "dependencies": {
+    "@codegraph/contracts": "workspace:*",
+    "@codegraph/service-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.125.0",
+    "esbuild": "0.28.1",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@codegraph/adapter-store-sqlite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "codegraph": {
+    "role": "adapter"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "type": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@codegraph/application": "workspace:*",
+    "@codegraph/domain": "workspace:*"
+  }
+}

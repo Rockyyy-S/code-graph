@@ -1,0 +1,29 @@
+{
+  "name": "codegraph-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.12.0",
+  "engines": {
+    "node": "24.18.0",
+    "pnpm": "11.12.0"
+  },
+  "scripts": {
+    "type": "node scripts/quality/run-workspace-script.mjs type && tsc --noEmit -p tsconfig.quality.json",
+    "lint": "eslint . --max-warnings=0 --no-warn-ignored --format ./scripts/quality/relative-eslint-formatter.mjs && node scripts/quality/check-test-markers.mjs",
+    "unit": "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
+    "build": "node scripts/quality/run-workspace-script.mjs build",
+    "contract": "vitest run --config vitest.contract.config.ts",
+    "dependency-boundary": "node scripts/architecture/check-dependency-boundaries.mjs",
+    "basic-security": "node scripts/security/check-basic-security.mjs",
+    "architecture-required": "node scripts/ci/run-architecture-required.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "esbuild": "0.28.1",
+    "eslint": "10.7.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.64.0",
+    "vitest": "4.1.10"
+  }
+}

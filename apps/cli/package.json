@@ -1,0 +1,23 @@
+{
+  "name": "@codegraph/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "codegraph": {
+    "role": "client-app"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "type": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@codegraph/contracts": "workspace:*",
+    "@codegraph/service-client": "workspace:*"
+  }
+}

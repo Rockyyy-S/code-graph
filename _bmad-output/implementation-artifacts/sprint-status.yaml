@@ -1,0 +1,121 @@
+# generated: 2026-07-16T17:38:39.3996805+08:00
+# last_updated: 2026-07-16T18:35:32+08:00
+# project: bmad
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# 状态定义：
+# ==========
+# Epic 状态：
+#   - backlog: Epic 尚未开始
+#   - in-progress: Epic 正在实施
+#   - done: Epic 的全部 Story 已完成
+#
+# Epic 状态转换：
+#   - backlog → in-progress: 创建首个 Story 文件时自动转换
+#   - in-progress → done: 全部 Story 达到 done 后手动转换
+#
+# Story 状态：
+#   - backlog: Story 仅存在于 Epic 文件中
+#   - ready-for-dev: Story 文件已创建
+#   - in-progress: 开发者正在实施
+#   - review: 已准备好进行代码审查
+#   - done: Story 已完成
+#
+# 回顾状态：
+#   - optional: 可执行但非必需
+#   - done: 回顾已完成
+#
+# 行动项状态：
+#   - open: 回顾中承诺、尚未处理
+#   - in-progress: 正在处理
+#   - done: 已完成
+#
+# 工作流说明：
+# ===========
+# - 创建首个 Story 时，Epic 自动转为 in-progress
+# - 团队容量允许时可并行实施多个 Story
+# - 通常在前一 Story 完成后创建下一 Story，以吸收实施经验
+# - 开发者将 Story 移至 review 后，再使用独立上下文运行代码审查
+# - 回顾产生的行动项写入 action_items，冲刺状态会显示未完成项
+
+generated: 2026-07-16T17:38:39.3996805+08:00
+last_updated: 2026-07-16T18:35:32+08:00
+project: bmad
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  1-1-建立仓库模板-依赖边界与最小真实-ci: in-progress
+  1-2-启动空-graph-service-并完成协议握手: backlog
+  1-3-强化-provider-阻断与规划双向追踪门禁: backlog
+  1-4-安全初始化首次图谱与最小存储: backlog
+  1-19-完成确定性-rebuild-与原子提交: backlog
+  1-5-提取模块依赖并解析目标: backlog
+  1-6-提取-basicsymbolv1-并提供稳定导航范围: backlog
+  1-7-维护-evidence-事实归属与删除语义: backlog
+  1-8-验证分析准确率并发布失败样本: backlog
+  1-9-识别-workspace-package-与跨包依赖: backlog
+  1-10-解析并应用有效的索引排除配置: backlog
+  1-11-从无效排除配置恢复-last-valid: backlog
+  1-12-收敛排除配置变化与提交竞争: backlog
+  1-13-诊断排除配置并验证安全限制: backlog
+  1-14-通过-cli-查询-诊断与查看基础循环: backlog
+  1-15-查看状态并安全取消索引: backlog
+  1-16-管理本地缓存与诊断数据: backlog
+  1-17-从缓存损坏和服务中断中恢复: backlog
+  1-18-控制遥测并验证默认离线隐私: backlog
+  epic-1-retrospective: optional
+  epic-2: backlog
+  2-1-进入可信的-vs-code-图谱壳层: backlog
+  2-10-查看-getting-started-与权威-index-status: backlog
+  2-2-通过列表浏览权威项目结构概览: backlog
+  2-3-以图形探索-overview-并展开聚合: backlog
+  2-4-通过列表查看当前文件依赖邻域: backlog
+  2-5-以图形探索邻域并保持空间上下文: backlog
+  2-6-跟随编辑器并固定当前上下文: backlog
+  2-7-查看实体详情并导航源码: backlog
+  2-8-保存后增量提交权威图谱-revision: backlog
+  2-11-原子刷新当前视图并保持空间上下文: backlog
+  2-9-在-vs-code-中查看并控制遥测状态: backlog
+  epic-2-retrospective: optional
+  epic-3: backlog
+  3-1-解析并应用有效的架构规则配置: backlog
+  3-2-从无效规则配置恢复-last-valid-策略: backlog
+  3-3-收敛规则配置变化与快照提交: backlog
+  3-4-定位规则配置错误并限制恶意输入: backlog
+  3-5-检测禁止依赖与层级方向违规: backlog
+  3-6-检测并解释循环依赖: backlog
+  3-7-维护-finding-身份与生命周期: backlog
+  3-8-增量重评规则并保证提交一致性: backlog
+  3-9-在-vs-code-中查看并修复-findings: backlog
+  3-10-使用-cli-执行规则检查: backlog
+  epic-3-retrospective: optional
+  epic-4: backlog
+  4-1-选择并规范化-git-变更集合: backlog
+  4-2-计算确定性的结构边变化与影响范围: backlog
+  4-3-比较循环与-finding-的-git-基线状态: backlog
+  4-4-生成-impactverdictv1-与稳定风险排序: backlog
+  4-5-在-vs-code-中审查结构变更: backlog
+  4-6-生成可直接使用的-pr-markdown-摘要: backlog
+  4-7-导出可控的本地结构上下文: backlog
+  4-8-通过-cli-自动化结构-impact: backlog
+  4-9-通过-cli-导出完整且可重试的结构-artifact: backlog
+  epic-4-retrospective: optional
+  epic-5: backlog
+  5-1-安装并离线运行-cli: backlog
+  5-2-安装平台特定的-vs-code-扩展: backlog
+  5-3-安全升级-降级并恢复本地图谱缓存: backlog
+  5-4-验证平台与原生-abi-矩阵: backlog
+  5-5-验证-vs-code-宿主兼容性: backlog
+  5-6-验证性能与长期资源预算: backlog
+  5-7-验证安装-升级与缓存恢复矩阵: backlog
+  5-8-生成可复现-payload-与-sbom: backlog
+  5-9-组装一致且完整的-release-set: backlog
+  5-10-建立发布信任包并签署候选: backlog
+  5-11-建立版本化产品验证与发布适用性合同: backlog
+  5-12-审计完整候选并执行-go-no-go: backlog
+  epic-5-retrospective: optional

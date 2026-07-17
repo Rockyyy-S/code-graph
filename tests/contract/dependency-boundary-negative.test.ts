@@ -1,0 +1,143 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  checkDependencyBoundaries,
+  formatBoundaryViolation,
+} from "../../scripts/architecture/check-dependency-boundaries.mjs";
+
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
+
+async function createRepository(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "codegraph-boundary-fixture-"));
+  temporaryRoots.push(root);
+  return root;
+}
+
+async function addWorkspace(
+  root: string,
+  relativePath: string,
+  name: string,
+  role: string,
+  dependencies: Record<string, string> = {},
+  source = "export {};\n",
+): Promise<void> {
+  const workspaceRoot = path.join(root, ...relativePath.split("/"));
+  await mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await writeFile(
+    path.join(workspaceRoot, "package.json"),
+    JSON.stringify({
+      codegraph: { role },
+      dependencies,
+      name,
+      private: true,
+      type: "module",
+    }),
+    "utf8",
+  );
+  await writeFile(path.join(workspaceRoot, "src/index.ts"), source, "utf8");
+}
+
+async function expectRule(root: string, rule: string): Promise<void> {
+  const violations = await checkDependencyBoundaries(root);
+  const matching = violations.filter((violation) => violation.rule === rule);
+
+  expect(matching.length).toBeGreaterThan(0);
+  for (const violation of matching) {
+    const formatted = formatBoundaryViolation(violation);
+    expect(violation.relativePath).not.toMatch(/^[A-Za-z]:/);
+    expect(violation.suggestion.length).toBeGreaterThan(10);
+    expect(formatted).toContain("Fix:");
+    expect(formatted).not.toContain(root);
+  }
+}
+
+describe("dependency boundary negative paths", () => {
+  it("rejects domain importing another project package", async () => {
+    const root = await createRepository();
+    await addWorkspace(root, "packages/contracts", "@codegraph/contracts", "contracts");
+    await addWorkspace(
+      root,
+      "packages/domain",
+      "@codegraph/domain",
+      "domain",
+      { "@codegraph/contracts": "workspace:*" },
+      'import "@codegraph/contracts";\n',
+    );
+
+    await expectRule(root, "dependency-direction");
+  });
+
+  it("rejects application importing an adapter", async () => {
+    const root = await createRepository();
+    await addWorkspace(
+      root,
+      "packages/adapters/store-sqlite",
+      "@codegraph/adapter-store-sqlite",
+      "adapter",
+    );
+    await addWorkspace(
+      root,
+      "packages/application",
+      "@codegraph/application",
+      "application",
+      { "@codegraph/adapter-store-sqlite": "workspace:*" },
+      'import "@codegraph/adapter-store-sqlite";\n',
+    );
+
+    await expectRule(root, "dependency-direction");
+  });
+
+  it("rejects a core package reverse-importing an adapter", async () => {
+    const root = await createRepository();
+    await addWorkspace(
+      root,
+      "packages/adapters/git-local",
+      "@codegraph/adapter-git-local",
+      "adapter",
+    );
+    await addWorkspace(
+      root,
+      "packages/domain",
+      "@codegraph/domain",
+      "domain",
+      { "@codegraph/adapter-git-local": "workspace:*" },
+      'import "@codegraph/adapter-git-local";\n',
+    );
+
+    await expectRule(root, "dependency-direction");
+  });
+
+  it("rejects adapter composition outside graph-service", async () => {
+    const root = await createRepository();
+    await addWorkspace(
+      root,
+      "packages/adapters/analyzer-typescript",
+      "@codegraph/adapter-analyzer-typescript",
+      "adapter",
+    );
+    await addWorkspace(
+      root,
+      "apps/cli",
+      "@codegraph/cli",
+      "client-app",
+      { "@codegraph/adapter-analyzer-typescript": "workspace:*" },
+    );
+
+    await expectRule(root, "dependency-direction");
+  });
+
+  it("rejects a generic utils workspace", async () => {
+    const root = await createRepository();
+    await addWorkspace(root, "packages/utils", "@codegraph/utils", "domain");
+
+    await expectRule(root, "no-generic-utils");
+  });
+});

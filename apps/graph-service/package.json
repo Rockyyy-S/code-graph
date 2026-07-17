@@ -1,0 +1,26 @@
+{
+  "name": "@codegraph/graph-service",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "codegraph": {
+    "role": "composition-root"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "type": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@codegraph/adapter-analyzer-typescript": "workspace:*",
+    "@codegraph/adapter-git-local": "workspace:*",
+    "@codegraph/adapter-store-sqlite": "workspace:*",
+    "@codegraph/application": "workspace:*",
+    "@codegraph/contracts": "workspace:*"
+  }
+}
