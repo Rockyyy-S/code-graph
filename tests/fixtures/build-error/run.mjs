@@ -8,7 +8,7 @@ try {
     platform: "node",
   });
 } catch (error) {
-  // The fixture must propagate esbuild's real resolution failure to the caller.
+  /** 测试夹具必须将 esbuild 的真实解析失败传播给调用方。 */
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 }

@@ -1,2 +1,4 @@
-// Story 1.1 reserves this package as the sole composition root without starting a service.
+/**
+ * @file 本用户故事将此包保留为唯一组合根，但不启动服务。
+ */
 export {};

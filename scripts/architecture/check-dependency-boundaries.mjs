@@ -19,6 +19,16 @@ const dependencyFields = [
   "optionalDependencies",
   "peerDependencies",
 ];
+const externalDependencyAllowlistByRole = new Map([
+  ["domain", new Set()],
+  ["application", new Set()],
+  ["contracts", new Set()],
+  ["service-client", new Set()],
+  ["adapter", new Set()],
+  ["composition-root", new Set()],
+  ["client-app", new Set(["@types/vscode", "esbuild", "typescript"])],
+  ["renderer-app", new Set()],
+]);
 
 function toPosix(relativePath) {
   return relativePath.split(path.sep).join("/");
@@ -62,8 +72,15 @@ function extractModuleSpecifiers(sourceFile) {
     ) {
       specifiers.push(node.moduleSpecifier.text);
     } else if (
+      ts.isImportEqualsDeclaration(node) &&
+      ts.isExternalModuleReference(node.moduleReference) &&
+      node.moduleReference.expression &&
+      ts.isStringLiteralLike(node.moduleReference.expression)
+    ) {
+      specifiers.push(node.moduleReference.expression.text);
+    } else if (
       ts.isCallExpression(node) &&
-      node.arguments.length === 1 &&
+      node.arguments.length >= 1 &&
       ts.isStringLiteralLike(node.arguments[0]) &&
       (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
         (ts.isIdentifier(node.expression) && node.expression.text === "require"))
@@ -77,14 +94,14 @@ function extractModuleSpecifiers(sourceFile) {
   return specifiers;
 }
 
-function dependencyNames(manifest) {
-  const names = new Set();
+function dependencyEntries(manifest) {
+  const entries = [];
   for (const field of dependencyFields) {
-    for (const name of Object.keys(manifest?.[field] ?? {})) {
-      names.add(name);
+    for (const [name, specifier] of Object.entries(manifest?.[field] ?? {})) {
+      entries.push({ field, name, specifier });
     }
   }
-  return names;
+  return entries;
 }
 
 function workspaceForSpecifier(specifier, sourceFile, workspacesByName, workspaces) {
@@ -218,11 +235,26 @@ export async function checkDependencyBoundaries(root) {
 
   for (const workspace of workspaces) {
     const manifestPath = `${workspace.relativePath}/package.json`;
-    const declaredDependencies = dependencyNames(workspace.manifest);
+    const dependencyEntriesForWorkspace = dependencyEntries(workspace.manifest);
+    const declaredDependencies = new Set(
+      dependencyEntriesForWorkspace.map(({ name }) => name),
+    );
+    const externalAllowlist =
+      externalDependencyAllowlistByRole.get(workspace.role) ?? new Set();
 
-    for (const dependencyName of declaredDependencies) {
+    for (const { field, name: dependencyName, specifier } of dependencyEntriesForWorkspace) {
       const target = workspacesByName.get(dependencyName);
       if (target) {
+        if (specifier !== "workspace:*") {
+          violations.push(
+            createViolation(
+              manifestPath,
+              "workspace-dependency-protocol",
+              `${dependencyName} must use workspace:* instead of '${String(specifier)}'.`,
+              `set ${field}.${dependencyName} to 'workspace:*' so the checked workspace is the installed workspace`,
+            ),
+          );
+        }
         if (!isDependencyAllowed(workspace.role, target.role)) {
           violations.push(
             createViolation(
@@ -233,6 +265,15 @@ export async function checkDependencyBoundaries(root) {
             ),
           );
         }
+      } else if (typeof specifier === "string" && specifier.startsWith("workspace:")) {
+        violations.push(
+          createViolation(
+            manifestPath,
+            "workspace-dependency-alias",
+            `${dependencyName} aliases a workspace package through '${specifier}'.`,
+            "declare the target workspace by its canonical package name with workspace:*",
+          ),
+        );
       } else if (dependencyName.startsWith("@codegraph/")) {
         violations.push(
           createViolation(
@@ -240,6 +281,15 @@ export async function checkDependencyBoundaries(root) {
             "unknown-workspace-dependency",
             `${dependencyName} is declared but no matching workspace was discovered.`,
             "add the missing workspace under a covered pnpm root or remove the stale dependency",
+          ),
+        );
+      } else if (!externalAllowlist.has(dependencyName)) {
+        violations.push(
+          createViolation(
+            manifestPath,
+            "external-dependency-allowlist",
+            `${dependencyName} is not allowlisted for the ${workspace.role} role.`,
+            "update the architecture-owned role allowlist before introducing this external dependency",
           ),
         );
       }

@@ -1,2 +1,4 @@
-// Git behavior is out of scope for Story 1.1; only the adapter responsibility is reserved.
+/**
+ * @file Git 行为不属于本用户故事范围；此处仅保留适配器职责。
+ */
 export {};

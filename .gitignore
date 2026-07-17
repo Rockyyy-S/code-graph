@@ -1,4 +1,6 @@
 node_modules/
+.env
+.env.*
 dist/
 build/
 out/
@@ -8,4 +10,4 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
-
+.history/

@@ -1,2 +1,4 @@
-// Story 1.1 creates no product UI; this module exists only to validate the renderer boundary.
+/**
+ * @file 本用户故事不创建产品 UI；此模块仅用于验证渲染器边界。
+ */
 export {};

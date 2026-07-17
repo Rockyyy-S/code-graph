@@ -7,6 +7,13 @@ const workspaceGroups = [
   { directory: "packages/adapters", kind: "adapter" },
 ];
 
+/**
+ * 列出目录中的直接子目录并按名称排序。
+ *
+ * 目录不存在时返回空列表；其他读取错误继续向调用方抛出。
+ *
+ * 参数 `absoluteDirectory` 是要扫描的绝对目录；返回排序后的直接子目录名称。
+ */
 async function listDirectories(absoluteDirectory) {
   try {
     return (await readdir(absoluteDirectory, { withFileTypes: true }))
@@ -21,6 +28,13 @@ async function listDirectories(absoluteDirectory) {
   }
 }
 
+/**
+ * 发现仓库中受支持的应用、核心包和适配器工作区。
+ *
+ * `packages/adapters` 仅作为分组目录；工作区缺少 package.json 时保留条目并将 manifest 设为 null。
+ *
+ * 参数 `repositoryRoot` 是仓库根目录；返回按配置分组和目录名称稳定排序的工作区描述列表。
+ */
 export async function discoverWorkspaces(repositoryRoot) {
   const workspaces = [];
 
@@ -29,7 +43,6 @@ export async function discoverWorkspaces(repositoryRoot) {
     const names = await listDirectories(absoluteGroup);
 
     for (const name of names) {
-      // packages/adapters is a grouping directory, not an additional nested workspace.
       if (group.excludedNames?.has(name)) {
         continue;
       }

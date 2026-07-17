@@ -26,15 +26,15 @@ async function createValidContractFixture(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "codegraph-contract-fixture-"));
   temporaryRoots.push(root);
   const scripts = Object.fromEntries(
-    [
-      "type",
-      "lint",
-      "unit",
-      "build",
-      "contract",
-      "dependency-boundary",
-      "basic-security",
-    ].map((name) => [name, `node ${name}.mjs`]),
+    Object.entries({
+      "basic-security": "node scripts/security/check-basic-security.mjs",
+      build: "node scripts/quality/run-workspace-script.mjs build",
+      contract: "vitest run --config vitest.contract.config.ts",
+      "dependency-boundary": "node scripts/architecture/check-dependency-boundaries.mjs",
+      lint: "eslint . --max-warnings=0 --no-warn-ignored --format ./scripts/quality/relative-eslint-formatter.mjs && node scripts/quality/check-test-markers.mjs",
+      type: "node scripts/quality/run-workspace-script.mjs type && tsc --noEmit -p tsconfig.quality.json",
+      unit: "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
+    }),
   );
 
   await writeJson(root, "package.json", {
@@ -95,6 +95,17 @@ describe("repository contract negative paths", () => {
     expectPortableViolation(violations, "root-script-contract");
   });
 
+  it("rejects a root command replaced by a no-op", async () => {
+    const root = await createValidContractFixture();
+    const manifest = await readRootManifest(root);
+    (manifest.scripts as Record<string, string>).type = 'node -e "process.exit(0)"';
+    await writeJson(root, "package.json", manifest);
+
+    const violations = await validateRepositoryContract(root);
+
+    expectPortableViolation(violations, "root-script-contract");
+  });
+
   it("rejects toolchain version drift", async () => {
     const root = await createValidContractFixture();
     const manifest = await readRootManifest(root);
@@ -115,6 +126,19 @@ describe("repository contract negative paths", () => {
     const violations = await validateRepositoryContract(root);
 
     expectPortableViolation(violations, "undiscovered-workspace");
+  });
+
+  it("rejects additional pnpm workspace roots", async () => {
+    const root = await createValidContractFixture();
+    await writeFile(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n  - 'packages/*'\n  - 'packages/adapters/*'\n  - 'tools/*'\n",
+      "utf8",
+    );
+
+    const violations = await validateRepositoryContract(root);
+
+    expectPortableViolation(violations, "workspace-roots");
   });
 
   it("rejects a lower VS Code engine floor", async () => {

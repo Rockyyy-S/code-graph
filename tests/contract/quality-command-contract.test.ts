@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 import { validateRepositoryContract } from "../../scripts/contracts/validate-repository-contract.mjs";
 
@@ -44,6 +45,23 @@ describe("real root quality commands", () => {
     expect(contractConfig).toContain("passWithNoTests: false");
     expect(unitConfig).toContain("tests/fixtures/**");
     expect(contractConfig).toContain("tests/fixtures/**");
+    expect(unitConfig).toContain("apps/**/*");
+    expect(unitConfig).toContain("packages/**/*");
+    expect(unitConfig).toContain("fail-on-skipped-reporter");
+  });
+
+  it("applies lint rules to product JavaScript and TSX", async () => {
+    const eslint = new ESLint({ cwd: repositoryRoot });
+
+    const extensionBuildConfig = await eslint.calculateConfigForFile(
+      "apps/extension/esbuild.mjs",
+    );
+    const webviewTsxConfig = await eslint.calculateConfigForFile(
+      "apps/webview/src/example.tsx",
+    );
+
+    expect(extensionBuildConfig?.rules?.["no-debugger"]).toBeDefined();
+    expect(webviewTsxConfig?.rules?.["@typescript-eslint/no-explicit-any"]).toBeDefined();
   });
 
   it("checks focused, skipped and todo tests outside isolated fixtures", async () => {

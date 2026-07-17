@@ -1,2 +1,4 @@
-// Story 1.1 establishes only the CLI package boundary; public commands arrive in later stories.
+/**
+ * @file 本用户故事仅建立 CLI 包边界；公共命令由后续所属用户故事实现。
+ */
 export {};

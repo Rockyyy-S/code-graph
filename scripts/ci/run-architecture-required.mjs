@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 export const QUALITY_GATES = [
   "type",
@@ -16,11 +17,22 @@ function defaultCommands() {
   if (!packageManagerCli) {
     return null;
   }
-  return QUALITY_GATES.map((gate) => ({
-    args: [packageManagerCli, gate],
-    command: process.execPath,
-    gate,
-  }));
+  const repositoryContract = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../contracts/validate-repository-contract.mjs",
+  );
+  return [
+    {
+      args: [repositoryContract],
+      command: process.execPath,
+      gate: "repository-contract-preflight",
+    },
+    ...QUALITY_GATES.map((gate) => ({
+      args: [packageManagerCli, gate],
+      command: process.execPath,
+      gate,
+    })),
+  ];
 }
 
 export function runArchitectureRequired(commands = defaultCommands(), options = {}) {

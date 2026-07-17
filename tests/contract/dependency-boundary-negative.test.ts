@@ -134,6 +134,49 @@ describe("dependency boundary negative paths", () => {
     await expectRule(root, "dependency-direction");
   });
 
+  it("rejects third-party dependencies that are not allowlisted for a role", async () => {
+    const root = await createRepository();
+    await addWorkspace(
+      root,
+      "packages/domain",
+      "@codegraph/domain",
+      "domain",
+      { vscode: "1.125.0" },
+      'import "vscode";\n',
+    );
+
+    await expectRule(root, "external-dependency-allowlist");
+  });
+
+  it("rejects workspace aliases and non-workspace protocols for internal packages", async () => {
+    const root = await createRepository();
+    await addWorkspace(root, "packages/domain", "@codegraph/domain", "domain");
+    await addWorkspace(
+      root,
+      "packages/application",
+      "@codegraph/application",
+      "application",
+      {
+        "@codegraph/domain": "npm:@codegraph/domain@0.0.0",
+        "domain-alias": "workspace:@codegraph/domain@*",
+      },
+    );
+
+    await expectRule(root, "workspace-dependency-protocol");
+    await expectRule(root, "workspace-dependency-alias");
+  });
+
+  it.each([
+    'import contracts = require("@codegraph/contracts");\nvoid contracts;\n',
+    'void import("@codegraph/contracts", { with: { type: "json" } });\n',
+  ])("rejects forbidden imports expressed with additional TypeScript syntax", async (source) => {
+    const root = await createRepository();
+    await addWorkspace(root, "packages/contracts", "@codegraph/contracts", "contracts");
+    await addWorkspace(root, "packages/domain", "@codegraph/domain", "domain", {}, source);
+
+    await expectRule(root, "dependency-direction");
+  });
+
   it("rejects a generic utils workspace", async () => {
     const root = await createRepository();
     await addWorkspace(root, "packages/utils", "@codegraph/utils", "domain");
