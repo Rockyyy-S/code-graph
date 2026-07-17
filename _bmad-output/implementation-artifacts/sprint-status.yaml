@@ -1,5 +1,5 @@
 # generated: 2026-07-16T17:38:39.3996805+08:00
-# last_updated: 2026-07-16T18:35:32+08:00
+# last_updated: 2026-07-17T10:38:42+08:00
 # project: bmad
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - 回顾产生的行动项写入 action_items，冲刺状态会显示未完成项
 
 generated: 2026-07-16T17:38:39.3996805+08:00
-last_updated: 2026-07-16T18:35:32+08:00
+last_updated: 2026-07-17T10:38:42+08:00
 project: bmad
 project_key: NOKEY
 tracking_system: file-system
@@ -49,7 +49,7 @@ story_location: _bmad-output/implementation-artifacts
 
 development_status:
   epic-1: in-progress
-  1-1-建立仓库模板-依赖边界与最小真实-ci: in-progress
+  1-1-建立仓库模板-依赖边界与最小真实-ci: review
   1-2-启动空-graph-service-并完成协议握手: backlog
   1-3-强化-provider-阻断与规划双向追踪门禁: backlog
   1-4-安全初始化首次图谱与最小存储: backlog
