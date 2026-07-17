@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -58,10 +57,9 @@ describe("isolated real failure fixtures", () => {
 
   it("returns non-zero for an esbuild resolution failure", () => {
     const fixtureRoot = path.join(repositoryRoot, "tests/fixtures/build-error");
-    const outputPath = path.join(tmpdir(), "codegraph-build-error-fixture.js");
     const result = runNodeModule(
-      "node_modules/esbuild/bin/esbuild",
-      ["src/index.ts", "--bundle", `--outfile=${outputPath}`, "--platform=node"],
+      "tests/fixtures/build-error/run.mjs",
+      [],
       fixtureRoot,
     );
 
