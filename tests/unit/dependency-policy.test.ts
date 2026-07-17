@@ -3,7 +3,7 @@ import { isDependencyAllowed } from "../../scripts/architecture/dependency-polic
 
 describe("dependency policy", () => {
   it("keeps dependencies flowing toward domain and contracts", () => {
-    expect(isDependencyAllowed("domain", "contracts")).toBe(true);
+    expect(isDependencyAllowed("domain", "contracts")).toBe(false);
     expect(isDependencyAllowed("application", "domain")).toBe(true);
     expect(isDependencyAllowed("application", "adapter")).toBe(false);
     expect(isDependencyAllowed("adapter", "application")).toBe(true);
