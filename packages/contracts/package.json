@@ -15,5 +15,8 @@
   "scripts": {
     "type": "tsc -b tsconfig.build.json --pretty false",
     "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "ajv": "8.20.0"
   }
 }

@@ -17,6 +17,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@codegraph/contracts": "workspace:*"
+    "@codegraph/contracts": "workspace:*",
+    "vscode-jsonrpc": "9.0.1"
   }
 }

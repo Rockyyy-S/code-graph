@@ -12,6 +12,9 @@
       "default": "./dist/index.js"
     }
   },
+  "bin": {
+    "codegraph-graph-service": "./dist/main.js"
+  },
   "scripts": {
     "type": "tsc -b tsconfig.build.json --pretty false",
     "build": "tsc -p tsconfig.build.json"
@@ -21,6 +24,7 @@
     "@codegraph/adapter-git-local": "workspace:*",
     "@codegraph/adapter-store-sqlite": "workspace:*",
     "@codegraph/application": "workspace:*",
-    "@codegraph/contracts": "workspace:*"
+    "@codegraph/contracts": "workspace:*",
+    "vscode-jsonrpc": "9.0.1"
   }
 }
