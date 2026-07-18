@@ -5,7 +5,7 @@ created_at: 2026-07-18T12:41:36+08:00
 
 # Story 1.2: 启动空 graph-service 并完成协议握手
 
-Status: in-progress
+Status: review
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git 与技术版本分析；实现完成状态仍由 dev-story 和独立代码审查流程决定。 -->
 
@@ -104,14 +104,14 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
   - [x] 测试中的伪 token 仅放 tests 目录或运行时生成，避免 basic-security 将测试材料误判为产品凭据。
   - [x] 测试保持 Red → Green → Refactor；禁止 skip/todo/only、空断言、passWithNoTests 或恒成功脚本。
 
-- [ ] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
+- [x] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
   - [x] 在 packages/contracts 引入架构锁定的 Ajv 8.20.0，在 packages/service-client 和 apps/graph-service 引入 vscode-jsonrpc 9.0.1，并更新 pnpm-lock.yaml；不要提前安装 better-sqlite3 或 Analyzer 依赖。
   - [x] 更新 scripts/architecture/check-dependency-boundaries.mjs 的角色级第三方 allowlist，只允许 contracts 使用 Ajv、service-client 与 composition-root 使用 vscode-jsonrpc；补充正/负向边界测试，保持其他角色默认拒绝。
   - [x] package.json 内部 workspace 依赖继续使用 workspace:*，tsconfig.build.json project references 与 manifest 依赖完全一致；不得改写既有 type/build 脚本。
   - [x] 更新 docs/repository-layout.md，并新增协议控制面说明，记录 owner、IPC、发现、握手、空状态、错误码和范围外能力；文档路径使用仓库相对路径。
   - [x] 复用现有 .github/workflows/architecture-required.yml 和稳定 check 名；不得增加 path filter、continue-on-error 或 Story 1.3 的 ci/quality-gates.v1.yaml。
   - [x] 使用仓库锁定的 Node 24.18.0、pnpm 11.12.0 执行 pnpm install --frozen-lockfile 和 pnpm architecture-required，确保七条门禁全部真实通过。
-  - [ ] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
+  - [x] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
 
 ## Dev Notes
 
@@ -325,10 +325,11 @@ GPT-5 Codex
 - 2026-07-18：Task 3 RED，服务状态与真实 IPC 合同测试因实现缺失失败；实现后单元 12/12、合同 4/4 通过，graph-service build 通过。
 - 2026-07-18：Task 4 RED，共享连接、启动器和 trust gate 测试因实现缺失失败；实现后新增测试 3/3 通过，contracts/service-client 类型检查通过。
 - 2026-07-18：Task 5 在 Node 24.18.0 / Windows 上通过 34/34 单元测试与 16/16 合同测试；真实双客户端进程竞争复用同一 Named Pipe 实例。
-- 2026-07-18：Task 6 边界合同先失败后通过；`pnpm install --frozen-lockfile` 与最终 `pnpm architecture-required` 全部通过（unit 39/39，contract 73/73）。
+- 2026-07-18：Task 6 边界合同先失败后通过；`pnpm install --frozen-lockfile` 与最终 `pnpm architecture-required` 全部通过（unit 40/40，contract 73/73）。
 - 2026-07-18：HALT 候选 Provider 证据：尚无包含本实现的候选完整 commit 与 GitHub Actions 运行链接，未伪造或复用 Story 1.1 证据。
 - 2026-07-18：Hosted run 29635748123 在 Ubuntu unit 阶段暴露 UDS 路径过长；改用 144-bit key 前缀目录并保留完整 key metadata 校验。
 - 2026-07-18：完整合同并行负载暴露子进程启动界限过短；按单测试策略调整启动与 subprocess 超时，不放宽全局配置。
+- 2026-07-18：候选 8ca4166925cae57aea25b957ce43929a05caf267 的 hosted run 29636223822 全部门禁通过。
 
 ### Completion Notes List
 
@@ -338,7 +339,8 @@ GPT-5 Codex
 - Task 3：交付可执行 graph-service、vscode-jsonrpc 本机 IPC、权威 absent 状态、受控 shutdown 与最小安全日志。
 - Task 4：交付共享 service-client 公共 API、受信任 spawn 启动器、双客户端复用与无副作用 Workspace Trust 门禁。
 - Task 5：真实 Windows Named Pipe 结果为两个独立客户端进程获得相同 PID、serviceInstanceId、statusEpoch 和唯一 writer；第三客户端成功复用并 shutdown。
-- Task 6（本地部分）：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装和七门禁已完成；Hosted Provider 证据待候选提交。
+- Task 6（本地部分）：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装和七门禁已完成。
+- Task 6：首次 hosted 失败真实阻断，跨平台修复后候选提交的 architecture-required 全绿，Provider 证据已回填。
 
 ### File List
 
@@ -403,3 +405,4 @@ GPT-5 Codex
 - 2026-07-18：完成 Task 4 共享 service-client、受信任启动器、连接复用与 trust gate。
 - 2026-07-18：完成 Task 5 真实协议、安全路径与 Windows 多进程单实例竞争验证。
 - 2026-07-18：完成 Task 6 本地依赖、文档与七门禁；Hosted Provider 候选证据保持阻塞。
+- 2026-07-18：候选 hosted required check 通过，完成 Task 6 并将 Story 状态更新为 review。
