@@ -11,3 +11,7 @@ coverage/
 .DS_Store
 Thumbs.db
 .history/
+_bmad/
+.agents/
+.github/
+**/graphify-out/
