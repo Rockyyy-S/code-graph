@@ -60,13 +60,13 @@ export function createGraphServiceProcessLauncher(
         stdio: "ignore",
         windowsHide: true,
       });
-      child.unref();
       await new Promise<void>((resolve, reject) => {
         child.once("error", () =>
           reject(createServiceClientError("SERVICE_ENDPOINT_START_FAILED")),
         );
         child.once("spawn", resolve);
       });
+      child.unref();
     },
   };
 }

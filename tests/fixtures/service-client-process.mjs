@@ -18,7 +18,7 @@ const client = await connectToGraphService({
   indexingRoot: config.indexingRoot,
   launcher,
   pollIntervalMs: 10,
-  startTimeoutMs: 3_000,
+  startTimeoutMs: 10_000,
   trust: { isTrusted: true },
 });
 const status = await client.status();

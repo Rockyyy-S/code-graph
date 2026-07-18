@@ -51,7 +51,7 @@ describe("real graph-service process", () => {
         indexingRoot,
         launcher,
         pollIntervalMs: 10,
-        startTimeoutMs: 3_000,
+        startTimeoutMs: 10_000,
         trust: { isTrusted: true },
       });
       clients.push(controller);

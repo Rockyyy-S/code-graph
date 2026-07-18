@@ -45,6 +45,18 @@ describe("workspace endpoint", () => {
     );
   });
 
+  it("fits the CI temporary cache shape within the POSIX UDS limit", () => {
+    const paths = createWorkspacePaths(workspaceKey, {
+      cacheRoot: "/tmp/codegraph-instance-123456",
+      platform: "linux",
+      randomBytes: () => Buffer.from("04".repeat(16), "hex"),
+    });
+
+    expect(Buffer.byteLength(paths.endpoint)).toBeLessThanOrEqual(
+      MAX_UNIX_SOCKET_BYTES,
+    );
+  });
+
   it("fails closed when a configured cache root cannot fit a UDS", () => {
     expect(() =>
       createWorkspacePaths(workspaceKey, {

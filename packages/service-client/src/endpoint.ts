@@ -41,7 +41,10 @@ export function createWorkspacePaths(
   const pathApi = platform === "win32" ? path.win32 : path.posix;
   const cacheRoot =
     options.cacheRoot ?? defaultCacheRoot(platform, options.environment ?? process.env);
-  const compactWorkspaceKey = Buffer.from(workspaceKey, "hex").toString("base64url");
+  /** 目录名使用 144-bit key 前缀控制 UDS 长度；完整 key 仍由 metadata 校验。 */
+  const compactWorkspaceKey = Buffer.from(workspaceKey, "hex")
+    .subarray(0, 18)
+    .toString("base64url");
   const workspaceDirectory = pathApi.join(
     cacheRoot,
     "codegraph",

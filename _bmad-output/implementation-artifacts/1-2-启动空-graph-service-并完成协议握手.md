@@ -327,6 +327,8 @@ GPT-5 Codex
 - 2026-07-18：Task 5 在 Node 24.18.0 / Windows 上通过 34/34 单元测试与 16/16 合同测试；真实双客户端进程竞争复用同一 Named Pipe 实例。
 - 2026-07-18：Task 6 边界合同先失败后通过；`pnpm install --frozen-lockfile` 与最终 `pnpm architecture-required` 全部通过（unit 39/39，contract 73/73）。
 - 2026-07-18：HALT 候选 Provider 证据：尚无包含本实现的候选完整 commit 与 GitHub Actions 运行链接，未伪造或复用 Story 1.1 证据。
+- 2026-07-18：Hosted run 29635748123 在 Ubuntu unit 阶段暴露 UDS 路径过长；改用 144-bit key 前缀目录并保留完整 key metadata 校验。
+- 2026-07-18：完整合同并行负载暴露子进程启动界限过短；按单测试策略调整启动与 subprocess 超时，不放宽全局配置。
 
 ### Completion Notes List
 
@@ -376,6 +378,7 @@ GPT-5 Codex
 - pnpm-workspace.yaml
 - scripts/architecture/check-dependency-boundaries.mjs
 - tests/contract/dependency-boundary-negative.test.ts
+- tests/contract/failure-propagation.test.ts
 - tests/contract/graph-service-control.test.ts
 - tests/contract/graph-service-process.test.ts
 - tests/contract/service-client-control.test.ts

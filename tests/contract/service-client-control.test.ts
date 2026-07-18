@@ -38,7 +38,7 @@ describe("shared service-client control API", () => {
       indexingRoot,
       launcher: { start },
       pollIntervalMs: 5,
-      startTimeoutMs: 1_000,
+      startTimeoutMs: 5_000,
       trust: { isTrusted: true },
     } as const;
 
