@@ -1,18 +1,18 @@
-# Story 1.2 Provider 阻断证据
+# Story 1.2 Provider 证据
 
-> 2026-07-20 状态：下方 Hosted 运行仅覆盖首轮候选 `8ca4166...`。
-> 第三轮代码审查修复已在本地通过 `architecture-required`（unit 74/74、
-> contract 78/78），但尚未形成新的候选完整提交与 Hosted required-check。
-> 因此本文当前不是最新工作区的合并证据，Story 继续保持 `in-progress`。
+> 2026-07-20 状态：第三轮复审最终候选
+> `56f4e6385ee2d54f4b31f07c02c07969bc571e54` 已取得同 SHA 的 Hosted
+> `architecture-required` 成功结果。本文是 Story 1.2 当前实现候选的合并证据。
 
 ## 候选提交
 
 - 实施基线：`40acc281ee492f86f8dcdedcdd66926d37810e7e`
-- 候选完整提交：`8ca4166925cae57aea25b957ce43929a05caf267`
+- 第三轮复审实现提交：`3c6bf8cfe4278e3608ed72cd83307e22af98640e`
+- 最终候选完整提交：`56f4e6385ee2d54f4b31f07c02c07969bc571e54`
 - 稳定 required check：`architecture-required`
 
-候选提交包含 Story 1.2 产品实现、跨平台修复与真实测试。本文没有复用 Story 1.1 的
-运行结果替代本 Story 候选证据。
+最终候选包含 Story 1.2 产品实现、三轮代码审查修复、跨平台生命周期修复与真实测试。
+本文没有复用 Story 1.1 或旧候选的运行结果替代当前候选证据。
 
 ## 本地验收
 
@@ -21,9 +21,9 @@
 - `pnpm architecture-required`：通过
 - `type`：通过
 - `lint`：通过
-- `unit`：40/40 通过
+- `unit`：74/74 通过
 - `build`：通过
-- `contract`：73/73 通过
+- `contract`：78/78 通过
 - `dependency-boundary`：通过
 - `basic-security`：通过
 - Windows Named Pipe：两个独立客户端进程复用同一 PID、serviceInstanceId、statusEpoch
@@ -32,13 +32,15 @@
 ## GitHub Provider 运行
 
 - Repository：`Rockyyy-S/code-graph`
-- 首次失败提交：`4b8e4cbde2eaf16f941cba8bbe5d5b3e51804152`
-- 首次失败运行：<https://github.com/Rockyyy-S/code-graph/actions/runs/29635748123>
-- 失败结论：Ubuntu unit 暴露 UDS 路径超限，required check exit 1 并阻止后续门禁。
-- 最终候选运行：<https://github.com/Rockyyy-S/code-graph/actions/runs/29636223822>
-- 最终结论：`PASSED`，稳定 check `architecture-required` 的全部七门禁成功。
+- 第三轮首次候选：`3c6bf8cfe4278e3608ed72cd83307e22af98640e`
+- 阻断运行：<https://github.com/Rockyyy-S/code-graph/actions/runs/29723702957>
+- 阻断结论：`FAILED`；Ubuntu unit 暴露 POSIX 测试夹具未先创建 endpoint 父目录，
+  后续 build、contract、dependency-boundary 与 basic-security 均被跳过。
+- 最终候选：`56f4e6385ee2d54f4b31f07c02c07969bc571e54`
+- 最终候选运行：<https://github.com/Rockyyy-S/code-graph/actions/runs/29724059158>
+- 最终结论：`PASSED`；type、lint、unit、build、contract、dependency-boundary 和
+  basic-security 全部成功。
 
-Story 1.1 已证明该 required check 的任一门禁失败都会阻止合并。本 Story 的首次 hosted
-运行也真实验证了该行为：unit 失败后 build、contract、dependency-boundary 与
-basic-security 均未执行。修复后的候选完整提交获得同名 hosted check 成功结果，满足
-进入独立代码审查的 Provider 证据要求。
+本轮首次 Hosted 运行真实验证了 required check 的阻断语义；修复后的最终候选获得同名
+Hosted check 成功结果。证据回填提交仍受 pull request 当前 HEAD 上同一 required check
+约束，不通过不得合并。

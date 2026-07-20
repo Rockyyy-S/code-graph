@@ -5,7 +5,7 @@ created_at: 2026-07-18T12:41:36+08:00
 
 # Story 1.2: 启动空 graph-service 并完成协议握手
 
-Status: in-progress
+Status: done
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git 与技术版本分析；实现完成状态仍由 dev-story 和独立代码审查流程决定。 -->
 
@@ -104,14 +104,14 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
   - [x] 测试中的伪 token 仅放 tests 目录或运行时生成，避免 basic-security 将测试材料误判为产品凭据。
   - [x] 测试保持 Red → Green → Refactor；禁止 skip/todo/only、空断言、passWithNoTests 或恒成功脚本。
 
-- [ ] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
+- [x] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
   - [x] 在 packages/contracts 引入架构锁定的 Ajv 8.20.0，在 packages/service-client 和 apps/graph-service 引入 vscode-jsonrpc 9.0.1，并更新 pnpm-lock.yaml；不要提前安装 better-sqlite3 或 Analyzer 依赖。
   - [x] 更新 scripts/architecture/check-dependency-boundaries.mjs 的角色级第三方 allowlist，只允许 contracts 使用 Ajv、service-client 与 composition-root 使用 vscode-jsonrpc；补充正/负向边界测试，保持其他角色默认拒绝。
   - [x] package.json 内部 workspace 依赖继续使用 workspace:*，tsconfig.build.json project references 与 manifest 依赖完全一致；不得改写既有 type/build 脚本。
   - [x] 更新 docs/repository-layout.md，并新增协议控制面说明，记录 owner、IPC、发现、握手、空状态、错误码和范围外能力；文档路径使用仓库相对路径。
   - [x] 复用现有 .github/workflows/architecture-required.yml 和稳定 check 名；不得增加 path filter、continue-on-error 或 Story 1.3 的 ci/quality-gates.v1.yaml。
   - [x] 使用仓库锁定的 Node 24.18.0、pnpm 11.12.0 执行 pnpm install --frozen-lockfile 和 pnpm architecture-required，确保七条门禁全部真实通过。
-  - [ ] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
+  - [x] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
 
 ### Review Findings
 
@@ -133,7 +133,7 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
 
 ### Review Findings（第二轮复审，2026-07-20）
 
-- [ ] [Review][Patch] [High] 当前工作区修复没有对应的候选提交与 Hosted `architecture-required` 证据，旧运行不能证明同一候选提交满足 AC5 [docs/ci/story-1-2-provider-evidence.md:6]
+- [x] [Review][Patch] [High] 当前工作区修复没有对应的候选提交与 Hosted `architecture-required` 证据，旧运行不能证明同一候选提交满足 AC5 [docs/ci/story-1-2-provider-evidence.md:6]
 - [x] [Review][Patch] [High] UDS `listen` 因路径已被占用而失败时仍无条件删除 endpoint，可破坏其他活动服务或普通文件 [apps/graph-service/src/server.ts:92]
 - [x] [Review][Patch] [High] 认证前的 JSON-RPC reader 没有帧头和正文大小上限，本地 IPC 客户端可用超大 `Content-Length` 耗尽服务内存 [apps/graph-service/src/server.ts:182]
 - [x] [Review][Patch] [High] 启动超时仅发送一次 `child.kill()` 且不等待退出，子进程在启动期也可无界吞掉终止信号，最终留下孤儿进程和 stale 发现证据 [packages/service-client/src/launcher.ts:113]
@@ -150,7 +150,7 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
 ### Review Findings（第三轮复审，2026-07-20）
 
 - [x] [Review][Patch] [High] 使用私有父子 IPC 取消通道执行跨平台优雅关闭和退出确认，仅在硬 deadline 后强杀；不再依赖 Windows `SIGTERM`，并显式处理 kill/close 失败 [packages/service-client/src/launcher.ts:135]
-- [ ] [Review][Patch] [High] AC5 当前仍无同候选提交 Hosted required-check，但 Task 6 及 Provider 证据子任务仍被错误勾选完成 [docs/ci/story-1-2-provider-evidence.md:3]
+- [x] [Review][Patch] [High] AC5 当前仍无同候选提交 Hosted required-check，但 Task 6 及 Provider 证据子任务仍被错误勾选完成 [docs/ci/story-1-2-provider-evidence.md:3]
 - [x] [Review][Patch] [High] 信号关闭时 `runtime.close()` 拒绝仍会清除强制终止计时器并移除信号处理，残留 listener/lock 可使进程永久存活 [apps/graph-service/src/main.ts:83]
 - [x] [Review][Patch] [High] RPC shutdown 全部清理重试失败后只设置 `process.exitCode=1`，活动 server 句柄仍可阻止退出 [apps/graph-service/src/server.ts:300]
 - [x] [Review][Patch] [High] 启动回滚重试耗尽或 bind 后清理失败时仍丢失 endpoint/lock 引用，且 `closeFailedBoundServer` 吞掉 server/UDS 清理错误 [apps/graph-service/src/instance-owner.ts:235]
@@ -383,6 +383,7 @@ GPT-5 Codex
 - 2026-07-18：代码审查 15 项修复先以 9 条定向失败路径进入 RED；修复后 `pnpm architecture-required` 全绿（unit 54/54，contract 76/76）。
 - 2026-07-20：第二轮复审 12 项本地修复完成 RED → GREEN；`pnpm architecture-required` 全绿（unit 64/64，contract 77/77），当前候选 Hosted 证据待生成。
 - 2026-07-20：第三轮复审采用私有父子 IPC 取消协议，12 项本地行动项完成 RED → GREEN；`pnpm architecture-required` 全绿（unit 74/74，contract 78/78）。
+- 2026-07-20：Hosted run 29723702957 在候选 `3c6bf8c` 上真实阻断 Linux POSIX 测试夹具错误；修复后候选 `56f4e6385ee2d54f4b31f07c02c07969bc571e54` 的 run 29724059158 七门禁全部通过。
 
 ### Completion Notes List
 
@@ -392,11 +393,11 @@ GPT-5 Codex
 - Task 3：交付可执行 graph-service、vscode-jsonrpc 本机 IPC、权威 absent 状态、受控 shutdown 与最小安全日志。
 - Task 4：交付共享 service-client 公共 API、受信任 spawn 启动器、双客户端复用与无副作用 Workspace Trust 门禁。
 - Task 5：真实 Windows Named Pipe 结果为两个独立客户端进程获得相同 PID、serviceInstanceId、statusEpoch 和唯一 writer；第三客户端成功复用并 shutdown。
-- Task 6（本地部分）：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装和七门禁已完成。
-- Task 6：首次 hosted 失败真实阻断，跨平台修复后候选提交的 architecture-required 全绿，Provider 证据已回填。
+- Task 6：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装、本地七门禁与 Hosted Provider 证据均已完成。
+- Task 6：Hosted 失败真实阻断后，最终候选 `56f4e63` 的 architecture-required 全绿，Provider 证据已回填。
 - Code Review：完成 deadline、启动错误传播、Schema 协商、实例身份、异常安全清理、信号窗口、测试孤儿进程与 JSDoc 约束修复，15/15 审查项关闭。
-- Code Review Round 2：本地代码与测试修复 12/12 完成；仅保留当前候选提交的 Hosted required-check 证据行动项。
-- Code Review Round 3：交付跨平台父子 IPC 取消、最终强制终止、fatal cleanup、认证前单帧排队、全链路 deadline 与 capability 门禁；当前仅剩 AC5 Hosted 证据。
+- Code Review Round 2：本地代码与测试修复 12/12 完成；最终候选的 Hosted required-check 已关闭遗留证据行动项。
+- Code Review Round 3：交付跨平台父子 IPC 取消、最终强制终止、fatal cleanup、认证前单帧排队、全链路 deadline 与 capability 门禁；全部行动项已关闭。
 
 ### File List
 
@@ -468,3 +469,4 @@ GPT-5 Codex
 - 2026-07-18：完成独立代码审查全部 15 项修复，最终本地七门禁通过并将 Story 状态更新为 done。
 - 2026-07-20：完成第二轮复审的 12 项本地修复，Hosted 候选证据未完成，Story 保持 in-progress。
 - 2026-07-20：完成第三轮复审的 12 项本地修复，当前候选 Hosted 证据未完成，Story 保持 in-progress。
+- 2026-07-20：候选 `56f4e6385ee2d54f4b31f07c02c07969bc571e54` 的 Hosted `architecture-required` run 29724059158 全绿，关闭 AC5 与全部复审 finding，Story 更新为 done。
