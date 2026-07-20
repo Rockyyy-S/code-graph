@@ -59,8 +59,9 @@ describe("bound IPC endpoint cleanup", () => {
       cacheRoot: root,
       platform: process.platform,
     });
-    await writeFile(paths.endpoint, "foreign-owner", "utf8");
+    // 日志初始化会创建受保护的 workspace 目录，冲突文件必须在目录就绪后写入。
     const logger = await createSafeLocalLogger(paths.workspaceDirectory);
+    await writeFile(paths.endpoint, "foreign-owner", "utf8");
     try {
       await expect(
         createBoundIpcEndpoint({
