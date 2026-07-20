@@ -66,4 +66,19 @@ describe("workspace identity", () => {
       }),
     ).rejects.toThrow(/仓库根目录/);
   });
+
+  it("accepts an in-repository subroot whose name begins with two dots", async () => {
+    const repositoryRoot = path.resolve("repo");
+    const indexingRoot = path.join(repositoryRoot, "..generated");
+
+    const result = await deriveWorkspaceIdentity(indexingRoot, {
+      gitIdentity: {
+        remoteUrl: "https://github.com/Org/Repo.git",
+        repositoryRoot,
+      },
+      realpath: async (input) => path.resolve(input),
+    });
+
+    expect(result.identity).toMatchObject({ kind: "git", subroot: "..generated" });
+  });
 });

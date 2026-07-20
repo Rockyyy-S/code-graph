@@ -98,4 +98,124 @@ describe("connect-first discovery", () => {
     ).rejects.toMatchObject({ code: "SERVICE_INSTANCE_CONFLICT" });
     expect(start).not.toHaveBeenCalled();
   });
+
+  it("enforces the deadline when connect never settles", async () => {
+    const paths = await createPaths();
+    const owner = await startOwner(paths);
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => new Promise<never>(() => undefined),
+        paths,
+        start: async () => undefined,
+        timeoutMs: 25,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+
+    await owner.close();
+  });
+
+  it("enforces the deadline when launcher start never settles", async () => {
+    const paths = await createPaths();
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        start: async () => new Promise<never>(() => undefined),
+        timeoutMs: 25,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+  });
+
+  it("does not sleep past the remaining discovery deadline", async () => {
+    const paths = await createPaths();
+    await mkdir(paths.workspaceDirectory, { recursive: true });
+    await writeFile(paths.lockPath, "starting", { mode: 0o600 });
+    const startedAt = Date.now();
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        pollIntervalMs: 500,
+        start: async () => undefined,
+        timeoutMs: 20,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+
+    expect(Date.now() - startedAt).toBeLessThan(200);
+  });
+
+  it.each([
+    ["timeout", { timeoutMs: Number.POSITIVE_INFINITY }],
+    ["poll interval", { pollIntervalMs: 0 }],
+  ])("rejects an invalid %s before entering discovery", async (_label, override) => {
+    const paths = await createPaths();
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        start: async () => undefined,
+        ...override,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("aborts an in-flight connection when the absolute deadline expires", async () => {
+    const paths = await createPaths();
+    const owner = await startOwner(paths);
+    let aborted = false;
+
+    await expect(
+      connectFirstOrStart({
+        connect: async (_record, _remainingMs, signal) =>
+          new Promise<never>((_resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              aborted = true;
+              reject(new Error("aborted"));
+            }, { once: true });
+          }),
+        paths,
+        probeDiscoveryState: async () => "ready",
+        readServiceDiscovery: async () => ({
+          metadata: owner.metadata,
+          sessionToken: owner.sessionToken,
+        }),
+        start: async () => undefined,
+        timeoutMs: 100,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+
+    expect(aborted).toBe(true);
+    await owner.close();
+  });
+
+  it("applies the absolute deadline to discovery probing", async () => {
+    const paths = await createPaths();
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        probeDiscoveryState: async () => new Promise<never>(() => undefined),
+        start: async () => undefined,
+        timeoutMs: 25,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+  });
+
+  it("rejects timeout values beyond the Node timer range", async () => {
+    const paths = await createPaths();
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        start: async () => undefined,
+        timeoutMs: 2_147_483_648,
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
 });

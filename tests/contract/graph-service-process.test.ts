@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  connectToGraphService,
   createGraphServiceProcessLauncher,
   type GraphServiceConnection,
 } from "../../packages/service-client/src/index.js";
+import { connectToGraphServiceWithCacheRootForTests } from "../../packages/service-client/src/connection.js";
 
 const roots: string[] = [];
 const clients: GraphServiceConnection[] = [];
@@ -30,36 +30,55 @@ describe("real graph-service process", () => {
       const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-process-cache-"));
       roots.push(indexingRoot, cacheRoot);
       const config = { cacheRoot, graphServiceEntry, indexingRoot };
-
-      const [first, second] = await Promise.all([
-        runClientProcess(workerEntry, config),
-        runClientProcess(workerEntry, config),
-      ]);
-
-      expect(first.pid).toBe(second.pid);
-      expect(first.serviceInstanceId).toBe(second.serviceInstanceId);
-      expect(first.statusEpoch).toBe(second.statusEpoch);
-      expect(first.endpointKind).toBe(process.platform === "win32" ? "named-pipe" : "unix-socket");
-
       const launcher = createGraphServiceProcessLauncher({
         args: [graphServiceEntry],
         command: process.execPath,
       });
-      const controller = await connectToGraphService({
-        cacheRoot,
-        clientVersion: "0.0.0-controller-test",
-        indexingRoot,
-        launcher,
-        pollIntervalMs: 10,
-        startTimeoutMs: 10_000,
-        trust: { isTrusted: true },
-      });
-      clients.push(controller);
-      expect(controller.metadata.pid).toBe(first.pid);
-      expect(controller.initializeResult.serviceStatus.serviceInstanceId).toBe(
-        first.serviceInstanceId,
-      );
-      await controller.shutdown();
+      let controller: GraphServiceConnection | null = null;
+      try {
+        const [first, second] = await Promise.all([
+          runClientProcess(workerEntry, config),
+          runClientProcess(workerEntry, config),
+        ]);
+
+        expect(first.pid).toBe(second.pid);
+        expect(first.serviceInstanceId).toBe(second.serviceInstanceId);
+        expect(first.statusEpoch).toBe(second.statusEpoch);
+        expect(first.endpointKind).toBe(
+          process.platform === "win32" ? "named-pipe" : "unix-socket",
+        );
+
+        controller = await connectToGraphServiceWithCacheRootForTests(
+          {
+            clientVersion: "0.0.0-controller-test",
+            indexingRoot,
+            launcher,
+            pollIntervalMs: 10,
+            startTimeoutMs: 10_000,
+            trust: { isTrusted: true },
+          },
+          cacheRoot,
+        );
+        expect(controller.metadata.pid).toBe(first.pid);
+        expect(controller.initializeResult.serviceStatus.serviceInstanceId).toBe(
+          first.serviceInstanceId,
+        );
+      } finally {
+        controller ??= await connectToGraphServiceWithCacheRootForTests(
+          {
+            clientVersion: "0.0.0-cleanup-test",
+            indexingRoot,
+            launcher,
+            pollIntervalMs: 10,
+            startTimeoutMs: 10_000,
+            trust: { isTrusted: true },
+          },
+          cacheRoot,
+        ).catch(() => null);
+        if (controller !== null) {
+          await controller.shutdown().catch(async () => controller?.close());
+        }
+      }
     },
     30_000,
   );
@@ -76,6 +95,7 @@ interface ProcessResult {
 async function runClientProcess(
   workerEntry: string,
   config: { cacheRoot: string; graphServiceEntry: string; indexingRoot: string },
+  timeoutMs = 15_000,
 ): Promise<ProcessResult> {
   const child = spawn(process.execPath, [workerEntry], {
     env: {
@@ -96,12 +116,72 @@ async function runClientProcess(
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
   });
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
+  let exitCode: number | null | undefined;
+  const exitPromise = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", resolve);
+    child.once("exit", (code) => {
+      exitCode = code;
+      resolve(code);
+    });
   });
-  if (exitCode !== 0) {
-    throw new Error(`独立客户端进程失败：${stderr.trim()}`);
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const completedCode = await Promise.race([
+      exitPromise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("独立客户端进程执行超时。")),
+          timeoutMs,
+        );
+      }),
+    ]);
+    if (completedCode !== 0) {
+      throw new Error(`独立客户端进程失败：${stderr.trim()}`);
+    }
+    return JSON.parse(stdout.trim()) as ProcessResult;
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+    if (exitCode === undefined) {
+      await killAndReap(child, exitPromise);
+    }
   }
-  return JSON.parse(stdout.trim()) as ProcessResult;
+}
+
+/** 终止挂起的测试 worker，并在升级强杀后有界等待 exit。 */
+async function killAndReap(
+  child: ReturnType<typeof spawn>,
+  exitPromise: Promise<number | null>,
+): Promise<void> {
+  child.kill("SIGTERM");
+  if (await waitForExit(exitPromise, 250)) {
+    return;
+  }
+  child.kill("SIGKILL");
+  if (!(await waitForExit(exitPromise, 250))) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    throw new Error("测试 worker 在强制终止后仍未退出。");
+  }
+}
+
+/** 在短界限内等待测试子进程退出。 */
+async function waitForExit(
+  exitPromise: Promise<number | null>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      exitPromise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }

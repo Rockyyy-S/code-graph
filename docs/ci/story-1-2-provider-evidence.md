@@ -1,5 +1,10 @@
 # Story 1.2 Provider 阻断证据
 
+> 2026-07-20 状态：下方 Hosted 运行仅覆盖首轮候选 `8ca4166...`。
+> 第三轮代码审查修复已在本地通过 `architecture-required`（unit 74/74、
+> contract 78/78），但尚未形成新的候选完整提交与 Hosted required-check。
+> 因此本文当前不是最新工作区的合并证据，Story 继续保持 `in-progress`。
+
 ## 候选提交
 
 - 实施基线：`40acc281ee492f86f8dcdedcdd66926d37810e7e`

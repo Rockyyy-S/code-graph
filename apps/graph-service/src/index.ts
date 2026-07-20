@@ -6,6 +6,7 @@ import type { ServiceInstancePaths } from "./instance-owner.js";
 
 /** graph-service 启动选项。 */
 export interface StartGraphServiceOptions {
+  forceTerminate?: (code: number) => void;
   paths: ServiceInstancePaths;
   platform?: NodeJS.Platform;
 }
@@ -22,7 +23,14 @@ export async function startGraphService(
   try {
     return await bootstrapServiceInstance({
       bindEndpoint: (endpoint, endpointKind) =>
-        createBoundIpcEndpoint({ endpoint, endpointKind, logger }),
+        createBoundIpcEndpoint({
+          endpoint,
+          endpointKind,
+          logger,
+          ...(options.forceTerminate === undefined
+            ? {}
+            : { forceTerminate: options.forceTerminate }),
+        }),
       paths: options.paths,
       ...(options.platform === undefined ? {} : { platform: options.platform }),
     });

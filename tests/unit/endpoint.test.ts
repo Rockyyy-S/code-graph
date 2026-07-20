@@ -65,4 +65,28 @@ describe("workspace endpoint", () => {
       }),
     ).toThrow(/socket path/i);
   });
+
+  it("rejects relative cache roots that would split one workspace by process cwd", () => {
+    expect(() =>
+      createWorkspacePaths(workspaceKey, {
+        cacheRoot: "relative-cache",
+        platform: "linux",
+      }),
+    ).toThrow(/绝对路径/);
+  });
+
+  it("ignores a relative OS cache environment value and uses an absolute fallback", () => {
+    const environment =
+      process.platform === "win32"
+        ? { LOCALAPPDATA: "relative-cache" }
+        : { XDG_CACHE_HOME: "relative-cache" };
+    const paths = createWorkspacePaths(workspaceKey, {
+      environment,
+      platform: process.platform,
+    });
+
+    const pathApi = process.platform === "win32" ? path.win32 : path.posix;
+    expect(pathApi.isAbsolute(paths.workspaceDirectory)).toBe(true);
+    expect(paths.workspaceDirectory).not.toContain("relative-cache");
+  });
 });

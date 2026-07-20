@@ -1,10 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   open,
-  readFile,
   rename,
   rm,
   type FileHandle,
@@ -27,13 +27,29 @@ export interface ServiceDiscoveryRecord {
 
 /** connect-first、按需启动与有界重试选项。 */
 export interface ConnectFirstOrStartOptions<T> {
-  connect: (record: ServiceDiscoveryRecord) => Promise<T>;
+  connect: (
+    record: ServiceDiscoveryRecord,
+    remainingMs: number,
+    signal: AbortSignal,
+  ) => Promise<T>;
   paths: WorkspacePaths;
   platform?: NodeJS.Platform;
   pollIntervalMs?: number;
-  start: () => Promise<void>;
+  probeDiscoveryState?: (
+    paths: WorkspacePaths,
+  ) => Promise<"absent" | "ready" | "stale" | "starting">;
+  readServiceDiscovery?: (
+    paths: WorkspacePaths,
+    expectedWorkspaceKey: string,
+    platform: NodeJS.Platform,
+  ) => Promise<ServiceDiscoveryRecord>;
+  start: (remainingMs: number, signal: AbortSignal) => Promise<void>;
   timeoutMs?: number;
 }
+
+const MAX_METADATA_BYTES = 64 * 1024;
+const MAX_TOKEN_BYTES = 32;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /** 排他所有权句柄；只有持有者可以释放本次 owner.lock。 */
 export class WorkspaceOwnership {
@@ -120,34 +136,51 @@ export async function connectFirstOrStart<T>(
   options: ConnectFirstOrStartOptions<T>,
 ): Promise<T> {
   const platform = options.platform ?? process.platform;
-  const timeoutMs = options.timeoutMs ?? 5_000;
-  const pollIntervalMs = options.pollIntervalMs ?? 25;
+  const timeoutMs = normalizePositiveFinite(options.timeoutMs ?? 5_000, "timeoutMs");
+  const pollIntervalMs = normalizePositiveFinite(
+    options.pollIntervalMs ?? 25,
+    "pollIntervalMs",
+  );
   const deadline = Date.now() + timeoutMs;
   let startAttempted = false;
   let consecutiveStaleObservations = 0;
+  const probe = options.probeDiscoveryState ?? probeDiscoveryState;
+  const readDiscovery = options.readServiceDiscovery ?? readServiceDiscovery;
 
-  while (Date.now() <= deadline) {
-    const state = await probeDiscoveryState(options.paths);
+  while (remainingMilliseconds(deadline) > 0) {
+    const state = await runWithDeadline(
+      async () => probe(options.paths),
+      deadline,
+    );
     if (state === "ready") {
       consecutiveStaleObservations = 0;
-      const record = await readServiceDiscovery(
-        options.paths,
-        options.paths.workspaceKey,
-        platform,
+      const record = await runWithDeadline(
+        async () => readDiscovery(
+          options.paths,
+          options.paths.workspaceKey,
+          platform,
+        ),
+        deadline,
       );
       try {
-        return await options.connect(record);
+        return await runWithDeadline(
+          (signal, remainingMs) => options.connect(record, remainingMs, signal),
+          deadline,
+        );
       } catch (error) {
         if (!hasProtocolCode(error, "SERVICE_START_TIMEOUT")) {
           throw error;
         }
-        // 已发布 metadata 的实例不能被客户端擅自替换，只允许在界限内重试连接。
+        /** 已发布 metadata 的实例不能被客户端擅自替换，只允许在界限内重试连接。 */
       }
     } else if (state === "absent" && !startAttempted) {
       consecutiveStaleObservations = 0;
       startAttempted = true;
       try {
-        await options.start();
+        await runWithDeadline(
+          (signal, remainingMs) => options.start(remainingMs, signal),
+          deadline,
+        );
       } catch (error) {
         if (!hasProtocolCode(error, "SERVICE_INSTANCE_CONFLICT")) {
           throw error;
@@ -162,7 +195,11 @@ export async function connectFirstOrStart<T>(
       consecutiveStaleObservations = 0;
     }
 
-    await wait(pollIntervalMs);
+    const remainingMs = remainingMilliseconds(deadline);
+    if (remainingMs <= 0) {
+      break;
+    }
+    await wait(Math.min(pollIntervalMs, remainingMs));
   }
   throw createServiceClientError("SERVICE_START_TIMEOUT");
 }
@@ -209,8 +246,12 @@ export async function readServiceDiscovery(
   expectedWorkspaceKey: string,
   platform: NodeJS.Platform = process.platform,
 ): Promise<ServiceDiscoveryRecord> {
-  const metadataSource = await readSecureFile(paths.metadataPath, platform);
-  const token = await readSecureFile(paths.tokenPath, platform);
+  const metadataSource = await readSecureFile(
+    paths.metadataPath,
+    platform,
+    MAX_METADATA_BYTES,
+  );
+  const token = await readSecureFile(paths.tokenPath, platform, MAX_TOKEN_BYTES);
   let candidate: unknown;
   try {
     candidate = JSON.parse(metadataSource.toString("utf8"));
@@ -242,21 +283,53 @@ export function calculateMetadataIntegrity(
 async function readSecureFile(
   filePath: string,
   platform: NodeJS.Platform,
+  maxBytes: number,
 ): Promise<Buffer> {
-  let fileStatus;
+  let handle: FileHandle | null = null;
   try {
-    fileStatus = await lstat(filePath);
+    const pathStatus = platform === "win32" ? await lstat(filePath) : null;
+    if (pathStatus?.isSymbolicLink() === true) {
+      throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+    }
+    handle = await open(
+      filePath,
+      platform === "win32" ? "r" : fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    const fileStatus = await handle.stat();
+    if (
+      !fileStatus.isFile() ||
+      fileStatus.size > maxBytes ||
+      (platform !== "win32" && (fileStatus.mode & 0o077) !== 0) ||
+      (pathStatus !== null &&
+        (pathStatus.dev !== fileStatus.dev || pathStatus.ino !== fileStatus.ino))
+    ) {
+      throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+    }
+    return await readBoundedFile(handle, maxBytes);
   } catch {
     throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
-  if (
-    fileStatus.isSymbolicLink() ||
-    !fileStatus.isFile() ||
-    (platform !== "win32" && (fileStatus.mode & 0o077) !== 0)
-  ) {
-    throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+}
+
+/** 从已校验句柄最多读取上限加一字节，避免文件增长竞态绕过大小门禁。 */
+async function readBoundedFile(handle: FileHandle, maxBytes: number): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      offset,
+      buffer.byteLength - offset,
+      offset,
+    );
+    if (bytesRead === 0) {
+      return buffer.subarray(0, offset);
+    }
+    offset += bytesRead;
   }
-  return readFile(filePath);
+  throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
 }
 
 /** 校验 metadata endpoint 与当前 workspace、平台和随机命名约束一致。 */
@@ -352,4 +425,57 @@ function hasProtocolCode(error: unknown, code: string): boolean {
 /** 等待下一次有界发现重试。 */
 async function wait(milliseconds: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** 让 connect/start 共享绝对 deadline，并在超时时向底层传播取消信号。 */
+async function runWithDeadline<T>(
+  operation: (signal: AbortSignal, remainingMs: number) => Promise<T>,
+  deadline: number,
+): Promise<T> {
+  const remainingMs = remainingMilliseconds(deadline);
+  if (remainingMs <= 0) {
+    throw createServiceClientError("SERVICE_START_TIMEOUT");
+  }
+  const controller = new AbortController();
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation(controller.signal, remainingMs),
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => {
+            controller.abort();
+            reject(createServiceClientError("SERVICE_START_TIMEOUT"));
+          },
+          remainingMs,
+        );
+        timeout.unref();
+      }),
+    ]);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw createServiceClientError("SERVICE_START_TIMEOUT");
+    }
+    throw error;
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+/** 返回 deadline 前剩余的整数毫秒，不在期限后继续启动新操作。 */
+function remainingMilliseconds(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+/** 校验 discovery 时间参数，拒绝无界等待或忙轮询配置。 */
+function normalizePositiveFinite(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new TypeError(`service discovery ${name} 必须是正有限数。`);
+  }
+  if (value > MAX_TIMER_DELAY_MS) {
+    throw new RangeError(`service discovery ${name} 超出 Node 定时器范围。`);
+  }
+  return Math.max(1, Math.floor(value));
 }

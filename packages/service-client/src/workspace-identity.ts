@@ -114,7 +114,11 @@ export async function deriveWorkspaceIdentity(
     ).normalize("NFC");
     const pathApi = selectPathApi(resolvedRoot, options.platform);
     const relative = pathApi.relative(repositoryRoot, resolvedRoot);
-    if (relative.startsWith("..") || pathApi.isAbsolute(relative)) {
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${pathApi.sep}`) ||
+      pathApi.isAbsolute(relative)
+    ) {
       throw new Error("indexing root 不能逃逸受信任的仓库根目录。");
     }
     identity = {

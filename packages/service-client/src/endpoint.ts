@@ -41,6 +41,9 @@ export function createWorkspacePaths(
   const pathApi = platform === "win32" ? path.win32 : path.posix;
   const cacheRoot =
     options.cacheRoot ?? defaultCacheRoot(platform, options.environment ?? process.env);
+  if (!pathApi.isAbsolute(cacheRoot)) {
+    throw new TypeError("缓存根目录必须是绝对路径。");
+  }
   /** 目录名使用 144-bit key 前缀控制 UDS 长度；完整 key 仍由 metadata 校验。 */
   const compactWorkspaceKey = Buffer.from(workspaceKey, "hex")
     .subarray(0, 18)
@@ -83,10 +86,16 @@ function defaultCacheRoot(
   environment: NodeJS.ProcessEnv,
 ): string {
   if (platform === "win32") {
-    return environment.LOCALAPPDATA ?? path.win32.join(homedir(), "AppData", "Local");
+    const fallback = path.win32.join(homedir(), "AppData", "Local");
+    return environment.LOCALAPPDATA !== undefined && path.win32.isAbsolute(environment.LOCALAPPDATA)
+      ? environment.LOCALAPPDATA
+      : fallback;
   }
   if (platform === "darwin") {
     return path.posix.join(homedir().replaceAll("\\", "/"), "Library", "Caches");
   }
-  return environment.XDG_CACHE_HOME ?? path.posix.join(homedir(), ".cache");
+  const fallback = path.posix.join(homedir(), ".cache");
+  return environment.XDG_CACHE_HOME !== undefined && path.posix.isAbsolute(environment.XDG_CACHE_HOME)
+    ? environment.XDG_CACHE_HOME
+    : fallback;
 }

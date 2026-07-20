@@ -113,6 +113,38 @@ const capabilitiesSchema = {
   type: "array",
 } as const;
 
+/** 兼容客户端接受同主版本服务提供的任意排序、去重 capability 子集。 */
+const compatibleCapabilitiesSchema = {
+  items: { minLength: 1, type: "string" },
+  type: "array",
+  uniqueItems: true,
+} as const;
+
+/** service/status 与 service/shutdown 的封闭空参数 Schema。 */
+export const serviceControlRequestSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  additionalProperties: false,
+  maxProperties: 0,
+  type: "object",
+} as const;
+
+/** service/shutdown 的严格 canonical 响应 Schema。 */
+export const shutdownResultSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  additionalProperties: false,
+  properties: {
+    accepted: { const: true },
+  },
+  required: ["accepted"],
+  type: "object",
+} as const;
+
+/** 兼容客户端允许 shutdown 响应增加可选字段。 */
+export const shutdownResultCompatibleSchema = {
+  ...shutdownResultSchema,
+  additionalProperties: true,
+} as const;
+
 /** InitializeResult 的严格 canonical JSON Schema 2020-12 定义。 */
 export const initializeResultSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -198,6 +230,7 @@ export const initializeResultCompatibleSchema = {
   additionalProperties: true,
   properties: {
     ...initializeResultSchema.properties,
+    capabilities: compatibleCapabilitiesSchema,
     serviceStatus: {
       ...serviceStatusV1Schema,
       additionalProperties: true,

@@ -96,6 +96,30 @@ describe("graph-service JSON-RPC control plane", () => {
     await expect(client.waitForClose()).resolves.toBeUndefined();
   });
 
+  it("closes an unauthenticated connection that advertises an oversized frame", async () => {
+    const { paths } = await createRuntime();
+    const client = await JsonRpcTestClient.connect(paths.endpoint);
+
+    client.writeRaw("Content-Length: 1048577\r\n\r\n");
+
+    await expect(client.waitForCloseWithin(500)).resolves.toBeUndefined();
+  });
+
+  it("rejects a second frame queued before initialize is processed", async () => {
+    const { paths, runtime } = await createRuntime();
+    const client = await JsonRpcTestClient.connect(paths.endpoint);
+    const initialize = createRawRequestFrame(
+      1,
+      "initialize",
+      createInitializeRequest(runtime.sessionToken),
+    );
+    const status = createRawRequestFrame(2, "service/status", {});
+
+    client.writeRaw(Buffer.concat([initialize, status]));
+
+    await expect(client.waitForCloseWithin(500)).resolves.toBeUndefined();
+  });
+
   it("rejects an invalid token without echoing it", async () => {
     const { paths, runtime } = await createRuntime();
     const client = await JsonRpcTestClient.connect(paths.endpoint);
@@ -152,6 +176,20 @@ describe("graph-service JSON-RPC control plane", () => {
     await expect(waitForMissing(paths.metadataPath)).resolves.toBeUndefined();
     await expect(waitForMissing(paths.tokenPath)).resolves.toBeUndefined();
   });
+
+  it("rejects unknown control request fields through the shared request schema", async () => {
+    const { paths, runtime } = await createRuntime();
+    const client = await JsonRpcTestClient.connect(paths.endpoint);
+    await client.request("initialize", createInitializeRequest(runtime.sessionToken));
+
+    const invalidStatus = await client.request("service/status", { futureField: true });
+    const validStatus = await client.request("service/status", {});
+
+    expect(invalidStatus.error?.data).toMatchObject({ code: "SERVICE_INVALID_REQUEST" });
+    expect(validateErrorV1(invalidStatus.error?.data)).toBe(true);
+    expect(validateServiceStatusV1(validStatus.result)).toBe(true);
+    await client.close();
+  });
 });
 
 interface JsonRpcResponse {
@@ -205,6 +243,28 @@ class JsonRpcTestClient {
     return this.#closePromise;
   }
 
+  /** 在短界限内等待服务端主动关闭连接。 */
+  public async waitForCloseWithin(timeoutMs: number): Promise<void> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.#closePromise,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("等待 IPC 连接关闭超时。")), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
+    }
+  }
+
+  /** 发送用于边界测试的原始帧字节。 */
+  public writeRaw(source: string | Buffer): void {
+    this.#socket.write(source);
+  }
+
   /** 主动关闭测试连接。 */
   public async close(): Promise<void> {
     if (this.#socket.destroyed) {
@@ -239,6 +299,15 @@ class JsonRpcTestClient {
       this.#pending.delete(response.id);
     }
   }
+}
+
+/** 创建边界测试使用的完整 Content-Length 请求帧。 */
+function createRawRequestFrame(id: number, method: string, params: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify({ id, jsonrpc: "2.0", method, params }), "utf8");
+  return Buffer.concat([
+    Buffer.from(`Content-Length: ${payload.byteLength}\r\n\r\n`, "ascii"),
+    payload,
+  ]);
 }
 
 /** 在短界限内等待 owned 资源被 shutdown 清理。 */

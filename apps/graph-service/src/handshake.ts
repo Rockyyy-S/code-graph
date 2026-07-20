@@ -1,7 +1,10 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
+  CLI_SCHEMA_VERSION,
   createErrorV1,
+  GRAPH_SCHEMA_VERSION,
   isProtocolCompatible,
+  RULES_SCHEMA_VERSION,
   type ErrorV1,
   type InitializeRequest,
   validateInitializeRequest,
@@ -96,6 +99,12 @@ export class HandshakeGuard {
     if (!isProtocolCompatible(params.protocolVersion)) {
       return this.#reject("SERVICE_PROTOCOL_INCOMPATIBLE");
     }
+    if (!supportsCurrentSchemaVersions(params)) {
+      return this.#reject(
+        "SERVICE_PROTOCOL_INCOMPATIBLE",
+        "客户端不支持服务当前使用的 Schema 版本。",
+      );
+    }
 
     this.#clearTimeout();
     this.#state = "initialized";
@@ -134,4 +143,13 @@ function readSessionToken(value: unknown): string | null {
   }
   const sessionToken = value.sessionToken;
   return typeof sessionToken === "string" ? sessionToken : null;
+}
+
+/** 验证客户端对三套独立 Schema 当前版本均声明支持。 */
+function supportsCurrentSchemaVersions(request: InitializeRequest): boolean {
+  return (
+    request.supportedSchemaVersions.cli.includes(CLI_SCHEMA_VERSION) &&
+    request.supportedSchemaVersions.graph.includes(GRAPH_SCHEMA_VERSION) &&
+    request.supportedSchemaVersions.rules.includes(RULES_SCHEMA_VERSION)
+  );
 }

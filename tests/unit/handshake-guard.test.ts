@@ -65,6 +65,17 @@ describe("HandshakeGuard", () => {
     ["token", { sessionToken: "wrong" }, "SERVICE_AUTH_FAILED"],
     ["workspace", { workspaceKey: "c".repeat(64) }, "SERVICE_WORKSPACE_MISMATCH"],
     ["protocol", { protocolVersion: 2 }, "SERVICE_PROTOCOL_INCOMPATIBLE"],
+    [
+      "schema versions",
+      {
+        supportedSchemaVersions: {
+          cli: [CLI_SCHEMA_VERSION + 1],
+          graph: [GRAPH_SCHEMA_VERSION + 1],
+          rules: [RULES_SCHEMA_VERSION + 1],
+        },
+      },
+      "SERVICE_PROTOCOL_INCOMPATIBLE",
+    ],
   ])("fails closed for an invalid %s", (_label, override, expectedCode) => {
     const { guard, request } = createFixture();
 

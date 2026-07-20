@@ -17,7 +17,7 @@
 | `packages/domain` | 领域行为与不变量；不依赖其他项目包 | application、contracts、service-client、adapter、宿主 API |
 | `packages/application` | 用例与稳定端口；只依赖 domain | adapter、VS Code、SQLite、Compiler API、传输 DTO |
 | `packages/contracts` | 共享 Schema/DTO 与 Ajv 运行时校验的独立边界 | 领域行为、适配器实现、渲染库内部格式 |
-| `packages/service-client` | 工作区身份、服务发现、连接、握手与客户端生命周期 | 业务查询语义、图存储、adapter、graph-service 入口定位 |
+| `packages/service-client` | 工作区身份、用户缓存发现、deadline 连接、握手与客户端生命周期 | 业务查询语义、图存储、adapter、graph-service 入口定位 |
 | `packages/adapters/store-sqlite` | 存储端口实现；依赖 application/domain | 承担组合根职责或被核心反向导入 |
 | `packages/adapters/analyzer-typescript` | 分析端口实现；依赖 application/domain | 向核心泄露 Compiler API 类型 |
 | `packages/adapters/git-local` | Git 端口实现；依赖 application/domain | 承担业务用例或组合逻辑 |

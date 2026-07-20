@@ -10,7 +10,10 @@ import {
   validateInitializeRequest,
   validateInitializeResult,
   validateInitializeResultCompatible,
+  validateServiceControlRequest,
   validateServiceStatusV1,
+  validateShutdownResult,
+  validateShutdownResultCompatible,
 } from "../../packages/contracts/src/index.js";
 
 const workspaceKey = "a".repeat(64);
@@ -112,6 +115,26 @@ describe("service control contract", () => {
     expect(validateInitializeResultCompatible({ ...result, serviceVersion: undefined })).toBe(
       false,
     );
+    expect(
+      validateInitializeResultCompatible({
+        ...result,
+        capabilities: ["future/capability", ...SERVICE_CAPABILITIES],
+      }),
+    ).toBe(true);
+    expect(
+      validateInitializeResultCompatible({
+        ...result,
+        capabilities: [SERVICE_CAPABILITIES[0]],
+      }),
+    ).toBe(true);
+  });
+
+  it("validates empty control requests and canonical shutdown results", () => {
+    expect(validateServiceControlRequest({})).toBe(true);
+    expect(validateServiceControlRequest({ futureField: true })).toBe(false);
+    expect(validateShutdownResult({ accepted: true })).toBe(true);
+    expect(validateShutdownResult({ accepted: true, futureField: true })).toBe(false);
+    expect(validateShutdownResultCompatible({ accepted: true, futureField: true })).toBe(true);
   });
 
   it("validates JSON-RPC error data through the shared ErrorV1 schema", () => {
@@ -129,5 +152,13 @@ describe("service control contract", () => {
     expect(validateErrorV1({ ...error, retryable: "yes" })).toBe(false);
     expect(validateErrorV1({ ...error, details: "secret" })).toBe(false);
     expect(validateErrorV1({ ...error, logId: "" })).toBe(false);
+    expect(
+      validateErrorV1({
+        ...error,
+        category: "transport",
+        retryable: false,
+        suggestedAction: "忽略认证错误。",
+      }),
+    ).toBe(false);
   });
 });

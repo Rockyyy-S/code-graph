@@ -5,7 +5,7 @@ created_at: 2026-07-18T12:41:36+08:00
 
 # Story 1.2: 启动空 graph-service 并完成协议握手
 
-Status: review
+Status: in-progress
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git 与技术版本分析；实现完成状态仍由 dev-story 和独立代码审查流程决定。 -->
 
@@ -104,14 +104,64 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
   - [x] 测试中的伪 token 仅放 tests 目录或运行时生成，避免 basic-security 将测试材料误判为产品凭据。
   - [x] 测试保持 Red → Green → Refactor；禁止 skip/todo/only、空断言、passWithNoTests 或恒成功脚本。
 
-- [x] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
+- [ ] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
   - [x] 在 packages/contracts 引入架构锁定的 Ajv 8.20.0，在 packages/service-client 和 apps/graph-service 引入 vscode-jsonrpc 9.0.1，并更新 pnpm-lock.yaml；不要提前安装 better-sqlite3 或 Analyzer 依赖。
   - [x] 更新 scripts/architecture/check-dependency-boundaries.mjs 的角色级第三方 allowlist，只允许 contracts 使用 Ajv、service-client 与 composition-root 使用 vscode-jsonrpc；补充正/负向边界测试，保持其他角色默认拒绝。
   - [x] package.json 内部 workspace 依赖继续使用 workspace:*，tsconfig.build.json project references 与 manifest 依赖完全一致；不得改写既有 type/build 脚本。
   - [x] 更新 docs/repository-layout.md，并新增协议控制面说明，记录 owner、IPC、发现、握手、空状态、错误码和范围外能力；文档路径使用仓库相对路径。
   - [x] 复用现有 .github/workflows/architecture-required.yml 和稳定 check 名；不得增加 path filter、continue-on-error 或 Story 1.3 的 ci/quality-gates.v1.yaml。
   - [x] 使用仓库锁定的 Node 24.18.0、pnpm 11.12.0 执行 pnpm install --frozen-lockfile 和 pnpm architecture-required，确保七条门禁全部真实通过。
-  - [x] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
+  - [ ] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
+
+### Review Findings
+
+- [x] [Review][Patch] [High] 对 connect、start、initialize、status 与 shutdown 的异步等待执行真实 deadline，避免配置超时被永久 pending 绕过 [packages/service-client/src/discovery.ts:139]
+- [x] [Review][Patch] [High] 在 UDS listen 成功但 chmod 失败时关闭 server 并删除 socket，避免孤儿 listener 与常驻子进程 [apps/graph-service/src/server.ts:72]
+- [x] [Review][Patch] [High] 保留并传播 graph-service 在 spawn 后返回的安全 ErrorV1，避免 stdio ignore 将 endpoint 启动失败降级为超时 [packages/service-client/src/launcher.ts:53]
+- [x] [Review][Patch] [High] 在 metadata hard link 成功后立即记录发布状态，确保后续临时文件清理或 chmod 失败会回滚已发布 metadata [apps/graph-service/src/instance-owner.ts:235]
+- [x] [Review][Patch] [High] 将启动回滚与受控关闭改为可重试的 best-effort 全量清理，避免首个清理异常跳过 token、metadata 和 owner lock [apps/graph-service/src/instance-owner.ts:149]
+- [x] [Review][Patch] [Medium] 在服务启动前注册终止信号处理，避免启动窗口收到 SIGINT/SIGTERM 后遗留 V1 无法回收的发现证据 [apps/graph-service/src/main.ts:34]
+- [x] [Review][Patch] [Medium] 让 ErrorV1 validator 校验 code 与 category、retryable、suggestedAction 的注册表组合不变量 [packages/contracts/src/service-control-schema.ts:142]
+- [x] [Review][Patch] [Medium] 放宽兼容响应中的 capability 解析，使旧客户端可忽略同一协议主版本新增的未知可选能力 [packages/contracts/src/service-control-schema.ts:108]
+- [x] [Review][Patch] [Medium] 握手时验证客户端 supportedSchemaVersions 与服务当前 cli、graph、rules 版本存在交集 [apps/graph-service/src/handshake.ts:87]
+- [x] [Review][Patch] [Medium] 校验 initialize 返回的 serviceInstanceId/statusEpoch 与 discovery metadata 一致 [packages/service-client/src/connection.ts:189]
+- [x] [Review][Patch] [Medium] 将 cacheRoot 限制为绝对的当前用户 OS 缓存路径或内部测试注入，避免公共 API 将 token、metadata 和 IPC 写入任意目录 [packages/service-client/src/connection.ts:38]
+- [x] [Review][Patch] [Medium] 为 service/status 与 service/shutdown 的请求及 shutdown 响应补充共享封闭 Schema 和 Ajv 校验 [apps/graph-service/src/server.ts:146]
+- [x] [Review][Patch] [Low] 仅将 `..` 路径段判为仓库逃逸，允许仓库内合法的 `..generated` 等目录名 [packages/service-client/src/workspace-identity.ts:117]
+- [x] [Review][Patch] [Low] 为真实多进程合同测试增加失败路径 finally 清理，避免断言前失败时遗留 detached graph-service [tests/contract/graph-service-process.test.ts:34]
+- [x] [Review][Patch] [Low] 将新增的 TypeScript 行注释改为符合项目约束的中文 JSDoc 注释 [packages/service-client/src/discovery.ts:144]
+
+### Review Findings（第二轮复审，2026-07-20）
+
+- [ ] [Review][Patch] [High] 当前工作区修复没有对应的候选提交与 Hosted `architecture-required` 证据，旧运行不能证明同一候选提交满足 AC5 [docs/ci/story-1-2-provider-evidence.md:6]
+- [x] [Review][Patch] [High] UDS `listen` 因路径已被占用而失败时仍无条件删除 endpoint，可破坏其他活动服务或普通文件 [apps/graph-service/src/server.ts:92]
+- [x] [Review][Patch] [High] 认证前的 JSON-RPC reader 没有帧头和正文大小上限，本地 IPC 客户端可用超大 `Content-Length` 耗尽服务内存 [apps/graph-service/src/server.ts:182]
+- [x] [Review][Patch] [High] 启动超时仅发送一次 `child.kill()` 且不等待退出，子进程在启动期也可无界吞掉终止信号，最终留下孤儿进程和 stale 发现证据 [packages/service-client/src/launcher.ts:113]
+- [x] [Review][Patch] [High] RPC shutdown 通过 `void shutdown()` 丢弃清理失败，可引发未处理 rejection 并在客户端已收到 accepted 后遗留 lock/token/metadata [apps/graph-service/src/server.ts:275]
+- [x] [Review][Patch] [High] 启动回滚的每个清理步骤只尝试一次，瞬时关闭失败后会丢失全部重试引用并永久留下 owner lock [apps/graph-service/src/instance-owner.ts:233]
+- [x] [Review][Patch] [Medium] `timeoutMs`/`pollIntervalMs` 未校验且轮询总是等待完整间隔，调用可超过公开 deadline 很久或陷入忙轮询 [packages/service-client/src/discovery.ts:122]
+- [x] [Review][Patch] [Medium] 外层 deadline 超时不取消底层 connect/initialize，超时后仍可构造无人持有的连接并泄漏 socket [packages/service-client/src/discovery.ts:139]
+- [x] [Review][Patch] [Medium] 发现文件在 `lstat` 后的 `readFile` 错误未映射，竞态或权限失败会泄漏缺少 ErrorV1 字段的原生异常 [packages/service-client/src/discovery.ts:245]
+- [x] [Review][Patch] [Medium] 发现文件的 `lstat`/`readFile` 存在 TOCTOU 且无大小上限，可读取被替换的代际文件或在校验前分配任意内存 [packages/service-client/src/discovery.ts:245]
+- [x] [Review][Patch] [Medium] 兼容 capability Schema 要求服务包含客户端已知的全部可选能力，未来新客户端会错误拒绝缺少新能力的旧同主版本服务 [packages/contracts/src/service-control-schema.ts:116]
+- [x] [Review][Patch] [Low] metadata 临时文件在 write/sync/close 阶段失败时不会被删除，重复启动失败可在缓存目录持续堆积 `.tmp` [apps/graph-service/src/instance-owner.ts:291]
+- [x] [Review][Patch] [Low] 真实子进程与 IPC 测试失败路径缺少内部 timeout/finally 回收，worker 或 socket 挂起时可让 Vitest 超时后继续遗留资源 [tests/contract/graph-service-process.test.ts:95]
+
+### Review Findings（第三轮复审，2026-07-20）
+
+- [x] [Review][Patch] [High] 使用私有父子 IPC 取消通道执行跨平台优雅关闭和退出确认，仅在硬 deadline 后强杀；不再依赖 Windows `SIGTERM`，并显式处理 kill/close 失败 [packages/service-client/src/launcher.ts:135]
+- [ ] [Review][Patch] [High] AC5 当前仍无同候选提交 Hosted required-check，但 Task 6 及 Provider 证据子任务仍被错误勾选完成 [docs/ci/story-1-2-provider-evidence.md:3]
+- [x] [Review][Patch] [High] 信号关闭时 `runtime.close()` 拒绝仍会清除强制终止计时器并移除信号处理，残留 listener/lock 可使进程永久存活 [apps/graph-service/src/main.ts:83]
+- [x] [Review][Patch] [High] RPC shutdown 全部清理重试失败后只设置 `process.exitCode=1`，活动 server 句柄仍可阻止退出 [apps/graph-service/src/server.ts:300]
+- [x] [Review][Patch] [High] 启动回滚重试耗尽或 bind 后清理失败时仍丢失 endpoint/lock 引用，且 `closeFailedBoundServer` 吞掉 server/UDS 清理错误 [apps/graph-service/src/instance-owner.ts:235]
+- [x] [Review][Patch] [High] 1 MiB 单帧限制没有限制认证前累计帧数或排队字节，vscode-jsonrpc 可在首个 initialize 处理前排队任意多个合法大帧 [apps/graph-service/src/server.ts:193]
+- [x] [Review][Patch] [Medium] metadata 发布前的 pending socket 没有 `error` 监听器，连接复位可以未处理 error 终止服务 [apps/graph-service/src/server.ts:71]
+- [x] [Review][Patch] [Medium] launcher 在校验非法 timeout 之前已 spawn/unref 子进程，调用抛出 TypeError 时 detached 服务仍可继续运行 [packages/service-client/src/launcher.ts:60]
+- [x] [Review][Patch] [Medium] 公开 timeout 校验只检查正有限数，超过 Node `2^31-1` 定时器上限时会被收缩为约 1ms [packages/service-client/src/discovery.ts:455]
+- [x] [Review][Patch] [Medium] 发现阶段的 `lstat/open/read` 不在绝对 deadline 内，本地文件系统操作挂起时整个 connect-first 永不超时 [packages/service-client/src/discovery.ts:139]
+- [x] [Review][Patch] [Medium] 兼容解析允许 capability 子集后，`status()`/`shutdown()` 仍会调用服务未声明支持的方法 [packages/service-client/src/connection.ts:82]
+- [x] [Review][Patch] [Medium] `status()` 收到畸形或不兼容响应时不关闭终态连接，调用方丢弃对象后会泄漏 socket [packages/service-client/src/connection.ts:91]
+- [x] [Review][Patch] [Low] 新增原始 JSON-RPC 测试客户端及 worker 强杀路径在无 close/exit 时仍缺少最终超时拒绝和 stdio 销毁 [tests/unit/bound-endpoint-cleanup.test.ts:173]
 
 ## Dev Notes
 
@@ -330,6 +380,9 @@ GPT-5 Codex
 - 2026-07-18：Hosted run 29635748123 在 Ubuntu unit 阶段暴露 UDS 路径过长；改用 144-bit key 前缀目录并保留完整 key metadata 校验。
 - 2026-07-18：完整合同并行负载暴露子进程启动界限过短；按单测试策略调整启动与 subprocess 超时，不放宽全局配置。
 - 2026-07-18：候选 8ca4166925cae57aea25b957ce43929a05caf267 的 hosted run 29636223822 全部门禁通过。
+- 2026-07-18：代码审查 15 项修复先以 9 条定向失败路径进入 RED；修复后 `pnpm architecture-required` 全绿（unit 54/54，contract 76/76）。
+- 2026-07-20：第二轮复审 12 项本地修复完成 RED → GREEN；`pnpm architecture-required` 全绿（unit 64/64，contract 77/77），当前候选 Hosted 证据待生成。
+- 2026-07-20：第三轮复审采用私有父子 IPC 取消协议，12 项本地行动项完成 RED → GREEN；`pnpm architecture-required` 全绿（unit 74/74，contract 78/78）。
 
 ### Completion Notes List
 
@@ -341,6 +394,9 @@ GPT-5 Codex
 - Task 5：真实 Windows Named Pipe 结果为两个独立客户端进程获得相同 PID、serviceInstanceId、statusEpoch 和唯一 writer；第三客户端成功复用并 shutdown。
 - Task 6（本地部分）：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装和七门禁已完成。
 - Task 6：首次 hosted 失败真实阻断，跨平台修复后候选提交的 architecture-required 全绿，Provider 证据已回填。
+- Code Review：完成 deadline、启动错误传播、Schema 协商、实例身份、异常安全清理、信号窗口、测试孤儿进程与 JSDoc 约束修复，15/15 审查项关闭。
+- Code Review Round 2：本地代码与测试修复 12/12 完成；仅保留当前候选提交的 Hosted required-check 证据行动项。
+- Code Review Round 3：交付跨平台父子 IPC 取消、最终强制终止、fatal cleanup、认证前单帧排队、全链路 deadline 与 capability 门禁；当前仅剩 AC5 Hosted 证据。
 
 ### File List
 
@@ -386,13 +442,16 @@ GPT-5 Codex
 - tests/contract/service-client-control.test.ts
 - tests/contract/service-control-contract.test.ts
 - tests/unit/connect-first-discovery.test.ts
+- tests/unit/bound-endpoint-cleanup.test.ts
 - tests/unit/discovery-metadata.test.ts
 - tests/unit/endpoint.test.ts
 - tests/unit/handshake-guard.test.ts
+- tests/unit/graph-service-process-lifecycle.test.ts
 - tests/unit/instance-bootstrap.test.ts
 - tests/unit/service-state.test.ts
 - tests/unit/service-client-trust.test.ts
 - tests/unit/service-launcher.test.ts
+- tests/unit/service-connection-timeout.test.ts
 - tests/unit/workspace-identity.test.ts
 - tests/fixtures/service-client-process.mjs
 
@@ -406,3 +465,6 @@ GPT-5 Codex
 - 2026-07-18：完成 Task 5 真实协议、安全路径与 Windows 多进程单实例竞争验证。
 - 2026-07-18：完成 Task 6 本地依赖、文档与七门禁；Hosted Provider 候选证据保持阻塞。
 - 2026-07-18：候选 hosted required check 通过，完成 Task 6 并将 Story 状态更新为 review。
+- 2026-07-18：完成独立代码审查全部 15 项修复，最终本地七门禁通过并将 Story 状态更新为 done。
+- 2026-07-20：完成第二轮复审的 12 项本地修复，Hosted 候选证据未完成，Story 保持 in-progress。
+- 2026-07-20：完成第三轮复审的 12 项本地修复，当前候选 Hosted 证据未完成，Story 保持 in-progress。

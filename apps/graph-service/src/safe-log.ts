@@ -29,7 +29,7 @@ export class SafeLocalLogger {
         "utf8",
       );
     } catch {
-      // 最小诊断日志失败不能扩大为服务崩溃；完整日志健康治理属于 Story 1.16。
+      /** 最小诊断日志失败不能扩大为服务崩溃；完整日志健康治理属于 Story 1.16。 */
     }
   }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -122,6 +122,38 @@ describe("service discovery metadata", () => {
       expect((await stat(paths.metadataPath)).mode & 0o777).toBe(0o600);
     }
 
+    await ownership.release();
+  });
+
+  it("maps a discovery read permission failure to stable ErrorV1", async () => {
+    if (process.platform === "win32") {
+      expect(process.platform).toBe("win32");
+      return;
+    }
+    const { paths } = await createFixture();
+    const ownership = await acquireWorkspaceOwnership(paths);
+    await createSessionToken(paths);
+    await publishServiceMetadata(paths, {
+      createdAt: new Date().toISOString(),
+      endpoint: paths.endpoint,
+      endpointKind: paths.endpointKind,
+      pid: process.pid,
+      serviceInstanceId: "instance-permission-test",
+      statusEpoch: "epoch-permission-test",
+      version: 1,
+      workspaceKey,
+    });
+    await chmod(paths.metadataPath, 0o000);
+
+    await expect(
+      readServiceDiscovery(paths, workspaceKey, process.platform),
+    ).rejects.toMatchObject({
+      category: "lifecycle",
+      code: "SERVICE_INSTANCE_CONFLICT",
+      retryable: true,
+    });
+
+    await chmod(paths.metadataPath, 0o600);
     await ownership.release();
   });
 });

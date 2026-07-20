@@ -19,6 +19,8 @@ import {
   validateServiceMetadataV1,
 } from "@codegraph/contracts";
 
+const BOOTSTRAP_CLEANUP_RETRY_DELAYS_MS = [0, 10, 50] as const;
+
 /** graph-service 启动所需的受信任路径集合。 */
 export interface ServiceInstancePaths {
   endpoint: string;
@@ -53,6 +55,7 @@ export interface BootstrapServiceInstanceOptions {
   ) => Promise<BoundServiceEndpoint>;
   paths: ServiceInstancePaths;
   platform?: NodeJS.Platform;
+  setMetadataPermissions?: (metadataPath: string, mode: number) => Promise<void>;
 }
 
 /** 启动完成且持有唯一 writer 所有权的服务实例。 */
@@ -89,6 +92,14 @@ export class GraphServiceStartupError extends Error implements ErrorV1 {
       retryable: this.retryable,
       suggestedAction: this.suggestedAction,
     };
+  }
+}
+
+/** 启动失败且 owned 资源无法完整回收时使用的进程级致命错误。 */
+export class GraphServiceFatalCleanupError extends Error {
+  public constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "GraphServiceFatalCleanupError";
   }
 }
 
@@ -133,29 +144,83 @@ export async function bootstrapServiceInstance(
     const serviceInstanceId = randomUUID();
     const statusEpoch = randomUUID();
     const sessionToken = token.toString("base64url");
-    const metadata = await publishMetadata(options.paths, {
-      createdAt: new Date().toISOString(),
-      endpoint: options.paths.endpoint,
-      endpointKind: options.paths.endpointKind,
-      pid: process.pid,
-      serviceInstanceId,
-      statusEpoch,
-      version: 1,
-      workspaceKey: options.paths.workspaceKey,
-    });
-    metadataCreated = true;
+    const metadata = await publishMetadata(
+      options.paths,
+      {
+        createdAt: new Date().toISOString(),
+        endpoint: options.paths.endpoint,
+        endpointKind: options.paths.endpointKind,
+        pid: process.pid,
+        serviceInstanceId,
+        statusEpoch,
+        version: 1,
+        workspaceKey: options.paths.workspaceKey,
+      },
+      platform,
+      options.setMetadataPermissions ?? chmod,
+      () => {
+        metadataCreated = true;
+      },
+    );
 
-    let closed = false;
-    const closeOwnedResources = async (): Promise<void> => {
-      if (closed) {
-        return;
+    let endpointClosed = false;
+    let metadataRemoved = false;
+    let tokenRemoved = false;
+    let lockHandleClosed = false;
+    let lockRemoved = false;
+    let closePromise: Promise<void> | null = null;
+    const closeOwnedResources = (): Promise<void> => {
+      if (
+        endpointClosed &&
+        metadataRemoved &&
+        tokenRemoved &&
+        lockHandleClosed &&
+        lockRemoved
+      ) {
+        return Promise.resolve();
       }
-      closed = true;
-      await endpoint?.close();
-      await rm(options.paths.metadataPath, { force: true });
-      await rm(options.paths.tokenPath, { force: true });
-      await lockHandle?.close();
-      await rm(options.paths.lockPath, { force: true });
+      if (closePromise !== null) {
+        return closePromise;
+      }
+      closePromise = (async () => {
+        const errors: unknown[] = [];
+        if (!endpointClosed) {
+          endpointClosed = await attemptCleanup(() => endpoint?.close(), errors);
+        }
+        if (!metadataRemoved) {
+          metadataRemoved = await attemptCleanup(
+            () => rm(options.paths.metadataPath, { force: true }),
+            errors,
+          );
+        }
+        if (!tokenRemoved) {
+          tokenRemoved = await attemptCleanup(
+            () => rm(options.paths.tokenPath, { force: true }),
+            errors,
+          );
+        }
+        if (!lockHandleClosed) {
+          lockHandleClosed = await attemptCleanup(() => lockHandle?.close(), errors);
+        }
+        if (
+          endpointClosed &&
+          metadataRemoved &&
+          tokenRemoved &&
+          lockHandleClosed &&
+          !lockRemoved
+        ) {
+          lockRemoved = await attemptCleanup(
+            () => rm(options.paths.lockPath, { force: true }),
+            errors,
+          );
+        }
+        if (errors.length > 0) {
+          throw new AggregateError(errors, "关闭 graph-service owned 资源时发生错误。");
+        }
+      })().finally(() => {
+        closePromise = null;
+      });
+      return closePromise;
     };
 
     await endpoint.openHandshake({
@@ -176,17 +241,76 @@ export async function bootstrapServiceInstance(
       workspaceKey: options.paths.workspaceKey,
     };
   } catch (error) {
-    await tokenHandle?.close();
-    await endpoint?.close().catch(() => undefined);
-    if (metadataCreated) {
-      await rm(options.paths.metadataPath, { force: true });
+    const cleanupErrors: unknown[] = [];
+    let tokenHandleClean = tokenHandle === null;
+    let endpointClean = endpoint === null;
+    let metadataClean = !metadataCreated;
+    let tokenClean = !tokenCreated;
+    let lockHandleClean = lockHandle === null;
+    let lockClean = lockHandle === null;
+    for (const delayMs of BOOTSTRAP_CLEANUP_RETRY_DELAYS_MS) {
+      if (delayMs > 0) {
+        await wait(delayMs);
+      }
+      if (!tokenHandleClean) {
+        tokenHandleClean = await attemptCleanup(() => tokenHandle?.close(), cleanupErrors);
+      }
+      if (!endpointClean) {
+        endpointClean = await attemptCleanup(() => endpoint?.close(), cleanupErrors);
+      }
+      if (!metadataClean) {
+        metadataClean = await attemptCleanup(
+          () => rm(options.paths.metadataPath, { force: true }),
+          cleanupErrors,
+        );
+      }
+      if (!tokenClean) {
+        tokenClean = await attemptCleanup(
+          () => rm(options.paths.tokenPath, { force: true }),
+          cleanupErrors,
+        );
+      }
+      if (!lockHandleClean) {
+        lockHandleClean = await attemptCleanup(() => lockHandle?.close(), cleanupErrors);
+      }
+      if (
+        !lockClean &&
+        endpointClean &&
+        metadataClean &&
+        tokenClean &&
+        lockHandleClean
+      ) {
+        lockClean = await attemptCleanup(
+          () => rm(options.paths.lockPath, { force: true }),
+          cleanupErrors,
+        );
+      }
+      if (
+        tokenHandleClean &&
+        endpointClean &&
+        metadataClean &&
+        tokenClean &&
+        lockHandleClean &&
+        lockClean
+      ) {
+        break;
+      }
     }
-    if (tokenCreated) {
-      await rm(options.paths.tokenPath, { force: true });
+    const cleanupComplete =
+      tokenHandleClean &&
+      endpointClean &&
+      metadataClean &&
+      tokenClean &&
+      lockHandleClean &&
+      lockClean;
+    if (error instanceof GraphServiceFatalCleanupError) {
+      throw error;
     }
-    await lockHandle?.close();
-    if (lockHandle !== null) {
-      await rm(options.paths.lockPath, { force: true });
+    if (!cleanupComplete) {
+      throw new GraphServiceFatalCleanupError(
+        "graph-service 启动失败且 owned 资源未能完整回收。",
+        error,
+      );
     }
     if (error instanceof GraphServiceStartupError) {
       throw error;
@@ -215,6 +339,9 @@ async function ensureNoPublishedMetadata(metadataPath: string): Promise<void> {
 async function publishMetadata(
   paths: ServiceInstancePaths,
   payload: ServiceMetadataPayloadV1,
+  platform: NodeJS.Platform,
+  setMetadataPermissions: (metadataPath: string, mode: number) => Promise<void>,
+  onPublished: () => void,
 ): Promise<ServiceMetadataV1> {
   const metadata: ServiceMetadataV1 = {
     ...payload,
@@ -225,22 +352,23 @@ async function publishMetadata(
   }
 
   const temporaryPath = `${paths.metadataPath}.${process.pid}.${randomUUID()}.tmp`;
-  const handle = await open(temporaryPath, "wx", 0o600);
+  let handle: FileHandle | null = null;
   try {
+    handle = await open(temporaryPath, "wx", 0o600);
     await handle.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
     await handle.sync();
-  } finally {
     await handle.close();
-  }
-  try {
+    handle = null;
     await link(temporaryPath, paths.metadataPath);
+    onPublished();
+    if (platform !== "win32") {
+      await setMetadataPermissions(paths.metadataPath, 0o600);
+    }
+    return metadata;
   } finally {
-    await rm(temporaryPath, { force: true });
+    await handle?.close().catch(() => undefined);
+    await removeTemporaryFile(temporaryPath);
   }
-  if (process.platform !== "win32") {
-    await chmod(paths.metadataPath, 0o600);
-  }
-  return metadata;
 }
 
 /** 对 metadata payload 使用与客户端一致的 JCS 子集和 SHA-256。 */
@@ -284,4 +412,40 @@ function hasErrorCode(error: unknown, code: string): boolean {
     "code" in error &&
     error.code === code
   );
+}
+
+/** 执行单个清理步骤并收集错误，使后续 owned 资源仍可继续回收。 */
+async function attemptCleanup(
+  cleanup: () => Promise<unknown> | undefined,
+  errors: unknown[],
+): Promise<boolean> {
+  try {
+    await cleanup();
+    return true;
+  } catch (error) {
+    errors.push(error);
+    return false;
+  }
+}
+
+/** 等待下一次启动失败资源回收重试。 */
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** 对 metadata 临时文件执行有界重试，覆盖写入或关闭阶段的失败回滚。 */
+async function removeTemporaryFile(temporaryPath: string): Promise<void> {
+  let lastError: unknown;
+  for (const delayMs of BOOTSTRAP_CLEANUP_RETRY_DELAYS_MS) {
+    if (delayMs > 0) {
+      await wait(delayMs);
+    }
+    try {
+      await rm(temporaryPath, { force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }

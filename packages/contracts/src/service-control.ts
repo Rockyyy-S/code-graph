@@ -48,6 +48,19 @@ export interface InitializeResult {
   serviceVersion: string;
 }
 
+/** 兼容客户端解析的 initialize 结果；未知 capability 由旧客户端忽略。 */
+export type CompatibleInitializeResult = Omit<InitializeResult, "capabilities"> & {
+  capabilities: readonly string[];
+};
+
+/** service/status 与 service/shutdown 共享的封闭空请求对象。 */
+export type ServiceControlRequest = Record<string, never>;
+
+/** service/shutdown 的 canonical 成功响应。 */
+export interface ShutdownResult {
+  accepted: true;
+}
+
 /** JSON-RPC 控制方法名。 */
 export const SERVICE_METHODS = {
   initialize: "initialize",

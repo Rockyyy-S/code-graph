@@ -1,17 +1,22 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  ServiceMetadataPayloadV1,
+  ServiceMetadataV1,
+} from "../../packages/contracts/src/index.js";
 import {
   startGraphService,
   type OwnedServiceInstance,
   type ServiceInstancePaths,
 } from "../../apps/graph-service/src/index.js";
 import {
-  connectToGraphService,
+  connectToGraphServiceWithCacheRootForTests,
   type GraphServiceConnection,
 } from "../../packages/service-client/src/connection.js";
+import { calculateMetadataIntegrity } from "../../packages/service-client/src/discovery.js";
 
 const roots: string[] = [];
 const clients: GraphServiceConnection[] = [];
@@ -33,7 +38,6 @@ describe("shared service-client control API", () => {
       runtime = await startGraphService({ paths });
     });
     const common = {
-      cacheRoot,
       clientVersion: "0.0.0-test",
       indexingRoot,
       launcher: { start },
@@ -42,9 +46,9 @@ describe("shared service-client control API", () => {
       trust: { isTrusted: true },
     } as const;
 
-    const first = await connectToGraphService(common);
+    const first = await connectToGraphServiceWithCacheRootForTests(common, cacheRoot);
     clients.push(first);
-    const second = await connectToGraphService(common);
+    const second = await connectToGraphServiceWithCacheRootForTests(common, cacheRoot);
     clients.push(second);
 
     expect(start).toHaveBeenCalledTimes(1);
@@ -66,15 +70,14 @@ describe("shared service-client control API", () => {
     roots.push(indexingRoot, cacheRoot);
 
     await expect(
-      connectToGraphService({
-        cacheRoot,
+      connectToGraphServiceWithCacheRootForTests({
         clientVersion: "0.0.0-test",
         indexingRoot,
         launcher: { start: async () => undefined },
         pollIntervalMs: 5,
         startTimeoutMs: 50,
         trust: { isTrusted: true },
-      }),
+      }, cacheRoot),
     ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
   });
 
@@ -88,16 +91,56 @@ describe("shared service-client control API", () => {
     });
 
     await expect(
-      connectToGraphService({
-        cacheRoot,
+      connectToGraphServiceWithCacheRootForTests({
         clientVersion: "0.0.0-test",
         indexingRoot,
         launcher: { start },
         pollIntervalMs: 5,
         startTimeoutMs: 500,
         trust: { isTrusted: true },
-      }),
+      }, cacheRoot),
     ).rejects.toMatchObject({ code: "SERVICE_INSTANCE_CONFLICT" });
     expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects initialize identity that differs from discovery metadata", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-identity-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-identity-cache-"));
+    roots.push(indexingRoot, cacheRoot);
+    const start = vi.fn(async (paths: ServiceInstancePaths) => {
+      runtime = await startGraphService({ paths });
+      const metadata = JSON.parse(
+        await readFile(paths.metadataPath, "utf8"),
+      ) as ServiceMetadataV1;
+      const payload: ServiceMetadataPayloadV1 = {
+        createdAt: metadata.createdAt,
+        endpoint: metadata.endpoint,
+        endpointKind: metadata.endpointKind,
+        pid: metadata.pid,
+        serviceInstanceId: "forged-instance",
+        statusEpoch: metadata.statusEpoch,
+        version: metadata.version,
+        workspaceKey: metadata.workspaceKey,
+      };
+      await writeFile(
+        paths.metadataPath,
+        `${JSON.stringify({
+          ...payload,
+          integrity: calculateMetadataIntegrity(payload),
+        })}\n`,
+        { mode: 0o600 },
+      );
+    });
+
+    await expect(
+      connectToGraphServiceWithCacheRootForTests({
+        clientVersion: "0.0.0-test",
+        indexingRoot,
+        launcher: { start },
+        pollIntervalMs: 5,
+        startTimeoutMs: 5_000,
+        trust: { isTrusted: true },
+      }, cacheRoot),
+    ).rejects.toMatchObject({ code: "SERVICE_INSTANCE_CONFLICT" });
   });
 });

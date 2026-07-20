@@ -3,6 +3,7 @@ export const SERVICE_ERROR_CODES = [
   "SERVICE_AUTH_FAILED",
   "SERVICE_ENDPOINT_START_FAILED",
   "SERVICE_INITIALIZE_REQUIRED",
+  "SERVICE_INVALID_REQUEST",
   "SERVICE_INSTANCE_CONFLICT",
   "SERVICE_METHOD_NOT_FOUND",
   "SERVICE_PROTOCOL_INCOMPATIBLE",
@@ -60,6 +61,12 @@ export const SERVICE_ERROR_REGISTRY: Readonly<
     message: "连接必须先完成 initialize。",
     retryable: false,
     suggestedAction: "关闭连接并按协议重新初始化。",
+  },
+  SERVICE_INVALID_REQUEST: {
+    category: "protocol",
+    message: "控制请求不符合协议定义。",
+    retryable: false,
+    suggestedAction: "移除未知字段并按当前控制面 Schema 重新发送请求。",
   },
   SERVICE_INSTANCE_CONFLICT: {
     category: "lifecycle",

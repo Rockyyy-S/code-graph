@@ -11,13 +11,17 @@ import {
   GRAPH_SCHEMA_VERSION,
   PROTOCOL_VERSION,
   RULES_SCHEMA_VERSION,
+  SERVICE_CAPABILITIES,
   SERVICE_METHODS,
+  type CompatibleInitializeResult,
   type InitializeResult,
+  type ServiceCapability,
   type ServiceMetadataV1,
   type ServiceStatusV1,
   validateErrorV1,
   validateInitializeResultCompatible,
   validateServiceStatusV1Compatible,
+  validateShutdownResultCompatible,
 } from "@codegraph/contracts";
 import { connectFirstOrStart, type ServiceDiscoveryRecord } from "./discovery.js";
 import { createWorkspacePaths } from "./endpoint.js";
@@ -36,13 +40,13 @@ export interface WorkspaceTrustGate {
 
 /** 连接共享 graph-service 的公共参数。 */
 export interface ConnectToGraphServiceOptions {
-  cacheRoot?: string;
   clientVersion: string;
   connectTimeoutMs?: number;
   identityOptions?: WorkspaceIdentityOptions;
   indexingRoot: string;
   launcher: GraphServiceLauncher;
   pollIntervalMs?: number;
+  requestTimeoutMs?: number;
   startTimeoutMs?: number;
   trust: WorkspaceTrustGate;
 }
@@ -51,6 +55,7 @@ export interface ConnectToGraphServiceOptions {
 export class GraphServiceConnection {
   readonly #connection: MessageConnection;
   readonly #socket: net.Socket;
+  readonly #requestTimeoutMs: number;
   #closed = false;
 
   public readonly identity: WorkspaceIdentityResult;
@@ -63,28 +68,41 @@ export class GraphServiceConnection {
     initializeResult: InitializeResult,
     identity: WorkspaceIdentityResult,
     metadata: ServiceMetadataV1,
+    requestTimeoutMs = 5_000,
   ) {
     this.#connection = connection;
     this.#socket = socket;
     this.initializeResult = initializeResult;
     this.identity = identity;
     this.metadata = metadata;
+    this.#requestTimeoutMs = requestTimeoutMs;
   }
 
   /** 读取单一权威 ServiceStatusV1 快照。 */
   public async status(): Promise<ServiceStatusV1> {
     this.#ensureOpen();
     try {
-      const result = await this.#connection.sendRequest<unknown>(
+      this.#ensureCapability(SERVICE_METHODS.status);
+      const result = await sendRequestWithTimeout<unknown>(
+        this.#connection,
         SERVICE_METHODS.status,
         {},
+        this.#requestTimeoutMs,
       );
       if (!validateServiceStatusV1Compatible(result)) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
       return result;
     } catch (error) {
-      throw mapConnectionError(error);
+      const mapped = mapConnectionError(error);
+      if (
+        mapped.code === "SERVICE_START_TIMEOUT" ||
+        mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
+        mapped.code === "SERVICE_METHOD_NOT_FOUND"
+      ) {
+        await this.close();
+      }
+      throw mapped;
     }
   }
 
@@ -92,11 +110,14 @@ export class GraphServiceConnection {
   public async shutdown(): Promise<void> {
     this.#ensureOpen();
     try {
-      const result = await this.#connection.sendRequest<unknown>(
+      this.#ensureCapability(SERVICE_METHODS.shutdown);
+      const result = await sendRequestWithTimeout<unknown>(
+        this.#connection,
         SERVICE_METHODS.shutdown,
         {},
+        this.#requestTimeoutMs,
       );
-      if (!isAcceptedShutdown(result)) {
+      if (!validateShutdownResultCompatible(result)) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
     } catch (error) {
@@ -128,6 +149,13 @@ export class GraphServiceConnection {
       );
     }
   }
+
+  /** 拒绝调用 initialize 协商结果未声明支持的可选控制方法。 */
+  #ensureCapability(capability: ServiceCapability): void {
+    if (!this.initializeResult.capabilities.includes(capability)) {
+      throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+    }
+  }
 }
 
 /**
@@ -138,6 +166,22 @@ export class GraphServiceConnection {
 export async function connectToGraphService(
   options: ConnectToGraphServiceOptions,
 ): Promise<GraphServiceConnection> {
+  return connectToGraphServiceInternal(options);
+}
+
+/** 仓库测试专用缓存根注入；未从包根导出，生产调用始终使用当前用户 OS 缓存。 */
+export async function connectToGraphServiceWithCacheRootForTests(
+  options: ConnectToGraphServiceOptions,
+  cacheRoot: string,
+): Promise<GraphServiceConnection> {
+  return connectToGraphServiceInternal(options, cacheRoot);
+}
+
+/** 共享连接实现；可选缓存根仅供仓库内部隔离测试调用。 */
+async function connectToGraphServiceInternal(
+  options: ConnectToGraphServiceOptions,
+  cacheRoot?: string,
+): Promise<GraphServiceConnection> {
   if (!options.trust.isTrusted) {
     throw createServiceClientError("SERVICE_WORKSPACE_UNTRUSTED");
   }
@@ -146,16 +190,23 @@ export async function connectToGraphService(
     options.identityOptions,
   );
   const paths = createWorkspacePaths(identity.workspaceKey, {
-    ...(options.cacheRoot === undefined ? {} : { cacheRoot: options.cacheRoot }),
+    ...(cacheRoot === undefined ? {} : { cacheRoot }),
   });
   return connectFirstOrStart({
-    connect: (record) =>
-      openServiceConnection(record, identity, options.clientVersion, options.connectTimeoutMs),
+    connect: (record, remainingMs, signal) =>
+      openServiceConnection(
+        record,
+        identity,
+        options.clientVersion,
+        Math.min(options.connectTimeoutMs ?? 1_000, remainingMs),
+        Math.min(options.requestTimeoutMs ?? 5_000, remainingMs),
+        signal,
+      ),
     paths,
     ...(options.pollIntervalMs === undefined
       ? {}
       : { pollIntervalMs: options.pollIntervalMs }),
-    start: () => options.launcher.start(paths),
+    start: (remainingMs, signal) => options.launcher.start(paths, remainingMs, signal),
     ...(options.startTimeoutMs === undefined ? {} : { timeoutMs: options.startTimeoutMs }),
   });
 }
@@ -166,41 +217,70 @@ async function openServiceConnection(
   identity: WorkspaceIdentityResult,
   clientVersion: string,
   connectTimeoutMs = 1_000,
+  requestTimeoutMs = 5_000,
+  signal?: AbortSignal,
 ): Promise<GraphServiceConnection> {
   const socket = net.createConnection(record.metadata.endpoint);
+  let connection: MessageConnection | null = null;
+  const abortConnection = (): void => {
+    connection?.dispose();
+    socket.destroy();
+  };
+  signal?.addEventListener("abort", abortConnection, { once: true });
   try {
+    if (signal?.aborted === true) {
+      throw createServiceClientError("SERVICE_START_TIMEOUT");
+    }
     await waitForSocketConnection(socket, connectTimeoutMs);
-    const connection = createMessageConnection(
+    connection = createMessageConnection(
       new SocketMessageReader(socket),
       new SocketMessageWriter(socket),
     );
     connection.listen();
-    const result = await connection.sendRequest<unknown>(SERVICE_METHODS.initialize, {
-      clientVersion,
-      protocolVersion: PROTOCOL_VERSION,
-      sessionToken: record.sessionToken,
-      supportedSchemaVersions: {
-        cli: [CLI_SCHEMA_VERSION],
-        graph: [GRAPH_SCHEMA_VERSION],
-        rules: [RULES_SCHEMA_VERSION],
+    const result = await sendRequestWithTimeout<unknown>(
+      connection,
+      SERVICE_METHODS.initialize,
+      {
+        clientVersion,
+        protocolVersion: PROTOCOL_VERSION,
+        sessionToken: record.sessionToken,
+        supportedSchemaVersions: {
+          cli: [CLI_SCHEMA_VERSION],
+          graph: [GRAPH_SCHEMA_VERSION],
+          rules: [RULES_SCHEMA_VERSION],
+        },
+        workspaceKey: identity.workspaceKey,
       },
-      workspaceKey: identity.workspaceKey,
-    });
+      requestTimeoutMs,
+    );
     if (!validateInitializeResultCompatible(result)) {
       connection.dispose();
       socket.destroy();
       throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
     }
+    if (
+      result.serviceStatus.serviceInstanceId !== record.metadata.serviceInstanceId ||
+      result.serviceStatus.statusEpoch !== record.metadata.statusEpoch
+    ) {
+      connection.dispose();
+      socket.destroy();
+      throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+    }
+    const normalizedResult = normalizeInitializeResult(result);
     return new GraphServiceConnection(
       connection,
       socket,
-      result,
+      normalizedResult,
       identity,
       record.metadata,
+      requestTimeoutMs,
     );
   } catch (error) {
+    connection?.dispose();
     socket.destroy();
     throw mapConnectionError(error);
+  } finally {
+    signal?.removeEventListener("abort", abortConnection);
   }
 }
 
@@ -209,12 +289,13 @@ async function waitForSocketConnection(
   socket: net.Socket,
   timeoutMs: number,
 ): Promise<void> {
+  const boundedTimeoutMs = normalizeTimeout(timeoutMs);
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
       socket.destroy();
       reject(createServiceClientError("SERVICE_START_TIMEOUT"));
-    }, timeoutMs);
+    }, boundedTimeoutMs);
     timeout.unref();
     const cleanup = (): void => {
       clearTimeout(timeout);
@@ -248,15 +329,56 @@ function mapConnectionError(error: unknown): ServiceClientError {
   return createServiceClientError("SERVICE_START_TIMEOUT");
 }
 
-/** 验证最小 shutdown 应答。 */
-function isAcceptedShutdown(value: unknown): value is { accepted: true } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    Object.keys(value).length === 1 &&
-    "accepted" in value &&
-    value.accepted === true
-  );
+/** 在本地 deadline 内等待 JSON-RPC 响应。 */
+async function sendRequestWithTimeout<T>(
+  connection: MessageConnection,
+  method: string,
+  params: unknown,
+  timeoutMs: number,
+): Promise<T> {
+  const boundedTimeoutMs = normalizeTimeout(timeoutMs);
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      connection.sendRequest<T>(method, params),
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              createServiceClientError("SERVICE_START_TIMEOUT", "等待服务响应超时。"),
+            ),
+          boundedTimeoutMs,
+        );
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+/** 过滤旧客户端不认识的 capability，保留强类型公共结果。 */
+function normalizeInitializeResult(result: CompatibleInitializeResult): InitializeResult {
+  const capabilities = result.capabilities.filter(isKnownCapability);
+  return { ...result, capabilities };
+}
+
+/** 判断 capability 是否由当前客户端版本认识。 */
+function isKnownCapability(capability: string): capability is ServiceCapability {
+  return (SERVICE_CAPABILITIES as readonly string[]).includes(capability);
+}
+
+/** 将公共 timeout 收敛为可执行的正有限整数。 */
+function normalizeTimeout(timeoutMs: number): number {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError("服务请求 timeout 必须是正有限数。");
+  }
+  if (timeoutMs > 2_147_483_647) {
+    throw new RangeError("服务请求 timeout 超出 Node 定时器范围。");
+  }
+  return Math.max(1, Math.floor(timeoutMs));
 }
 
 /** 检查 Node 系统错误码。 */
