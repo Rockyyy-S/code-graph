@@ -314,7 +314,8 @@ describe("shared service-client control API", () => {
 
   it("accepts concurrent status responses that arrive in reverse request order", async () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-concurrent-status-root-"));
-    const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-concurrent-status-cache-"));
+    /** 保留 POSIX UDS 路径预算，避免合同测试夹具名称触发产品长度门禁。 */
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "cgs-cache-"));
     roots.push(indexingRoot, cacheRoot);
     const workspaceKey = "5".repeat(64);
     const paths = createWorkspacePaths(workspaceKey, {
