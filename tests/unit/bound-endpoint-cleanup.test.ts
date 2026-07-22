@@ -340,7 +340,8 @@ describe("bound IPC endpoint cleanup", () => {
   });
 
   it("releases an active-connection slot after a protocol error disposes the session", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "codegraph-connection-release-"));
+    /** 保留 POSIX UDS 路径预算，避免测试夹具名称本身触发产品长度门禁。 */
+    const root = await mkdtemp(path.join(tmpdir(), "cgr-"));
     roots.push(root);
     const paths = createWorkspacePaths("5".repeat(64), {
       cacheRoot: root,
