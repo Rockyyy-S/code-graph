@@ -1,9 +1,14 @@
+import { constants as fsConstants } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSafeLocalLogger } from "../../apps/graph-service/src/safe-log.js";
+import {
+  createSafeLogOpenFlags,
+  createSafeLocalLogger,
+  SafeLocalLogger,
+} from "../../apps/graph-service/src/safe-log.js";
 import { createBoundIpcEndpoint } from "../../apps/graph-service/src/server.js";
 import {
   CLI_SCHEMA_VERSION,
@@ -20,6 +25,35 @@ afterEach(async () => {
 });
 
 describe("bound IPC endpoint cleanup", () => {
+  it("uses no-follow file flags for POSIX safety logs", () => {
+    const simulatedNoFollowFlag = 0x20_000;
+    const simulatedNonBlockFlag = 0x800;
+    expect(
+      createSafeLogOpenFlags(
+        "linux",
+        simulatedNoFollowFlag,
+        simulatedNonBlockFlag,
+      ) & simulatedNoFollowFlag,
+    ).toBe(simulatedNoFollowFlag);
+    expect(
+      createSafeLogOpenFlags(
+        "linux",
+        simulatedNoFollowFlag,
+        simulatedNonBlockFlag,
+      ) & simulatedNonBlockFlag,
+    ).toBe(simulatedNonBlockFlag);
+    expect(
+      createSafeLogOpenFlags(
+        "win32",
+        simulatedNoFollowFlag,
+        simulatedNonBlockFlag,
+      ) & simulatedNoFollowFlag,
+    ).toBe(0);
+    expect(createSafeLogOpenFlags("win32") & fsConstants.O_APPEND).toBe(
+      fsConstants.O_APPEND,
+    );
+  });
+
   it("closes a POSIX listener when socket permission hardening fails", async () => {
     if (process.platform === "win32") {
       expect(process.platform).toBe("win32");
@@ -213,6 +247,162 @@ describe("bound IPC endpoint cleanup", () => {
       await logger.close();
     }
   });
+
+  it("forces termination when a protocol shutdown attempt never settles", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-shutdown-timeout-"));
+    roots.push(root);
+    const paths = createWorkspacePaths("3".repeat(64), {
+      cacheRoot: root,
+      platform: process.platform,
+    });
+    const logger = await createSafeLocalLogger(paths.workspaceDirectory);
+    const forceTerminate = vi.fn();
+    let endpoint: Awaited<ReturnType<typeof createBoundIpcEndpoint>> | null = null;
+    let socket: net.Socket | null = null;
+    const shutdown = vi.fn(async () => new Promise<never>(() => undefined));
+    try {
+      endpoint = await createBoundIpcEndpoint({
+        endpoint: paths.endpoint,
+        endpointKind: paths.endpointKind,
+        forceTerminate,
+        logger,
+        shutdownAttemptTimeoutMs: 10,
+      });
+      await endpoint.openHandshake({
+        serviceInstanceId: "instance-shutdown-timeout",
+        sessionToken: "session-token-shutdown-timeout",
+        shutdown,
+        statusEpoch: "epoch-shutdown-timeout",
+        workspaceKey: paths.workspaceKey,
+      });
+      socket = await openSocket(paths.endpoint);
+      await sendJsonRpcRequest(socket, 1, "initialize", {
+        clientVersion: "0.0.0-test",
+        protocolVersion: PROTOCOL_VERSION,
+        sessionToken: "session-token-shutdown-timeout",
+        supportedSchemaVersions: {
+          cli: [CLI_SCHEMA_VERSION],
+          graph: [GRAPH_SCHEMA_VERSION],
+          rules: [RULES_SCHEMA_VERSION],
+        },
+        workspaceKey: paths.workspaceKey,
+      });
+
+      const record = vi.spyOn(logger, "record").mockImplementation(
+        async () => new Promise<never>(() => undefined),
+      );
+      await sendJsonRpcRequest(socket, 2, "service/shutdown", {});
+      await vi.waitFor(() => expect(forceTerminate).toHaveBeenCalledWith(1));
+      expect(shutdown).toHaveBeenCalledTimes(3);
+      expect(record).toHaveBeenCalledTimes(3);
+    } finally {
+      socket?.destroy();
+      await endpoint?.close().catch(() => undefined);
+      await logger.close();
+    }
+  });
+
+  it("limits active sockets after the handshake opens", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-connection-limit-"));
+    roots.push(root);
+    const paths = createWorkspacePaths("1".repeat(64), {
+      cacheRoot: root,
+      platform: process.platform,
+    });
+    const logger = await createSafeLocalLogger(paths.workspaceDirectory);
+    const endpoint = await createBoundIpcEndpoint({
+      endpoint: paths.endpoint,
+      endpointKind: paths.endpointKind,
+      logger,
+      maxActiveConnections: 1,
+    });
+    let first: net.Socket | null = null;
+    let second: net.Socket | null = null;
+    try {
+      await endpoint.openHandshake({
+        serviceInstanceId: "instance-limit",
+        sessionToken: "session-token-limit",
+        shutdown: async () => undefined,
+        statusEpoch: "epoch-limit",
+        workspaceKey: paths.workspaceKey,
+      });
+      first = await openSocket(paths.endpoint);
+      second = await openSocket(paths.endpoint);
+
+      await waitForSocketClose(second);
+      expect(first.destroyed).toBe(false);
+    } finally {
+      first?.destroy();
+      second?.destroy();
+      await endpoint.close();
+      await logger.close();
+    }
+  });
+
+  it("releases an active-connection slot after a protocol error disposes the session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-connection-release-"));
+    roots.push(root);
+    const paths = createWorkspacePaths("5".repeat(64), {
+      cacheRoot: root,
+      platform: process.platform,
+    });
+    const logger = await createSafeLocalLogger(paths.workspaceDirectory);
+    const endpoint = await createBoundIpcEndpoint({
+      endpoint: paths.endpoint,
+      endpointKind: paths.endpointKind,
+      logger,
+      maxActiveConnections: 1,
+    });
+    let rejected: net.Socket | null = null;
+    let replacement: net.Socket | null = null;
+    try {
+      await endpoint.openHandshake({
+        serviceInstanceId: "instance-release",
+        sessionToken: "session-token-release",
+        shutdown: async () => undefined,
+        statusEpoch: "epoch-release",
+        workspaceKey: paths.workspaceKey,
+      });
+      rejected = await openSocket(paths.endpoint);
+      rejected.write("Content-Length: 1048577\r\n\r\n");
+      await waitForSocketClose(rejected);
+
+      replacement = await openSocket(paths.endpoint);
+      const result = await sendJsonRpcRequest(replacement, 1, "initialize", {
+        clientVersion: "0.0.0-test",
+        protocolVersion: PROTOCOL_VERSION,
+        sessionToken: "session-token-release",
+        supportedSchemaVersions: {
+          cli: [CLI_SCHEMA_VERSION],
+          graph: [GRAPH_SCHEMA_VERSION],
+          rules: [RULES_SCHEMA_VERSION],
+        },
+        workspaceKey: paths.workspaceKey,
+      });
+      expect(result).toMatchObject({
+        serviceStatus: { serviceInstanceId: "instance-release" },
+      });
+    } finally {
+      rejected?.destroy();
+      replacement?.destroy();
+      await endpoint.close();
+      await logger.close();
+    }
+  });
+
+  it("retries a logger close after an initial failure", async () => {
+    const handle = {
+      close: vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValueOnce(new Error("close failed"))
+        .mockResolvedValue(undefined),
+    };
+    const logger = new SafeLocalLogger(handle as never);
+
+    await expect(logger.close()).rejects.toThrow("close failed");
+    await expect(logger.close()).resolves.toBeUndefined();
+    expect(handle.close).toHaveBeenCalledTimes(2);
+  });
 });
 
 /** 尝试连接 IPC endpoint，并在成功时立即关闭测试 socket。 */
@@ -229,6 +419,31 @@ async function openSocket(endpoint: string): Promise<net.Socket> {
     socket.once("error", reject);
   });
   return socket;
+}
+
+/** 等待测试 socket 被服务端关闭，并对挂起路径设置短超时。 */
+async function waitForSocketClose(socket: net.Socket): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("等待测试 socket 关闭超时。"));
+    }, 500);
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    };
+    const onClose = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (): void => {
+      cleanup();
+      resolve();
+    };
+    socket.once("close", onClose);
+    socket.once("error", onError);
+  });
 }
 
 /** 发送单个 Content-Length JSON-RPC 请求并解析对应结果。 */

@@ -33,6 +33,7 @@ export interface ErrorV1 {
   suggestedAction: string;
 }
 
+/** 单个稳定错误码对应的固定协议属性。 */
 interface ErrorDefinition {
   category: ErrorCategory;
   message: string;

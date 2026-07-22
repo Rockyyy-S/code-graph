@@ -55,6 +55,19 @@ describe("workspace identity", () => {
     });
   });
 
+  it("normalizes a Windows UNC root as a file URI with an authority", async () => {
+    const result = await deriveWorkspaceIdentity("ignored", {
+      platform: "win32",
+      realpath: async () => "\\\\server\\share\\Folder Name",
+    });
+
+    expect(result.identity).toEqual({
+      kind: "local",
+      uri: "file://server/share/Folder%20Name",
+      version: 1,
+    });
+  });
+
   it("rejects a Git identity whose indexing root escapes the repository root", async () => {
     await expect(
       deriveWorkspaceIdentity("C:/other", {

@@ -12,6 +12,7 @@ import {
   type ServiceDiscoveryRecord,
 } from "../../packages/service-client/src/discovery.js";
 import { createWorkspacePaths } from "../../packages/service-client/src/endpoint.js";
+import { createServiceClientError } from "../../packages/service-client/src/errors.js";
 
 const roots: string[] = [];
 const workspaceKey = "2".repeat(64);
@@ -117,6 +118,7 @@ describe("connect-first discovery", () => {
 
   it("enforces the deadline when launcher start never settles", async () => {
     const paths = await createPaths();
+    const startedAt = Date.now();
 
     await expect(
       connectFirstOrStart({
@@ -126,6 +128,7 @@ describe("connect-first discovery", () => {
         timeoutMs: 25,
       }),
     ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+    expect(Date.now() - startedAt).toBeLessThan(200);
   });
 
   it("does not sleep past the remaining discovery deadline", async () => {
@@ -190,6 +193,103 @@ describe("connect-first discovery", () => {
 
     expect(aborted).toBe(true);
     await owner.close();
+  });
+
+  it("returns at the deadline while aborted launcher cleanup settles in background", async () => {
+    const paths = await createPaths();
+    let cleanupFinished = false;
+    const startedAt = Date.now();
+    const retryStart = vi.fn();
+
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        probeDiscoveryState: async () => "absent",
+        start: async (_remainingMs, signal) =>
+          new Promise<never>((_resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              setTimeout(() => {
+                cleanupFinished = true;
+                reject(createServiceClientError("SERVICE_ENDPOINT_START_FAILED"));
+              }, 25);
+            }, { once: true });
+          }),
+        timeoutMs: 25,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    await vi.waitFor(() => expect(cleanupFinished).toBe(true));
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        probeDiscoveryState: async () => "absent",
+        start: retryStart,
+        timeoutMs: 100,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_ENDPOINT_START_FAILED" });
+    expect(retryStart).not.toHaveBeenCalled();
+
+    /** 失败 tombstone 必须持续阻止后续启动，不能只被第一次重试消费。 */
+    await expect(
+      connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        probeDiscoveryState: async () => "absent",
+        start: retryStart,
+        timeoutMs: 100,
+      }),
+    ).rejects.toMatchObject({ code: "SERVICE_ENDPOINT_START_FAILED" });
+    expect(retryStart).not.toHaveBeenCalled();
+  });
+
+  it("retains every concurrent timed-out launcher cleanup for the same workspace", async () => {
+    const paths = await createPaths();
+    let rejectFirst: ((error: unknown) => void) | undefined;
+    let rejectSecond: ((error: unknown) => void) | undefined;
+    const firstStart = vi.fn(async (_remainingMs: number, signal: AbortSignal) =>
+      new Promise<never>((_resolve, reject) => {
+        rejectFirst = reject;
+        signal.addEventListener("abort", () => undefined, { once: true });
+      }));
+    const secondStart = vi.fn(async (_remainingMs: number, signal: AbortSignal) =>
+      new Promise<never>((_resolve, reject) => {
+        rejectSecond = reject;
+        signal.addEventListener("abort", () => undefined, { once: true });
+      }));
+
+    await Promise.all([
+      expect(connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        probeDiscoveryState: async () => "absent",
+        start: firstStart,
+        timeoutMs: 25,
+      })).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" }),
+      expect(connectFirstOrStart({
+        connect: async () => "unreachable",
+        paths,
+        probeDiscoveryState: async () => "absent",
+        start: secondStart,
+        timeoutMs: 25,
+      })).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" }),
+    ]);
+
+    rejectFirst?.(createServiceClientError("SERVICE_ENDPOINT_START_FAILED"));
+    rejectSecond?.(createServiceClientError("SERVICE_START_TIMEOUT"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const retryStart = vi.fn();
+
+    await expect(connectFirstOrStart({
+      connect: async () => "unreachable",
+      paths,
+      probeDiscoveryState: async () => "absent",
+      start: retryStart,
+      timeoutMs: 100,
+    })).rejects.toMatchObject({ code: "SERVICE_ENDPOINT_START_FAILED" });
+    expect(retryStart).not.toHaveBeenCalled();
   });
 
   it("applies the absolute deadline to discovery probing", async () => {

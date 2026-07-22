@@ -82,6 +82,42 @@ export function validateShutdownResultCompatible(value: unknown): value is Shutd
   return shutdownResultCompatibleValidator(value);
 }
 
+/**
+ * 校验 JSON-RPC 2.0 请求、通知或响应的顶层信封。
+ *
+ * 这个边界在消息进入 vscode-jsonrpc 的宽松分派逻辑前使用，因此接收
+ * `unknown` 并对 `null`/数组显式 fail-closed。
+ */
+export function validateJsonRpcV2Envelope(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.jsonrpc !== "2.0") {
+    return false;
+  }
+  const hasId = Object.hasOwn(record, "id");
+  const hasMethod = Object.hasOwn(record, "method");
+  const hasResult = Object.hasOwn(record, "result");
+  const hasError = Object.hasOwn(record, "error");
+  if (hasMethod) {
+    const validRequestId =
+      !hasId ||
+      typeof record.id === "string" ||
+      (typeof record.id === "number" && Number.isFinite(record.id));
+    return typeof record.method === "string" && validRequestId && !hasResult && !hasError;
+  }
+  const validResponseId =
+    hasId &&
+    (record.id === null ||
+      typeof record.id === "string" ||
+      (typeof record.id === "number" && Number.isFinite(record.id)));
+  const validError =
+    !hasError ||
+    (typeof record.error === "object" && record.error !== null && !Array.isArray(record.error));
+  return validResponseId && hasResult !== hasError && validError;
+}
+
 /** 严格校验权威 ServiceStatusV1 快照。 */
 export function validateServiceStatusV1(value: unknown): value is ServiceStatusV1 {
   return serviceStatusValidator(value);

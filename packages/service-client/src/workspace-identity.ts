@@ -167,17 +167,11 @@ function selectPathApi(input: string, platform?: NodeJS.Platform): typeof path.p
 /** 将 realpath 结果规范为统一 percent-encoding 的 file URI。 */
 function normalizeLocalFileUri(realPath: string, platform: NodeJS.Platform): string {
   if (platform === "win32" || /^[A-Za-z]:[\\/]/.test(realPath)) {
-    const normalized = path.win32.normalize(realPath).replaceAll("\\", "/");
+    const normalized = path.win32.normalize(realPath);
     const driveNormalized = normalized.replace(/^([a-z]):/, (_match, drive: string) =>
       `${drive.toUpperCase()}:`,
     );
-    const encoded = driveNormalized
-      .split("/")
-      .map((segment, index) =>
-        index === 0 ? segment : encodeURIComponent(segment.normalize("NFC")),
-      )
-      .join("/");
-    return `file:///${encoded}`;
+    return pathToFileURL(driveNormalized.normalize("NFC"), { windows: true }).href;
   }
   return pathToFileURL(realPath.normalize("NFC")).href;
 }

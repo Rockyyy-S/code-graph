@@ -27,7 +27,7 @@ export interface GraphServiceProcessDependencies {
   shutdownDeadlineMs?: number;
   signalTarget?: {
     off: (event: "SIGINT" | "SIGTERM", listener: () => void) => unknown;
-    once: (event: "SIGINT" | "SIGTERM", listener: () => void) => unknown;
+    on: (event: "SIGINT" | "SIGTERM", listener: () => void) => unknown;
   };
   startService?: typeof startGraphService;
 }
@@ -123,7 +123,9 @@ export async function runGraphServiceProcess(
     shutdownRequested = true;
     armHardShutdownTimeout();
     if (runtime !== null) {
-      void closeRuntime();
+      void closeRuntime().catch(() => {
+        setExitCode(1);
+      });
     }
   }
   function receiveParentControlMessage(message: unknown): void {
@@ -137,8 +139,8 @@ export async function runGraphServiceProcess(
     }
   }
 
-  signalTarget.once("SIGINT", requestShutdown);
-  signalTarget.once("SIGTERM", requestShutdown);
+  signalTarget.on("SIGINT", requestShutdown);
+  signalTarget.on("SIGTERM", requestShutdown);
   controlTarget.on("message", receiveParentControlMessage);
   try {
     runtime = await startService({ paths });

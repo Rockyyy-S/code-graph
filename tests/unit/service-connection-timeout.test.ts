@@ -1,5 +1,10 @@
 import net from "node:net";
+import { once } from "node:events";
 import { describe, expect, it, vi } from "vitest";
+import {
+  ErrorCodes,
+  ResponseError,
+} from "../../packages/service-client/node_modules/vscode-jsonrpc/lib/node/main.js";
 import {
   CLI_SCHEMA_VERSION,
   GRAPH_SCHEMA_VERSION,
@@ -8,6 +13,7 @@ import {
   SERVICE_CAPABILITIES,
 } from "../../packages/contracts/src/index.js";
 import { GraphServiceConnection } from "../../packages/service-client/src/connection.js";
+import { createBoundedJsonRpcInput } from "../../packages/service-client/src/bounded-json-rpc-input.js";
 
 describe("GraphServiceConnection request deadlines", () => {
   it("times out status and closes a permanently pending connection", async () => {
@@ -97,6 +103,53 @@ describe("GraphServiceConnection request deadlines", () => {
       code: "SERVICE_PROTOCOL_INCOMPATIBLE",
     });
     expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("maps malformed JSON-RPC errors to protocol incompatibility", async () => {
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => {
+        throw new ResponseError(ErrorCodes.InvalidRequest, "malformed", {
+          unexpected: true,
+        });
+      }),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects oversized JSON-RPC frames before buffering their body", async () => {
+    const socket = new net.Socket();
+    const input = createBoundedJsonRpcInput(socket);
+    const inputError = once(input, "error");
+
+    socket.emit("data", Buffer.from("Content-Length: 1048577\r\n\r\n", "ascii"));
+
+    await inputError;
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects a response stream that ends with an incomplete frame", async () => {
+    const socket = new net.Socket();
+    const rejected = vi.fn();
+    const input = createBoundedJsonRpcInput(socket, rejected);
+    const inputError = vi.fn();
+    input.on("error", inputError);
+
+    socket.emit("data", Buffer.from("Content-Length: 64\r\n\r\n{}", "ascii"));
+    socket.emit("end");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(rejected).toHaveBeenCalledTimes(1);
+    expect(inputError).toHaveBeenCalledTimes(1);
     expect(socket.destroyed).toBe(true);
   });
 });

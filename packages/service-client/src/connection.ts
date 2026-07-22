@@ -1,10 +1,13 @@
 import net from "node:net";
 import {
+  Message,
   ResponseError,
-  SocketMessageReader,
   SocketMessageWriter,
+  StreamMessageReader,
   createMessageConnection,
   type MessageConnection,
+  type MessageReader,
+  type MessageWriter,
 } from "vscode-jsonrpc/node";
 import {
   CLI_SCHEMA_VERSION,
@@ -20,12 +23,14 @@ import {
   type ServiceStatusV1,
   validateErrorV1,
   validateInitializeResultCompatible,
+  validateJsonRpcV2Envelope,
   validateServiceStatusV1Compatible,
   validateShutdownResultCompatible,
 } from "@codegraph/contracts";
 import { connectFirstOrStart, type ServiceDiscoveryRecord } from "./discovery.js";
 import { createWorkspacePaths } from "./endpoint.js";
 import { createServiceClientError, ServiceClientError } from "./errors.js";
+import { createBoundedJsonRpcInput } from "./bounded-json-rpc-input.js";
 import type { GraphServiceLauncher } from "./launcher.js";
 import {
   deriveWorkspaceIdentity,
@@ -56,6 +61,7 @@ export class GraphServiceConnection {
   readonly #connection: MessageConnection;
   readonly #socket: net.Socket;
   readonly #requestTimeoutMs: number;
+  readonly #protocolState: JsonRpcProtocolState;
   #closed = false;
 
   public readonly identity: WorkspaceIdentityResult;
@@ -69,6 +75,7 @@ export class GraphServiceConnection {
     identity: WorkspaceIdentityResult,
     metadata: ServiceMetadataV1,
     requestTimeoutMs = 5_000,
+    protocolState: JsonRpcProtocolState = createJsonRpcProtocolState(),
   ) {
     this.#connection = connection;
     this.#socket = socket;
@@ -76,6 +83,7 @@ export class GraphServiceConnection {
     this.identity = identity;
     this.metadata = metadata;
     this.#requestTimeoutMs = requestTimeoutMs;
+    this.#protocolState = protocolState;
   }
 
   /** 读取单一权威 ServiceStatusV1 快照。 */
@@ -94,7 +102,9 @@ export class GraphServiceConnection {
       }
       return result;
     } catch (error) {
-      const mapped = mapConnectionError(error);
+      const mapped = this.#protocolState.violated
+        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+        : mapConnectionError(error);
       if (
         mapped.code === "SERVICE_START_TIMEOUT" ||
         mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
@@ -121,7 +131,9 @@ export class GraphServiceConnection {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
     } catch (error) {
-      throw mapConnectionError(error);
+      throw this.#protocolState.violated
+        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+        : mapConnectionError(error);
     } finally {
       await this.close();
     }
@@ -177,6 +189,23 @@ export async function connectToGraphServiceWithCacheRootForTests(
   return connectToGraphServiceInternal(options, cacheRoot);
 }
 
+/** 仓库传输测试专用入口；绕过 discovery 以注入受控的伪造 endpoint。 */
+export async function openServiceConnectionForTests(
+  record: ServiceDiscoveryRecord,
+  identity: WorkspaceIdentityResult,
+  clientVersion: string,
+  connectTimeoutMs = 1_000,
+  requestTimeoutMs = 5_000,
+): Promise<GraphServiceConnection> {
+  return openServiceConnection(
+    record,
+    identity,
+    clientVersion,
+    connectTimeoutMs,
+    requestTimeoutMs,
+  );
+}
+
 /** 共享连接实现；可选缓存根仅供仓库内部隔离测试调用。 */
 async function connectToGraphServiceInternal(
   options: ConnectToGraphServiceOptions,
@@ -185,30 +214,93 @@ async function connectToGraphServiceInternal(
   if (!options.trust.isTrusted) {
     throw createServiceClientError("SERVICE_WORKSPACE_UNTRUSTED");
   }
-  const identity = await deriveWorkspaceIdentity(
+  const connectTimeoutMs = normalizeTimeout(
+    options.connectTimeoutMs ?? 1_000,
+    "connectTimeoutMs",
+  );
+  const requestTimeoutMs = normalizeTimeout(
+    options.requestTimeoutMs ?? 5_000,
+    "requestTimeoutMs",
+  );
+  const startTimeoutMs = normalizeTimeout(
+    options.startTimeoutMs ?? 5_000,
+    "startTimeoutMs",
+  );
+  const pollIntervalMs = normalizeTimeout(
+    options.pollIntervalMs ?? 25,
+    "pollIntervalMs",
+  );
+  const deadline = Date.now() + startTimeoutMs;
+  const identity = await deriveWorkspaceIdentityWithinDeadline(
     options.indexingRoot,
     options.identityOptions,
+    deadline,
   );
-  const paths = createWorkspacePaths(identity.workspaceKey, {
-    ...(cacheRoot === undefined ? {} : { cacheRoot }),
-  });
+  let paths: ReturnType<typeof createWorkspacePaths>;
+  try {
+    paths = createWorkspacePaths(identity.workspaceKey, {
+      ...(cacheRoot === undefined ? {} : { cacheRoot }),
+    });
+  } catch {
+    throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
+  }
+  const remainingStartMs = deadline - Date.now();
+  if (remainingStartMs <= 0) {
+    throw createServiceClientError("SERVICE_START_TIMEOUT");
+  }
   return connectFirstOrStart({
     connect: (record, remainingMs, signal) =>
       openServiceConnection(
         record,
         identity,
         options.clientVersion,
-        Math.min(options.connectTimeoutMs ?? 1_000, remainingMs),
-        Math.min(options.requestTimeoutMs ?? 5_000, remainingMs),
+        Math.min(connectTimeoutMs, remainingMs),
+        Math.min(requestTimeoutMs, remainingMs),
         signal,
       ),
     paths,
-    ...(options.pollIntervalMs === undefined
-      ? {}
-      : { pollIntervalMs: options.pollIntervalMs }),
+    pollIntervalMs,
     start: (remainingMs, signal) => options.launcher.start(paths, remainingMs, signal),
-    ...(options.startTimeoutMs === undefined ? {} : { timeoutMs: options.startTimeoutMs }),
+    timeoutMs: remainingStartMs,
   });
+}
+
+/** 将身份 realpath 纳入公共绝对 deadline，并把本地路径错误收敛为脱敏 ErrorV1。 */
+async function deriveWorkspaceIdentityWithinDeadline(
+  indexingRoot: string,
+  options: WorkspaceIdentityOptions | undefined,
+  deadline: number,
+): Promise<WorkspaceIdentityResult> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw createServiceClientError("SERVICE_START_TIMEOUT");
+  }
+  let timeout: NodeJS.Timeout | undefined;
+  const outcome = Promise.resolve()
+    .then(() => deriveWorkspaceIdentity(indexingRoot, options))
+    .then(
+      (value) => ({ kind: "value", value }) as const,
+      (_error: unknown) => ({ kind: "error" }) as const,
+    );
+  try {
+    const result = await Promise.race([
+      outcome,
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ kind: "timeout" }), remainingMs);
+      }),
+    ]);
+    if (result.kind === "timeout") {
+      throw createServiceClientError("SERVICE_START_TIMEOUT");
+    }
+    if (result.kind === "error") {
+      throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
+    }
+    return result.value;
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 /** 建立真实 IPC 消息连接并完成 initialize。 */
@@ -222,6 +314,7 @@ async function openServiceConnection(
 ): Promise<GraphServiceConnection> {
   const socket = net.createConnection(record.metadata.endpoint);
   let connection: MessageConnection | null = null;
+  const protocolState = createJsonRpcProtocolState();
   const abortConnection = (): void => {
     connection?.dispose();
     socket.destroy();
@@ -232,9 +325,39 @@ async function openServiceConnection(
       throw createServiceClientError("SERVICE_START_TIMEOUT");
     }
     await waitForSocketConnection(socket, connectTimeoutMs);
-    connection = createMessageConnection(
-      new SocketMessageReader(socket),
+    const rejectProtocolViolation = (): void => {
+      protocolState.violated = true;
+      connection?.dispose();
+      socket.destroy();
+    };
+    const input = createBoundedJsonRpcInput(socket, rejectProtocolViolation);
+    const reader = new StreamMessageReader(input);
+    /** 连接自身已有绝对 deadline，禁用 dispose 后仍会续期的诊断 timer。 */
+    reader.partialMessageTimeout = 0;
+    reader.onError((error) => {
+      /** 普通传输错误保留 retryable 映射；仅解码失败或显式帧拒绝属于协议违规。 */
+      if (protocolState.violated || error instanceof SyntaxError) {
+        rejectProtocolViolation();
+      }
+    });
+    const strictReader = createStrictJsonRpcReader(
+      reader,
+      rejectProtocolViolation,
+      (message) => {
+        const record = message as unknown as Record<string, unknown>;
+        if (Object.hasOwn(record, "method")) {
+          return false;
+        }
+        return protocolState.pendingResponseIds.delete(record.id as string | number);
+      },
+    );
+    const writer = createTrackingJsonRpcWriter(
       new SocketMessageWriter(socket),
+      protocolState,
+    );
+    connection = createMessageConnection(
+      strictReader,
+      writer,
     );
     connection.listen();
     const result = await sendRequestWithTimeout<unknown>(
@@ -274,14 +397,79 @@ async function openServiceConnection(
       identity,
       record.metadata,
       requestTimeoutMs,
+      protocolState,
     );
   } catch (error) {
     connection?.dispose();
     socket.destroy();
+    if (protocolState.violated) {
+      throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+    }
     throw mapConnectionError(error);
   } finally {
     signal?.removeEventListener("abort", abortConnection);
   }
+}
+
+/** 客户端消息门禁状态；每个响应必须匹配一个真实在途请求 ID。 */
+interface JsonRpcProtocolState {
+  pendingResponseIds: Set<string | number>;
+  violated: boolean;
+}
+
+/** 创建独立连接使用的在途请求 ID 集合与协议违规状态。 */
+function createJsonRpcProtocolState(): JsonRpcProtocolState {
+  return { pendingResponseIds: new Set<string | number>(), violated: false };
+}
+
+/**
+ * 在请求写入传输前记录 vscode-jsonrpc 分配的真实 ID。
+ * 这样乱序响应按 ID 独立消费预算，错配、重复或无请求响应会被严格 reader 拒绝。
+ */
+function createTrackingJsonRpcWriter(
+  writer: MessageWriter,
+  protocolState: JsonRpcProtocolState,
+): MessageWriter {
+  return {
+    dispose: () => writer.dispose(),
+    end: () => writer.end(),
+    onClose: writer.onClose,
+    onError: writer.onError,
+    write: async (message) => {
+      if (!Message.isRequest(message) || message.id === null) {
+        await writer.write(message);
+        return;
+      }
+      protocolState.pendingResponseIds.add(message.id);
+      try {
+        await writer.write(message);
+      } catch (error) {
+        protocolState.pendingResponseIds.delete(message.id);
+        throw error;
+      }
+    },
+  };
+}
+
+/** 在消息进入 vscode-jsonrpc 宽松分派器前验证 JSON-RPC 2.0 信封。 */
+function createStrictJsonRpcReader(
+  reader: MessageReader,
+  onRejected: () => void,
+  acceptsMessage: (message: unknown) => boolean = () => true,
+): MessageReader {
+  return {
+    dispose: () => reader.dispose(),
+    listen: (callback) => reader.listen((message) => {
+      if (!validateJsonRpcV2Envelope(message) || !acceptsMessage(message)) {
+        onRejected();
+        return;
+      }
+      callback(message);
+    }),
+    onClose: reader.onClose,
+    onError: reader.onError,
+    onPartialMessage: reader.onPartialMessage,
+  };
 }
 
 /** 有界等待 Named Pipe/UDS 连接建立。 */
@@ -322,6 +510,9 @@ function mapConnectionError(error: unknown): ServiceClientError {
   }
   if (error instanceof ResponseError && validateErrorV1(error.data)) {
     return new ServiceClientError(error.data);
+  }
+  if (error instanceof ResponseError) {
+    return createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
   }
   if (hasSystemErrorCode(error, "EACCES") || hasSystemErrorCode(error, "EPERM")) {
     return createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
@@ -371,12 +562,12 @@ function isKnownCapability(capability: string): capability is ServiceCapability 
 }
 
 /** 将公共 timeout 收敛为可执行的正有限整数。 */
-function normalizeTimeout(timeoutMs: number): number {
+function normalizeTimeout(timeoutMs: number, name = "timeout"): number {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new TypeError("服务请求 timeout 必须是正有限数。");
+    throw new TypeError(`服务连接 ${name} 必须是正有限数。`);
   }
   if (timeoutMs > 2_147_483_647) {
-    throw new RangeError("服务请求 timeout 超出 Node 定时器范围。");
+    throw new RangeError(`服务连接 ${name} 超出 Node 定时器范围。`);
   }
   return Math.max(1, Math.floor(timeoutMs));
 }

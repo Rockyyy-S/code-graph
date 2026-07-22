@@ -5,7 +5,7 @@ created_at: 2026-07-18T12:41:36+08:00
 
 # Story 1.2: 启动空 graph-service 并完成协议握手
 
-Status: done
+Status: in-progress
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git 与技术版本分析；实现完成状态仍由 dev-story 和独立代码审查流程决定。 -->
 
@@ -76,7 +76,7 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
   - [x] 在 apps/graph-service 建立可作为子进程启动的入口、node:net IPC server 与 vscode-jsonrpc 消息连接；使用 SocketMessageReader/SocketMessageWriter 或等价流包装，不使用基于端口的 socket transport。
   - [x] graph-service 保持唯一组合根；本 Story 不引入 SQLite、Analyzer、watcher、rebuild、GraphPatch、节点、边或 Findings。
   - [x] 服务进程取得当前 indexing root 的排他所有权后，生成 serviceInstanceId 和 statusEpoch，原子发布 endpoint metadata，再接受连接；启动失败必须清理本次未完成资源并返回 ErrorV1。
-  - [x] initialize 依次校验请求形状、token、workspace-key 和 protocolVersion；协议主版本不兼容直接拒绝，同一主版本的可选能力只通过 capabilities 协商。
+  - [x] initialize 先固定时序校验 token，再校验封闭请求形状、workspace-key 和 protocolVersion；协议主版本不兼容直接拒绝，同一主版本的可选能力只通过 capabilities 协商。
   - [x] service/status 返回单一权威快照：lifecycle=running、availability=absent、freshness=null、completeness=empty、committed=null，无 currentIndexJob/lastIndexJob。
   - [x] 初始 ServiceStatusV1 必须包含非空 serviceInstanceId/statusEpoch、单调起始 serviceStatusRevision/statusRevision、telemetry requested/effective 均 off、pending=false，以及 configRevision/viewConfigRevision 的合法起始值。
   - [x] 不返回 graphRevision、findingsRevision、节点数、边数或成功索引时间；capabilities 不得声明 graph/query、rules/check、rebuild 或其他后续能力。
@@ -104,14 +104,14 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
   - [x] 测试中的伪 token 仅放 tests 目录或运行时生成，避免 basic-security 将测试材料误判为产品凭据。
   - [x] 测试保持 Red → Green → Refactor；禁止 skip/todo/only、空断言、passWithNoTests 或恒成功脚本。
 
-- [x] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
+- [ ] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
   - [x] 在 packages/contracts 引入架构锁定的 Ajv 8.20.0，在 packages/service-client 和 apps/graph-service 引入 vscode-jsonrpc 9.0.1，并更新 pnpm-lock.yaml；不要提前安装 better-sqlite3 或 Analyzer 依赖。
   - [x] 更新 scripts/architecture/check-dependency-boundaries.mjs 的角色级第三方 allowlist，只允许 contracts 使用 Ajv、service-client 与 composition-root 使用 vscode-jsonrpc；补充正/负向边界测试，保持其他角色默认拒绝。
   - [x] package.json 内部 workspace 依赖继续使用 workspace:*，tsconfig.build.json project references 与 manifest 依赖完全一致；不得改写既有 type/build 脚本。
   - [x] 更新 docs/repository-layout.md，并新增协议控制面说明，记录 owner、IPC、发现、握手、空状态、错误码和范围外能力；文档路径使用仓库相对路径。
   - [x] 复用现有 .github/workflows/architecture-required.yml 和稳定 check 名；不得增加 path filter、continue-on-error 或 Story 1.3 的 ci/quality-gates.v1.yaml。
   - [x] 使用仓库锁定的 Node 24.18.0、pnpm 11.12.0 执行 pnpm install --frozen-lockfile 和 pnpm architecture-required，确保七条门禁全部真实通过。
-  - [x] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
+  - [ ] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
 
 ### Review Findings
 
@@ -162,6 +162,79 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
 - [x] [Review][Patch] [Medium] 兼容解析允许 capability 子集后，`status()`/`shutdown()` 仍会调用服务未声明支持的方法 [packages/service-client/src/connection.ts:82]
 - [x] [Review][Patch] [Medium] `status()` 收到畸形或不兼容响应时不关闭终态连接，调用方丢弃对象后会泄漏 socket [packages/service-client/src/connection.ts:91]
 - [x] [Review][Patch] [Low] 新增原始 JSON-RPC 测试客户端及 worker 强杀路径在无 close/exit 时仍缺少最终超时拒绝和 stdio 销毁 [tests/unit/bound-endpoint-cleanup.test.ts:173]
+
+### Review Findings（第四轮复审，2026-07-20）
+
+- [x] [Review][Patch] [High] 客户端在 initialize 身份校验前直接使用无界 `SocketMessageReader`，伪造或不兼容 endpoint 可用超大 `Content-Length` 耗尽 CLI/extension host 内存 [packages/service-client/src/connection.ts:235]
+- [x] [Review][Patch] [High] RPC shutdown 的单次清理 Promise 没有硬 deadline，任一步永久 pending 时重试与 `forceTerminate` 永远不会执行 [apps/graph-service/src/server.ts:332]
+- [x] [Review][Patch] [High] 外层绝对 deadline 会在 abort 后立即返回并吞掉 launcher 的子进程回收结果，且 metadata `access()` 不可取消，detached 子进程可能在超时后继续运行 [packages/service-client/src/discovery.ts:442]
+- [x] [Review][Patch] [High] 握手开放后没有全局未认证连接上限，本地进程可持续占用 socket、reader/writer、状态对象和五秒计时器直至耗尽 FD/内存 [apps/graph-service/src/server.ts:81]
+- [x] [Review][Patch] [Medium] launcher 观察到共享 metadata 后未确认本次 spawn 的子进程已经退出；慢速 loser 可在 winner 退出后脱离父进程意外启动 [packages/service-client/src/launcher.ts:131]
+- [x] [Review][Patch] [Medium] 信号监听使用 `once` 且 `void closeRuntime()` 不捕获最终拒绝，第二次信号或未处理 rejection 可在 hard deadline 前绕过确定性关闭路径 [apps/graph-service/src/main.ts:122]
+- [x] [Review][Patch] [Medium] 非 ErrorV1 的标准 JSON-RPC `ResponseError` 被统一映射为 `SERVICE_START_TIMEOUT` 并重试，无法为伪造或不兼容服务返回可操作的协议诊断 [packages/service-client/src/connection.ts:319]
+- [x] [Review][Patch] [Medium] Windows UNC indexing root 被编码为 `file://///server/...` 而非规范 `file://server/...`，会生成不稳定且与标准实现不一致的 workspace-key [packages/service-client/src/workspace-identity.ts:169]
+- [x] [Review][Patch] [Medium] `connectTimeoutMs` 与 `requestTimeoutMs` 在身份派生及服务启动后才校验，非法配置会先产生 detached 服务副作用并被误报为启动超时 [packages/service-client/src/connection.ts:188]
+- [x] [Review][Patch] [Medium] 默认 POSIX 缓存路径导致 UDS 超长时公共连接入口直接抛原生 `Error`，缺少 AC4 要求的稳定 ErrorV1 字段 [packages/service-client/src/endpoint.ts:65]
+- [x] [Review][Patch] [Low] `SafeLocalLogger.close()` 在句柄真正关闭前提交 `#closed=true`，首次 close 瞬时失败后所有清理重试都会误判成功 [apps/graph-service/src/safe-log.ts:37]
+- [x] [Review][Patch] [Low] 新增合同类型仍有三个接口缺少项目约束要求的中文 JSDoc [packages/contracts/src/protocol-error.ts:36]
+- [ ] [Review][Patch] [High] 第四轮本地修复尚未形成候选提交与同 SHA Hosted `architecture-required` 证据，当前旧运行不能证明 AC5 [docs/ci/story-1-2-provider-evidence.md:3]
+
+### Review Findings（第五轮复审，2026-07-20）
+
+- [x] [Review][Patch] [High] RPC shutdown 失败分支在重试与 `forceTerminate` 之前无界等待 `logger.record()`，日志写入永久 pending 时强制终止仍不可达 [apps/graph-service/src/server.ts:365]
+- [x] [Review][Patch] [Medium] 客户端未将 JSON-RPC reader 的解码/超限错误立即结算为协议不兼容，畸形或超大响应销毁 socket 后请求仍挂到 deadline 并可误报 `SERVICE_START_TIMEOUT` [packages/service-client/src/connection.ts:263]
+- [x] [Review][Patch] [Medium] launcher 将子进程 `exit` 与 stdio `close` 视为同一状态，可在 stderr 排空前解析并丢失原始安全 ErrorV1 的 code/logId [packages/service-client/src/launcher.ts:217]
+- [x] [Review][Patch] [Medium] start 超时后仍固定等待最多 3.5 秒 abort settlement，短 `timeoutMs` 调用会显著超过对外声明的共享绝对 deadline [packages/service-client/src/discovery.ts:467]
+
+### Review Findings（第六轮复审，2026-07-22）
+
+- [x] [Review][Patch] [High] 握手超时、握手拒绝或 reader error 路径先 `dispose()` 连接，但活跃连接集合仅在 `onClose` 删除；64 次失败可永久占满配额并拒绝后续客户端 [apps/graph-service/src/server.ts:289]
+- [x] [Review][Patch] [High] indexing-root 身份派生位于绝对 deadline 和稳定 ErrorV1 边界之外，挂起的 `realpath` 可使公共连接永不返回，权限错误还可原样泄露绝对路径 [packages/service-client/src/connection.ts:229]
+- [x] [Review][Patch] [High] 公开 deadline 返回后完全丢弃 launcher 的晚到回收失败，子进程无法终止时孤儿进程会继续占用单实例资源 [packages/service-client/src/discovery.ts:441]
+- [x] [Review][Patch] [Medium] 客户端依赖 `vscode-jsonrpc` 的宽松消息判定，会接受缺失/伪造 `jsonrpc: "2.0"` 的响应，并将缺少 `result/error` 的同 id 响应误报为启动超时 [packages/service-client/src/connection.ts:285]
+- [x] [Review][Patch] [Medium] 子进程临近 deadline 退出时不再等待 stderr close，仍可丢失原始 ErrorV1；close 永不到达时也未销毁 stderr/IPC 管道 [packages/service-client/src/launcher.ts:305]
+- [x] [Review][Patch] [Low] Provider 文档顶部声明当前本地门禁为 unit 85/85、contract 83/83，但“本地验收”章节仍保留 84/84、81/81 [docs/ci/story-1-2-provider-evidence.md:25]
+
+### Review Findings（第七轮复审，2026-07-22）
+
+- [x] [Review][Patch] [High] pending cleanup 记录会被并发覆盖且失败 tombstone 只消费一次，未知子进程状态可被遗忘并重新启动 [packages/service-client/src/discovery.ts:485]
+- [x] [Review][Patch] [High] partial JSON-RPC 消息的内部 timer 在连接 dispose 后仍永久续期，可阻止客户端进程退出 [packages/service-client/src/connection.ts:397]
+- [x] [Review][Patch] [Medium] 导出的 launcher 启动 deadline 不覆盖 spawn 等待及超时后的同步回收，直接调用可明显超时 [packages/service-client/src/launcher.ts:94]
+- [x] [Review][Patch] [Medium] 服务端未校验 JSON-RPC 2.0 信封，缺失或伪造 jsonrpc 字段的 initialize 仍可成功 [apps/graph-service/src/server.ts:232]
+- [x] [Review][Patch] [Medium] JSON-RPC 正文为 null 时严格信封校验自身抛错，协议违规仍会退化为启动超时 [packages/service-client/src/connection.ts:417]
+- [x] [Review][Patch] [Medium] 宽松 Content-Length/附加 header 校验会把畸形帧交给下游并误映射为启动超时 [packages/service-client/src/bounded-json-rpc-input.ts:56]
+- [x] [Review][Patch] [Medium] 同 PID metadata 会在检查子进程 exit 前被接受，发布后立即崩溃可被误报为启动成功 [packages/service-client/src/launcher.ts:141]
+
+### Review Findings（第八轮复审，2026-07-22）
+
+- [x] [Review][Patch] [High] launcher 在公开 deadline 耗尽后给 IPC 取消和强杀确认的剩余预算为零，普通启动超时可被误记为永久回收失败 tombstone 并阻断后续连接 [packages/service-client/src/launcher.ts:194]
+- [x] [Review][Patch] [High] 子进程收到 spawn 后会移除唯一 error 监听器，回收期 kill/IPC 失败触发 error 时可以未捕获异常终止 CLI 或 extension host [packages/service-client/src/launcher.ts:286]
+- [x] [Review][Patch] [Medium] 客户端 initialize 阶段仍接受服务端请求、通知或额外小帧，伪造 endpoint 可将协议违规退化为请求超时并累积待解码消息 [packages/service-client/src/connection.ts:399]
+- [x] [Review][Patch] [Medium] socket 在帧头或正文未完整时结束仅会关闭输入流，截断的 JSON-RPC 响应会被误映射为可重试启动超时 [packages/service-client/src/bounded-json-rpc-input.ts:88]
+- [x] [Review][Patch] [Medium] launcher PID 探针会跟随 metadata 符号链接并以阻塞方式打开 FIFO，外层 deadline 返回后底层 open 仍可永久 pending 并阻止客户端进程退出 [packages/service-client/src/launcher.ts:483]
+
+### Review Findings（第九轮复审，2026-07-22）
+
+- [x] [Review][Patch] [Medium] 客户端响应预算未绑定实际 JSON-RPC id，单个错配 id 会被误报为超时，并发请求的乱序合法响应还会互相消费 token 并误杀连接 [packages/service-client/src/connection.ts:351]
+
+### Review Findings（第十轮复审，2026-07-22）
+
+- [x] [Review][Patch] [High] bootstrap 原始 fatal cleanup 错误会被 logger.close 失败覆盖，导致入口无法执行强制退出并可能永久保留活跃 listener [apps/graph-service/src/index.ts:38]
+- [x] [Review][Patch] [Medium] revision Schema 未限制 JavaScript 安全整数上界，会接受已丢失精度的权威 revision 并破坏单调比较语义 [packages/contracts/src/service-control-schema.ts:10]
+- [x] [Review][Patch] [Medium] 安全日志按路径跟随 service.log 符号链接并 chmod 目标文件，可追加和修改非预期用户文件 [apps/graph-service/src/safe-log.ts:62]
+- [x] [Review][Patch] [Medium] 服务端 canonical initialize 与 service/status 响应未调用现有 Ajv validator，产品运行路径仍只依赖 TypeScript 构造 [apps/graph-service/src/server.ts:277]
+- [x] [Review][Patch] [Medium] token-first 握手顺序在实现、协议文档、Story Task 与仓库布局文档之间自相矛盾，已勾选验收行为不唯一 [docs/repository-layout.md:70]
+
+### Review Findings（第十一轮复审，2026-07-22）
+
+- [x] [Review][Patch] [High] bootstrap fatal cleanup 后无界等待 logger.close，日志关闭永久 pending 时原始致命错误仍无法到达入口强制退出 [apps/graph-service/src/index.ts:39]
+- [x] [Review][Patch] [Medium] POSIX 安全日志只使用 O_NOFOLLOW，预置无 reader 的 FIFO 仍会在 open 阶段永久阻塞服务启动 [apps/graph-service/src/safe-log.ts:82]
+- [x] [Review][Patch] [Medium] canonical 响应校验失败仅延迟关闭 socket，20ms 窗口内已 initialized 的连接仍会处理后续 status 或 shutdown [apps/graph-service/src/server.ts:280]
+
+### Review Findings（第十二轮复审，2026-07-22）
+
+- [x] [Review][Patch] [Medium] POSIX workspace 缓存目录若已存在，日志会在目录权限收紧为 0700 前打开，失败路径还会永久保留宽松权限 [apps/graph-service/src/safe-log.ts:81]
+- [x] [Review][Patch] [Medium] 预置的多硬链接 service.log 仍会通过普通文件校验，服务可向非预期目标 inode 追加日志并修改权限 [apps/graph-service/src/safe-log.ts:85]
 
 ## Dev Notes
 
@@ -384,6 +457,15 @@ GPT-5 Codex
 - 2026-07-20：第二轮复审 12 项本地修复完成 RED → GREEN；`pnpm architecture-required` 全绿（unit 64/64，contract 77/77），当前候选 Hosted 证据待生成。
 - 2026-07-20：第三轮复审采用私有父子 IPC 取消协议，12 项本地行动项完成 RED → GREEN；`pnpm architecture-required` 全绿（unit 74/74，contract 78/78）。
 - 2026-07-20：Hosted run 29723702957 在候选 `3c6bf8c` 上真实阻断 Linux POSIX 测试夹具错误；修复后候选 `56f4e6385ee2d54f4b31f07c02c07969bc571e54` 的 run 29724059158 七门禁全部通过。
+- 2026-07-20：第四轮复审 12 项本地补丁完成 RED → GREEN；补充客户端 1 MiB 响应帧限制、RPC shutdown 硬 deadline、全局连接上限、launcher 退出归属、UNC 身份与稳定错误映射，`pnpm architecture-required` 全绿（unit 84/84，contract 81/81）。
+- 2026-07-20：第五轮复审 4 项本地补丁完成 RED → GREEN；收敛 shutdown 日志 deadline、reader 错误结算、exit/close 时序与启动绝对 deadline，`pnpm architecture-required` 全绿（unit 85/85，contract 83/83）。
+- 2026-07-22：第六轮复审 6 项本地补丁完成 RED → GREEN；修复连接配额释放、身份 deadline/ErrorV1、晚到回收状态、JSON-RPC 2.0 信封与 stderr 管道回收，`pnpm architecture-required` 全绿（unit 87/87，contract 87/87）。
+- 2026-07-22：第七轮复审 7 项本地补丁完成 RED → GREEN；修复并发 cleanup tombstone、partial-message timer、launcher 端到端 deadline/exit 竞态与双向 JSON-RPC 2.0 信封门禁，`pnpm architecture-required` 全绿（unit 90/90，contract 93/93）。
+- 2026-07-22：第八轮复审 5 项本地补丁完成 RED → GREEN；将公开启动 deadline 与后台子进程回收预算分离，持续捕获 child error，限制客户端入站响应预算，并拒绝截断帧与阻塞 metadata 路径；`pnpm architecture-required` 全绿（unit 94/94，contract 96/96）。
+- 2026-07-22：第九轮复审 1 项本地补丁完成 RED → GREEN；错配 JSON-RPC response id 合同测试先复现超时误报，修复后按真实 request id 拒绝错配/重复响应并接受带异步间隔的并发乱序响应；`pnpm architecture-required` 全绿（unit 94/94，contract 98/98）。
+- 2026-07-22：第十轮复审 5 项本地补丁完成 RED → GREEN；保留 fatal cleanup 原始错误，收紧 revision 安全整数、POSIX 日志 no-follow、服务端 canonical Ajv 门禁并统一 token-first 文档；`pnpm architecture-required` 全绿（unit 96/96，contract 98/98）。
+- 2026-07-22：第十一轮复审 3 项本地补丁完成 RED → GREEN；为启动失败日志关闭增加硬 deadline，以 non-block + 普通文件校验拒绝 FIFO，并让 canonical 失败在连接关闭前保持终态；首次并行门禁因资源争用触发既有计时测试超时，单独重跑 `pnpm architecture-required` 全绿（unit 98/98，contract 99/99）。
+- 2026-07-22：第十二轮复审 2 项本地补丁完成 RED → GREEN；POSIX 日志打开前先将既有 workspace 目录收紧为 0700，并拒绝多硬链接日志目标；`pnpm architecture-required` 全绿（unit 100/100，contract 99/99）。
 
 ### Completion Notes List
 
@@ -393,11 +475,20 @@ GPT-5 Codex
 - Task 3：交付可执行 graph-service、vscode-jsonrpc 本机 IPC、权威 absent 状态、受控 shutdown 与最小安全日志。
 - Task 4：交付共享 service-client 公共 API、受信任 spawn 启动器、双客户端复用与无副作用 Workspace Trust 门禁。
 - Task 5：真实 Windows Named Pipe 结果为两个独立客户端进程获得相同 PID、serviceInstanceId、statusEpoch 和唯一 writer；第三客户端成功复用并 shutdown。
-- Task 6：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装、本地七门禁与 Hosted Provider 证据均已完成。
-- Task 6：Hosted 失败真实阻断后，最终候选 `56f4e63` 的 architecture-required 全绿，Provider 证据已回填。
+- Task 6（当前本地工作区）：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装与本地七门禁均已完成；新候选 Hosted Provider 证据待生成。
+- Task 6：第三轮候选 `56f4e63` 的历史 Hosted 证据仍保留，但不替代当前工作区的新候选证据。
 - Code Review：完成 deadline、启动错误传播、Schema 协商、实例身份、异常安全清理、信号窗口、测试孤儿进程与 JSDoc 约束修复，15/15 审查项关闭。
 - Code Review Round 2：本地代码与测试修复 12/12 完成；最终候选的 Hosted required-check 已关闭遗留证据行动项。
 - Code Review Round 3：交付跨平台父子 IPC 取消、最终强制终止、fatal cleanup、认证前单帧排队、全链路 deadline 与 capability 门禁；全部行动项已关闭。
+- Code Review Round 4：本地代码与测试补丁 12/12 完成；仅保留当前工作区候选提交的 Hosted required-check 证据行动项。
+- Code Review Round 5：本地代码与回归测试 4/4 完成；Story 继续因同 SHA Hosted required-check 证据保持 in-progress。
+- Code Review Round 6：本地代码与回归测试 6/6 完成；仅保留当前候选的同 SHA Hosted required-check 证据行动项。
+- Code Review Round 7：本地代码与回归测试 7/7 完成；Story 继续因当前候选的同 SHA Hosted required-check 证据保持 in-progress。
+- Code Review Round 8：本地代码与回归测试 5/5 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
+- Code Review Round 9：本地代码与回归测试 1/1 完成；客户端响应预算已绑定真实 JSON-RPC request id，仅余当前候选的同 SHA Hosted required-check 证据行动项。
+- Code Review Round 10：本地代码、合同与文档补丁 5/5 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
+- Code Review Round 11：本地代码与回归测试补丁 3/3 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
+- Code Review Round 12：本地代码与回归测试补丁 2/2 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
 
 ### File List
 
@@ -427,6 +518,7 @@ GPT-5 Codex
 - packages/service-client/package.json
 - packages/service-client/src/discovery.ts
 - packages/service-client/src/connection.ts
+- packages/service-client/src/bounded-json-rpc-input.ts
 - packages/service-client/src/endpoint.ts
 - packages/service-client/src/errors.ts
 - packages/service-client/src/index.ts
@@ -448,6 +540,8 @@ GPT-5 Codex
 - tests/unit/endpoint.test.ts
 - tests/unit/handshake-guard.test.ts
 - tests/unit/graph-service-process-lifecycle.test.ts
+- tests/unit/graph-service-startup.test.ts
+- tests/unit/safe-log.test.ts
 - tests/unit/instance-bootstrap.test.ts
 - tests/unit/service-state.test.ts
 - tests/unit/service-client-trust.test.ts
@@ -470,3 +564,12 @@ GPT-5 Codex
 - 2026-07-20：完成第二轮复审的 12 项本地修复，Hosted 候选证据未完成，Story 保持 in-progress。
 - 2026-07-20：完成第三轮复审的 12 项本地修复，当前候选 Hosted 证据未完成，Story 保持 in-progress。
 - 2026-07-20：候选 `56f4e6385ee2d54f4b31f07c02c07969bc571e54` 的 Hosted `architecture-required` run 29724059158 全绿，关闭 AC5 与全部复审 finding，Story 更新为 done。
+- 2026-07-20：完成第四轮复审 12 项本地补丁并通过七门禁；新候选 Hosted 证据尚未生成，Story 回到 in-progress。
+- 2026-07-20：完成第五轮复审 4 项本地补丁并通过七门禁；仅剩当前候选的 Hosted 证据行动项。
+- 2026-07-22：完成第六轮复审 6 项本地补丁并通过七门禁；Story 与 Sprint 继续保持 in-progress。
+- 2026-07-22：完成第七轮复审 7 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
+- 2026-07-22：完成第八轮复审 5 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
+- 2026-07-22：完成第九轮复审 1 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
+- 2026-07-22：完成第十轮复审 5 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
+- 2026-07-22：完成第十一轮复审 3 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
+- 2026-07-22：完成第十二轮复审 2 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。

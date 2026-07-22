@@ -147,6 +147,37 @@ describe("graph-service process lifecycle", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps termination handlers installed while asynchronous cleanup is pending", async () => {
+    const signals = new EventEmitter();
+    let resolveClose: (() => void) | undefined;
+    const close = vi.fn(async () => new Promise<void>((resolve) => {
+      resolveClose = resolve;
+    }));
+    const environment = {
+      CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
+        endpoint: "\\\\.\\pipe\\codegraph-repeat-signal",
+        endpointKind: "named-pipe",
+        lockPath: "C:\\cache\\owner.lock",
+        metadataPath: "C:\\cache\\service-metadata.json",
+        tokenPath: "C:\\cache\\session-token.bin",
+        workspaceDirectory: "C:\\cache",
+        workspaceKey: "d".repeat(64),
+      }),
+    };
+    await runGraphServiceProcess(environment, {
+      signalTarget: signals,
+      startService: async () => ({ close }) as unknown as OwnedServiceInstance,
+    });
+
+    signals.emit("SIGTERM");
+    signals.emit("SIGTERM");
+
+    expect(signals.listenerCount("SIGTERM")).toBe(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    resolveClose?.();
+    await vi.waitFor(() => expect(signals.listenerCount("SIGTERM")).toBe(0));
+  });
+
   it("rejects a shutdown deadline beyond the Node timer range", async () => {
     const signals = new EventEmitter();
     const environment = {

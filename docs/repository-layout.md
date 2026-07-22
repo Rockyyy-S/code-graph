@@ -67,7 +67,7 @@ workflow 使用完整 commit SHA 固定第三方 Actions。
 connect-first 发现并按需启动。Windows 使用随机 Named Pipe；macOS/Linux 使用长度受控
 且权限为 `0600` 的 UDS。公开 API 不接受 host/port，也不存在 TCP fallback。
 
-每条连接的首请求必须是 `initialize`，并依次通过请求形状、token、workspace-key 和协议
+每条连接的首请求必须是 `initialize`，并依次通过 token、封闭请求形状、workspace-key 和协议
 主版本校验。握手前不会返回 `service/status`；失败返回脱敏 `ErrorV1` 后关闭连接。
 成功后仅声明 `service/status` 与 `service/shutdown`，详细合同见
 `docs/protocol/service-control-v1.md`。

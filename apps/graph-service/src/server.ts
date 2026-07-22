@@ -9,6 +9,7 @@ import {
   StreamMessageReader,
   createMessageConnection,
   type MessageConnection,
+  type MessageReader,
 } from "vscode-jsonrpc/node";
 import {
   createErrorV1,
@@ -16,7 +17,10 @@ import {
   type ErrorV1,
   type ServiceEndpointKind,
   validateErrorV1,
+  validateInitializeResult,
+  validateJsonRpcV2Envelope,
   validateServiceControlRequest,
+  validateServiceStatusV1,
   validateShutdownResult,
 } from "@codegraph/contracts";
 import { HandshakeGuard } from "./handshake.js";
@@ -31,6 +35,8 @@ import { createInitialServiceState, createInitializeResult } from "./service-sta
 const MAX_JSON_RPC_HEADER_BYTES = 8 * 1024;
 const MAX_JSON_RPC_FRAME_BYTES = 1024 * 1024;
 const SHUTDOWN_RETRY_DELAYS_MS = [0, 25, 100] as const;
+const DEFAULT_MAX_ACTIVE_CONNECTIONS = 64;
+const DEFAULT_SHUTDOWN_ATTEMPT_TIMEOUT_MS = 250;
 
 /** IPC endpoint 绑定参数。 */
 export interface CreateBoundIpcEndpointOptions {
@@ -38,7 +44,9 @@ export interface CreateBoundIpcEndpointOptions {
   endpointKind: ServiceEndpointKind;
   forceTerminate?: (code: number) => void;
   logger: SafeLocalLogger;
+  maxActiveConnections?: number;
   setEndpointPermissions?: (endpoint: string, mode: number) => Promise<void>;
+  shutdownAttemptTimeoutMs?: number;
 }
 
 /** 活跃 JSON-RPC 连接及其底层 socket。 */
@@ -62,16 +70,29 @@ interface PendingConnection {
 export async function createBoundIpcEndpoint(
   options: CreateBoundIpcEndpointOptions,
 ): Promise<BoundServiceEndpoint> {
+  const maxActiveConnections = normalizePositiveInteger(
+    options.maxActiveConnections ?? DEFAULT_MAX_ACTIVE_CONNECTIONS,
+    "maxActiveConnections",
+  );
+  const shutdownAttemptTimeoutMs = normalizePositiveInteger(
+    options.shutdownAttemptTimeoutMs ?? DEFAULT_SHUTDOWN_ATTEMPT_TIMEOUT_MS,
+    "shutdownAttemptTimeoutMs",
+  );
   let handshakeContext: HandshakeOpenContext | null = null;
   const connections = new Set<ActiveConnection>();
   const pendingConnections = new Set<PendingConnection>();
   const activateSocket = (socket: net.Socket, context: HandshakeOpenContext): void => {
+    if (connections.size >= maxActiveConnections) {
+      socket.destroy();
+      return;
+    }
     let active: ActiveConnection;
     active = createConnectionSession(
       socket,
       context,
       options.logger,
       options.forceTerminate ?? ((code: number): void => process.exit(code)),
+      shutdownAttemptTimeoutMs,
       () => {
         connections.delete(active);
       },
@@ -204,6 +225,7 @@ function createConnectionSession(
   context: HandshakeOpenContext,
   logger: SafeLocalLogger,
   forceTerminate: (code: number) => void,
+  shutdownAttemptTimeoutMs: number,
   onClosed: () => void,
 ): ActiveConnection {
   const guard = new HandshakeGuard({
@@ -213,8 +235,14 @@ function createConnectionSession(
   const state = createInitialServiceState(context);
   const input = createBoundedJsonRpcInput(socket, logger, () => guard.initialized);
   const reader = new StreamMessageReader(input);
+  /** 服务关闭由握手与 socket deadline 管理，禁用会在 dispose 后续期的诊断 timer。 */
+  reader.partialMessageTimeout = 0;
   const writer = new SocketMessageWriter(socket);
-  const connection = createMessageConnection(reader, writer);
+  const strictReader = createStrictJsonRpcReader(reader, () => {
+    void logger.record({ event: "connection-error", logId: randomUUID() });
+    socket.destroy();
+  });
+  const connection = createMessageConnection(strictReader, writer);
   const cancelTimeout = guard.armTimeout((decision) => {
     if (!decision.accepted) {
       void logger.record({
@@ -226,8 +254,21 @@ function createConnectionSession(
     connection.dispose();
     socket.destroy();
   });
+  let released = false;
+  const releaseConnection = (): void => {
+    if (released) {
+      return;
+    }
+    released = true;
+    cancelTimeout();
+    onClosed();
+  };
+  let canonicalFailure: ErrorV1 | null = null;
 
   connection.onRequest((method, params) => {
+    if (canonicalFailure !== null) {
+      return toResponseError(canonicalFailure);
+    }
     if (!guard.initialized) {
       const decision = guard.evaluateFirstRequest(method, params);
       if (!decision.accepted) {
@@ -239,14 +280,26 @@ function createConnectionSession(
         scheduleConnectionClose(connection, socket);
         return toResponseError(decision.error);
       }
-      return createInitializeResult(state);
+      const result = createInitializeResult(state);
+      if (!validateInitializeResult(result)) {
+        canonicalFailure = createInvalidCanonicalError();
+        scheduleConnectionClose(connection, socket);
+        return toResponseError(canonicalFailure);
+      }
+      return result;
     }
 
     if (method === SERVICE_METHODS.status) {
       if (!validateServiceControlRequest(params)) {
         return invalidControlRequest();
       }
-      return state.getStatus();
+      const result = state.getStatus();
+      if (!validateServiceStatusV1(result)) {
+        canonicalFailure = createInvalidCanonicalError();
+        scheduleConnectionClose(connection, socket);
+        return toResponseError(canonicalFailure);
+      }
+      return result;
     }
     if (method === SERVICE_METHODS.shutdown) {
       if (!validateServiceControlRequest(params)) {
@@ -256,7 +309,12 @@ function createConnectionSession(
       if (!validateShutdownResult(result)) {
         return toResponseError(createErrorV1("SERVICE_INVALID_REQUEST", randomUUID()));
       }
-      scheduleShutdown(context.shutdown, logger, forceTerminate);
+      scheduleShutdown(
+        context.shutdown,
+        logger,
+        forceTerminate,
+        shutdownAttemptTimeoutMs,
+      );
       return result;
     }
 
@@ -271,12 +329,30 @@ function createConnectionSession(
     connection.dispose();
     socket.destroy();
   });
-  connection.onClose(() => {
-    cancelTimeout();
-    onClosed();
-  });
+  connection.onClose(releaseConnection);
+  connection.onDispose(releaseConnection);
   connection.listen();
   return { connection, socket };
+}
+
+/** 在服务端分派请求前严格拒绝非 JSON-RPC 2.0 信封。 */
+function createStrictJsonRpcReader(
+  reader: MessageReader,
+  onRejected: () => void,
+): MessageReader {
+  return {
+    dispose: () => reader.dispose(),
+    listen: (callback) => reader.listen((message) => {
+      if (!validateJsonRpcV2Envelope(message)) {
+        onRejected();
+        return;
+      }
+      callback(message);
+    }),
+    onClose: reader.onClose,
+    onError: reader.onError,
+    onPartialMessage: reader.onPartialMessage,
+  };
 }
 
 /** 将稳定 ErrorV1 放入 JSON-RPC error.data。 */
@@ -292,6 +368,15 @@ function toResponseError(error: ErrorV1): ResponseError<ErrorV1> {
         ? ErrorCodes.InvalidParams
       : ErrorCodes.UnknownErrorCode;
   return new ResponseError(responseCode, error.message, error);
+}
+
+/** 服务内部生成非法 canonical 响应时创建可在连接关闭前重复返回的终态错误。 */
+function createInvalidCanonicalError(): ErrorV1 {
+  return createErrorV1(
+    "SERVICE_PROTOCOL_INCOMPATIBLE",
+    randomUUID(),
+    "服务生成的控制面响应不符合协议定义。",
+  );
 }
 
 /** 给 writer 留出发送错误响应的机会，然后永久关闭失败连接。 */
@@ -311,9 +396,15 @@ function scheduleShutdown(
   shutdown: () => Promise<void>,
   logger: SafeLocalLogger,
   forceTerminate: (code: number) => void,
+  shutdownAttemptTimeoutMs: number,
 ): void {
   const timeout = setTimeout(() => {
-    void runShutdownWithRetries(shutdown, logger, forceTerminate);
+    void runShutdownWithRetries(
+      shutdown,
+      logger,
+      forceTerminate,
+      shutdownAttemptTimeoutMs,
+    );
   }, 20);
   timeout.unref();
 }
@@ -323,23 +414,64 @@ async function runShutdownWithRetries(
   shutdown: () => Promise<void>,
   logger: SafeLocalLogger,
   forceTerminate: (code: number) => void,
+  shutdownAttemptTimeoutMs: number,
 ): Promise<void> {
   for (const [index, delayMs] of SHUTDOWN_RETRY_DELAYS_MS.entries()) {
     if (delayMs > 0) {
       await wait(delayMs);
     }
     try {
-      await shutdown();
+      await runWithTimeout(shutdown, shutdownAttemptTimeoutMs);
       return;
     } catch (error) {
-      await logger.record({
-        event: "connection-error",
-        logId: createHashlessLogId(error instanceof Error ? error : new Error("shutdown failed")),
-      });
+      await runBestEffortWithTimeout(
+        () => logger.record({
+          event: "connection-error",
+          logId: createHashlessLogId(
+            error instanceof Error ? error : new Error("shutdown failed"),
+          ),
+        }),
+        shutdownAttemptTimeoutMs,
+      );
       if (index === SHUTDOWN_RETRY_DELAYS_MS.length - 1) {
         forceTerminate(1);
       }
     }
+  }
+}
+
+/** 为单次 RPC shutdown 清理设置硬界限，使最终强制终止一定可达。 */
+async function runWithTimeout(
+  operation: () => Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("RPC shutdown 清理超时。")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+/** 诊断日志只能 best-effort 写入，不能阻断 shutdown 重试与最终强制终止。 */
+async function runBestEffortWithTimeout(
+  operation: () => Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  try {
+    await runWithTimeout(operation, timeoutMs);
+  } catch {
+    /** 日志失败或挂起均已被收敛，资源终止路径必须继续。 */
   }
 }
 
@@ -512,4 +644,12 @@ async function closeServer(server: net.Server): Promise<void> {
 /** 返回包含稳定 ErrorV1 的 JSON-RPC InvalidParams。 */
 function invalidControlRequest(): ResponseError<ErrorV1> {
   return toResponseError(createErrorV1("SERVICE_INVALID_REQUEST", randomUUID()));
+}
+
+/** 收敛内部资源上限配置，拒绝无效或超出 Node timer 范围的值。 */
+function normalizePositiveInteger(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0 || value > 2_147_483_647) {
+    throw new RangeError(`${name} 必须位于 Node 正整数范围内。`);
+  }
+  return Math.max(1, Math.floor(value));
 }

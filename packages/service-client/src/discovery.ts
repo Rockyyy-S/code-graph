@@ -50,6 +50,7 @@ export interface ConnectFirstOrStartOptions<T> {
 const MAX_METADATA_BYTES = 64 * 1024;
 const MAX_TOKEN_BYTES = 32;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const pendingStartCleanups = new Map<string, Set<PendingStartCleanup>>();
 
 /** 排他所有权句柄；只有持有者可以释放本次 owner.lock。 */
 export class WorkspaceOwnership {
@@ -142,6 +143,7 @@ export async function connectFirstOrStart<T>(
     "pollIntervalMs",
   );
   const deadline = Date.now() + timeoutMs;
+  await reconcilePendingStartCleanup(pathsKey(options.paths), deadline);
   let startAttempted = false;
   let consecutiveStaleObservations = 0;
   const probe = options.probeDiscoveryState ?? probeDiscoveryState;
@@ -180,6 +182,9 @@ export async function connectFirstOrStart<T>(
         await runWithDeadline(
           (signal, remainingMs) => options.start(remainingMs, signal),
           deadline,
+          (operationOutcome) => {
+            trackPendingStartCleanup(pathsKey(options.paths), operationOutcome);
+          },
         );
       } catch (error) {
         if (!hasProtocolCode(error, "SERVICE_INSTANCE_CONFLICT")) {
@@ -431,6 +436,7 @@ async function wait(milliseconds: number): Promise<void> {
 async function runWithDeadline<T>(
   operation: (signal: AbortSignal, remainingMs: number) => Promise<T>,
   deadline: number,
+  onTimeout?: (operationOutcome: Promise<OperationOutcome<T>>) => void,
 ): Promise<T> {
   const remainingMs = remainingMilliseconds(deadline);
   if (remainingMs <= 0) {
@@ -438,29 +444,132 @@ async function runWithDeadline<T>(
   }
   const controller = new AbortController();
   let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      operation(controller.signal, remainingMs),
-      new Promise<T>((_resolve, reject) => {
-        timeout = setTimeout(
-          () => {
-            controller.abort();
-            reject(createServiceClientError("SERVICE_START_TIMEOUT"));
-          },
-          remainingMs,
-        );
-        timeout.unref();
-      }),
-    ]);
-  } catch (error) {
-    if (controller.signal.aborted) {
+  const operationOutcome: Promise<OperationOutcome<T>> = Promise.resolve()
+    .then(() => operation(controller.signal, remainingMs))
+    .then(
+      (value): OperationOutcome<T> => ({ kind: "value", value }),
+      (error: unknown): OperationOutcome<T> => ({ error, kind: "error" }),
+    );
+  const timeoutOutcome = new Promise<OperationOutcome<T>>((resolve) => {
+    timeout = setTimeout(() => resolve({ kind: "timeout" }), remainingMs);
+  });
+  const outcome = await Promise.race([operationOutcome, timeoutOutcome]);
+  if (timeout !== undefined) {
+    clearTimeout(timeout);
+  }
+  if (outcome.kind === "value") {
+    return outcome.value;
+  }
+  if (outcome.kind === "error") {
+    throw outcome.error;
+  }
+
+  controller.abort();
+  onTimeout?.(operationOutcome);
+  /** 底层继续执行自身的有界回收，但清理宽限不能再次延长公开绝对 deadline。 */
+  throw createServiceClientError("SERVICE_START_TIMEOUT");
+}
+
+/** deadline 操作的封闭完成状态，避免超时后丢失异步清理拒绝。 */
+type OperationOutcome<T> =
+  | { kind: "error"; error: unknown }
+  | { kind: "timeout" }
+  | { kind: "value"; value: T };
+
+/** 单次 launcher 回收的持久记录；未知失败会保留为 fail-closed tombstone。 */
+interface PendingStartCleanup {
+  outcome?: OperationOutcome<void>;
+  promise: Promise<OperationOutcome<void>>;
+}
+
+/** 使用稳定 workspace 路径关联超时后仍在执行的 launcher 回收。 */
+function pathsKey(paths: WorkspacePaths): string {
+  return paths.workspaceDirectory;
+}
+
+/** 保存未知回收状态；成功回收或正常取消会自动释放记录。 */
+function trackPendingStartCleanup(
+  key: string,
+  operationOutcome: Promise<OperationOutcome<void>>,
+): void {
+  let entry!: PendingStartCleanup;
+  const tracked = operationOutcome.then((outcome) => {
+    entry.outcome = outcome;
+    const cleanupSettledSafely =
+      outcome.kind === "value" ||
+      (outcome.kind === "error" &&
+        (hasProtocolCode(outcome.error, "SERVICE_START_TIMEOUT") ||
+          hasProtocolCode(outcome.error, "SERVICE_INSTANCE_CONFLICT")));
+    if (cleanupSettledSafely) {
+      removePendingStartCleanup(key, entry);
+    }
+    return outcome;
+  });
+  entry = { promise: tracked };
+  const pending = pendingStartCleanups.get(key) ?? new Set<PendingStartCleanup>();
+  pending.add(entry);
+  pendingStartCleanups.set(key, pending);
+}
+
+/** 新启动前先观察上次超时后的回收结果，避免在未知子进程状态下再次启动。 */
+async function reconcilePendingStartCleanup(
+  key: string,
+  deadline: number,
+): Promise<void> {
+  while (true) {
+    const pending = pendingStartCleanups.get(key);
+    if (pending === undefined || pending.size === 0) {
+      return;
+    }
+    const failed = [...pending].find(
+      (entry) => entry.outcome?.kind === "error",
+    )?.outcome;
+    if (failed?.kind === "error") {
+      if (hasProtocolCode(failed.error, "SERVICE_ENDPOINT_START_FAILED")) {
+        throw failed.error;
+      }
+      throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
+    }
+    const remainingMs = remainingMilliseconds(deadline);
+    if (remainingMs <= 0) {
       throw createServiceClientError("SERVICE_START_TIMEOUT");
     }
-    throw error;
-  } finally {
-    if (timeout !== undefined) {
-      clearTimeout(timeout);
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      const outcome = await Promise.race([
+        ...[...pending].map((entry) => entry.promise),
+        new Promise<null>((resolve) => {
+          timeout = setTimeout(() => resolve(null), remainingMs);
+        }),
+      ]);
+      if (outcome === null) {
+        throw createServiceClientError("SERVICE_START_TIMEOUT");
+      }
+      if (outcome.kind === "error" &&
+          !hasProtocolCode(outcome.error, "SERVICE_START_TIMEOUT") &&
+          !hasProtocolCode(outcome.error, "SERVICE_INSTANCE_CONFLICT")) {
+        if (hasProtocolCode(outcome.error, "SERVICE_ENDPOINT_START_FAILED")) {
+          throw outcome.error;
+        }
+        throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
+      }
+    } finally {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
     }
+  }
+}
+
+/** 仅删除已确认安全结算的单次回收，其他并发记录保持可见。 */
+function removePendingStartCleanup(key: string, entry: PendingStartCleanup): void {
+  const pending = pendingStartCleanups.get(key);
+  if (pending === undefined) {
+    return;
+  }
+  pending.delete(entry);
+  if (pending.size === 0) {
+    pendingStartCleanups.delete(key);
   }
 }
 

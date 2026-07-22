@@ -84,6 +84,7 @@ describe("real graph-service process", () => {
   );
 });
 
+/** 子进程夹具完成后返回的标准输出与退出状态。 */
 interface ProcessResult {
   endpointKind: "named-pipe" | "unix-socket";
   pid: number;

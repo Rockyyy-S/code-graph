@@ -7,7 +7,11 @@ import {
 } from "./service-control.js";
 import { SERVICE_ERROR_CODES } from "./protocol-error.js";
 
-const positiveRevisionSchema = { minimum: 1, type: "integer" } as const;
+const positiveRevisionSchema = {
+  maximum: Number.MAX_SAFE_INTEGER,
+  minimum: 1,
+  type: "integer",
+} as const;
 
 /** TelemetryStatusV1 的 JSON Schema 2020-12 定义。 */
 export const telemetryStatusV1Schema = {

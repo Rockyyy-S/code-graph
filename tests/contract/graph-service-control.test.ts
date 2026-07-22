@@ -2,7 +2,8 @@ import { access, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as canonicalValidators from "../../packages/contracts/dist/index.js";
 import { startGraphService } from "../../apps/graph-service/src/index.js";
 import {
   CLI_SCHEMA_VERSION,
@@ -54,30 +55,48 @@ function createInitializeRequest(sessionToken: string) {
 
 describe("graph-service JSON-RPC control plane", () => {
   it("initializes over a real local IPC endpoint and returns authoritative absent status", async () => {
+    const initializeValidator = vi.spyOn(
+      canonicalValidators,
+      "validateInitializeResult",
+    );
+    const statusValidator = vi.spyOn(
+      canonicalValidators,
+      "validateServiceStatusV1",
+    );
     const { paths, runtime } = await createRuntime();
     const client = await JsonRpcTestClient.connect(paths.endpoint);
 
-    const initialize = await client.request(
-      "initialize",
-      createInitializeRequest(runtime.sessionToken),
-    );
-    const status = await client.request("service/status", {});
+    try {
+      const initialize = await client.request(
+        "initialize",
+        createInitializeRequest(runtime.sessionToken),
+      );
+      const status = await client.request("service/status", {});
 
-    expect(validateInitializeResult(initialize.result)).toBe(true);
-    expect(validateServiceStatusV1(status.result)).toBe(true);
-    expect(initialize.result).toMatchObject({
-      serviceStatus: status.result,
-    });
-    expect(status.result).not.toHaveProperty("graphRevision");
-    expect(status.result).not.toHaveProperty("nodes");
-    expect(status.result).not.toHaveProperty("edges");
-    const log = await readFile(path.join(paths.workspaceDirectory, "service.log"), "utf8");
-    expect(log).toContain("service-started");
-    expect(log).not.toContain(runtime.sessionToken);
-    if (process.platform === "win32") {
-      expect(paths.endpoint).toMatch(/^\\\\\.\\pipe\\codegraph-/);
-    } else {
-      expect((await stat(paths.endpoint)).mode & 0o777).toBe(0o600);
+      expect(validateInitializeResult(initialize.result)).toBe(true);
+      expect(validateServiceStatusV1(status.result)).toBe(true);
+      expect(initializeValidator).toHaveBeenCalledWith(initialize.result);
+      expect(statusValidator).toHaveBeenCalledWith(status.result);
+      expect(initialize.result).toMatchObject({
+        serviceStatus: status.result,
+      });
+      expect(status.result).not.toHaveProperty("graphRevision");
+      expect(status.result).not.toHaveProperty("nodes");
+      expect(status.result).not.toHaveProperty("edges");
+      const log = await readFile(
+        path.join(paths.workspaceDirectory, "service.log"),
+        "utf8",
+      );
+      expect(log).toContain("service-started");
+      expect(log).not.toContain(runtime.sessionToken);
+      if (process.platform === "win32") {
+        expect(paths.endpoint).toMatch(/^\\\\\.\\pipe\\codegraph-/);
+      } else {
+        expect((await stat(paths.endpoint)).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      initializeValidator.mockRestore();
+      statusValidator.mockRestore();
     }
 
     await client.close();
@@ -96,11 +115,57 @@ describe("graph-service JSON-RPC control plane", () => {
     await expect(client.waitForClose()).resolves.toBeUndefined();
   });
 
+  it("keeps a canonical response failure terminal until the connection closes", async () => {
+    const { paths, runtime } = await createRuntime();
+    const client = await JsonRpcTestClient.connect(paths.endpoint);
+    let followUp: Promise<JsonRpcResponse> | undefined;
+    const initializeValidator = vi
+      .spyOn(canonicalValidators, "validateInitializeResult")
+      .mockImplementationOnce(() => {
+        followUp = client.request("service/status", {});
+        return false;
+      });
+
+    try {
+      const initialize = await client.request(
+        "initialize",
+        createInitializeRequest(runtime.sessionToken),
+      );
+      const status = await followUp;
+
+      expect(initialize.error?.data).toMatchObject({
+        code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+      });
+      expect(status?.error?.data).toMatchObject({
+        code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+      });
+      await expect(client.waitForCloseWithin(500)).resolves.toBeUndefined();
+    } finally {
+      initializeValidator.mockRestore();
+      await client.close();
+    }
+  });
+
   it("closes an unauthenticated connection that advertises an oversized frame", async () => {
     const { paths } = await createRuntime();
     const client = await JsonRpcTestClient.connect(paths.endpoint);
 
     client.writeRaw("Content-Length: 1048577\r\n\r\n");
+
+    await expect(client.waitForCloseWithin(500)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["missing jsonrpc", { id: 1, method: "initialize" }],
+    ["forged jsonrpc", { id: 1, jsonrpc: "1.0", method: "initialize" }],
+  ])("closes a request with a %s envelope before initialize", async (_label, envelope) => {
+    const { paths, runtime } = await createRuntime();
+    const client = await JsonRpcTestClient.connect(paths.endpoint);
+
+    client.writeRaw(createRawEnvelopeFrame({
+      ...envelope,
+      params: createInitializeRequest(runtime.sessionToken),
+    }));
 
     await expect(client.waitForCloseWithin(500)).resolves.toBeUndefined();
   });
@@ -192,6 +257,7 @@ describe("graph-service JSON-RPC control plane", () => {
   });
 });
 
+/** 原始合同客户端解析的最小 JSON-RPC 响应。 */
 interface JsonRpcResponse {
   error?: { code: number; data?: unknown; message: string };
   id: number;
@@ -304,6 +370,15 @@ class JsonRpcTestClient {
 /** 创建边界测试使用的完整 Content-Length 请求帧。 */
 function createRawRequestFrame(id: number, method: string, params: unknown): Buffer {
   const payload = Buffer.from(JSON.stringify({ id, jsonrpc: "2.0", method, params }), "utf8");
+  return Buffer.concat([
+    Buffer.from(`Content-Length: ${payload.byteLength}\r\n\r\n`, "ascii"),
+    payload,
+  ]);
+}
+
+/** 创建可故意绕过 JSON-RPC 2.0 信封约束的原始帧。 */
+function createRawEnvelopeFrame(envelope: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify(envelope), "utf8");
   return Buffer.concat([
     Buffer.from(`Content-Length: ${payload.byteLength}\r\n\r\n`, "ascii"),
     payload,

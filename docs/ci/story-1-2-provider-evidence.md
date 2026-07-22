@@ -1,8 +1,9 @@
 # Story 1.2 Provider 证据
 
-> 2026-07-20 状态：第三轮复审最终候选
-> `56f4e6385ee2d54f4b31f07c02c07969bc571e54` 已取得同 SHA 的 Hosted
-> `architecture-required` 成功结果。本文是 Story 1.2 当前实现候选的合并证据。
+> 2026-07-22 状态：下方 Hosted 成功结果覆盖第三轮候选
+> `56f4e6385ee2d54f4b31f07c02c07969bc571e54`。第四至十二轮复审补丁已在本地通过
+> `architecture-required`（unit 100/100、contract 99/99），但尚未形成新的候选提交与
+> 同 SHA Hosted required-check。因此本文当前不是最新工作区的合并证据。
 
 ## 候选提交
 
@@ -21,9 +22,9 @@
 - `pnpm architecture-required`：通过
 - `type`：通过
 - `lint`：通过
-- `unit`：74/74 通过
+- `unit`：100/100 通过
 - `build`：通过
-- `contract`：78/78 通过
+- `contract`：99/99 通过
 - `dependency-boundary`：通过
 - `basic-security`：通过
 - Windows Named Pipe：两个独立客户端进程复用同一 PID、serviceInstanceId、statusEpoch
@@ -43,4 +44,5 @@
 
 本轮首次 Hosted 运行真实验证了 required check 的阻断语义；修复后的最终候选获得同名
 Hosted check 成功结果。证据回填提交仍受 pull request 当前 HEAD 上同一 required check
-约束，不通过不得合并。
+约束，不通过不得合并。当前工作区必须生成新候选并取得同 SHA 成功结果后才能恢复为
+当前合并证据。

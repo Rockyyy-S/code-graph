@@ -90,6 +90,12 @@ describe("service control contract", () => {
     expect(validateServiceStatusV1({ ...status, completeness: "complete" })).toBe(
       false,
     );
+    expect(
+      validateServiceStatusV1({
+        ...status,
+        statusRevision: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toBe(false);
   });
 
   it("uses strict canonical responses and compatible client parsing", () => {
