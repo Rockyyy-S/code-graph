@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { parse } from "yaml";
@@ -29,6 +29,35 @@ const definitionProfiles = Object.freeze({
   "UX-DR": { maximum: 37, role: "epics", rule: "definition-ux-dr" },
 });
 const symbolicAdBinds = new Set(["all", "deployment", "traceability"]);
+const storyStatuses = new Set(["backlog", "done", "in-progress", "ready-for-dev", "review"]);
+const stableStoryIdsV1 = new Set([
+  "1.1", "1.2", "1.3", "1.4", "1.19", "1.5", "1.6", "1.7", "1.8", "1.9",
+  "1.10", "1.11", "1.12", "1.13", "1.14", "1.15", "1.16", "1.17", "1.18",
+  "2.1", "2.10", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.11",
+  "2.9", "3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8", "3.9",
+  "3.10", "4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "4.7", "4.8", "4.9",
+  "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8", "5.9", "5.10",
+  "5.11", "5.12",
+]);
+const reverseTraceStoryIdsV1 = new Set([
+  "1.4", "1.19", "2.1", "2.10", "2.8", "2.11", "4.8", "4.9", "5.11", "5.12",
+]);
+const keyContractStoryMapV1 = new Map([
+  ["最小真实 CI", ["1.1", "AD-28、Guide §3/§13", "epics AR-28"]],
+  ["provider + 规划追踪", ["1.3", "AD-28、Guide §13", "epics AR-28"]],
+  ["BuiltinIgnoreV1 / generation 0", ["1.4", "AD-14、AD-23、Guide §3/§4/§7", "FR-4、Addendum §4"]],
+  ["确定性 rebuild / CAS", ["1.19", "AD-3、AD-8、Guide §6/§7", "FR-1、FR-5"]],
+  ["BasicSymbolV1", ["1.6", "AD-27、Guide §8", "FR-2、Addendum §5.4"]],
+  ["BaseCycleProjectionV1", ["1.14", "AD-25、Guide §9", "FR-11"]],
+  ["Getting Started / Index Status", ["2.10", "AD-10、AD-15", "UX-DR15/16/19/21/22/24"]],
+  ["增量 mutation", ["2.8", "AD-3、AD-8、AD-23", "FR-3、NFR-5/9/10"]],
+  ["原子视图 patch", ["2.11", "AD-7、AD-22", "UX-DR6/23/27/30/32"]],
+  ["ImpactVerdictV1 / ImpactRankV1", ["4.4", "AD-26、Guide §12", "FR-17、UX-DR17"]],
+  ["CLI impact", ["4.8", "AD-13、AD-26", "FR-16/17/20"]],
+  ["CLI export", ["4.9", "AD-13、AD-18", "FR-20/23、UX-DR18"]],
+  ["ProductValidationPlanV1", ["5.11", "AD-30、Guide §13", "SM-1/6/7/8、UJ-5"]],
+  ["Beta+ Go/No-Go", ["5.12", "AD-29、AD-30", "PRD §8/§9、ReadinessGateManifestV1"]],
+]);
 
 /** 从固定 source set 读取完整规范文本，不递归扫描其他 planning Markdown。 */
 export async function loadPlanningTraceSources(repositoryRoot) {
@@ -42,9 +71,10 @@ export async function loadPlanningTraceSources(repositoryRoot) {
 /** 从仓库加载并执行完整规划双向追踪检查。 */
 export async function checkPlanningTraceability(repositoryRoot) {
   try {
-    return checkPlanningTraceabilitySources(
-      await loadPlanningTraceSources(repositoryRoot),
-    );
+    const sources = await loadPlanningTraceSources(repositoryRoot);
+    return checkPlanningTraceabilitySources(sources, {
+      existingRelativePaths: await collectExistingRelativeLinkPaths(repositoryRoot, sources),
+    });
   } catch (error) {
     if (error && typeof error === "object" && error.code === "ENOENT") {
       return [
@@ -61,14 +91,15 @@ export async function checkPlanningTraceability(repositoryRoot) {
 }
 
 /** 对已加载的八个规范输入执行确定性、无文件系统副作用的语义检查。 */
-export function checkPlanningTraceabilitySources(sources) {
+export function checkPlanningTraceabilitySources(sources, options = {}) {
   const violations = [];
   const definitions = collectDefinitions(sources, violations);
   const stories = collectStories(sources.epics ?? "", definitions, violations);
   const dag = validateStoryDag(sources.epics ?? "", stories, violations);
   validateAdBinds(sources.architecture ?? "", definitions, violations);
   validateReverseTraceTable(sources.epics ?? "", stories, violations);
-  validateRelativeLinks(sources, violations);
+  validateKeyContractStoryMap(sources.epics ?? "", stories, violations);
+  validateRelativeLinks(sources, violations, options.existingRelativePaths);
   validateProductValidationReferences(sources, violations);
   validateSprintDependencies(sources.sprintStatus ?? "", dag, stories, violations);
   return violations.sort((left, right) =>
@@ -92,7 +123,7 @@ function collectDefinitions(sources, violations) {
   const definitions = new Map();
   for (const [prefix, profile] of Object.entries(definitionProfiles)) {
     const source = sources[profile.role] ?? "";
-    const matches = [...source.matchAll(patterns[prefix])];
+    const matches = [...maskNonSemanticMarkdown(source).matchAll(patterns[prefix])];
     const ids = matches.map((match) => Number(match[1]));
     const expected = Array.from({ length: profile.maximum }, (_value, index) => index + 1);
     if (
@@ -119,24 +150,28 @@ function collectDefinitions(sources, violations) {
 /** 提取 61 个 Story 及其关联需求，严格执行 Planning Reference Grammar。 */
 function collectStories(epicsSource, definitions, violations) {
   const headingPattern = /^### Story (\d+\.\d+)：[^\r\n]+/mgu;
-  const headings = [...epicsSource.matchAll(headingPattern)];
+  const semanticSource = maskNonSemanticMarkdown(epicsSource);
+  const headings = [...semanticSource.matchAll(headingPattern)];
   const stories = new Map();
   for (const [index, heading] of headings.entries()) {
     const storyId = heading[1];
     const start = heading.index ?? 0;
     const end = headings[index + 1]?.index ?? epicsSource.length;
-    const section = epicsSource.slice(start, end);
-    const association = /^\*\*关联需求：\*\*\s*(.+)$/mu.exec(section);
-    if (association === null) {
+    const section = semanticSource.slice(start, end);
+    const associations = [...section.matchAll(/^\*\*关联需求：\*\*\s*(.+)$/mgu)];
+    const association = associations[0];
+    if (associations.length !== 1) {
       violations.push(
         violation(
           PLANNING_TRACE_SOURCE_SET_V1.epics,
           "story-requirement",
-          `Story ${storyId} 缺少关联需求。`,
-          `在 Story ${storyId} 中添加使用完整前缀的 **关联需求：** 行`,
+          `Story ${storyId} 必须且只能包含一条关联需求，实际为 ${associations.length} 条。`,
+          `在 Story ${storyId} 中保留唯一一条使用完整前缀的 **关联需求：** 行`,
           lineForIndex(epicsSource, start),
         ),
       );
+    }
+    if (association === undefined) {
       continue;
     }
     const parsed = parseReferenceList(association[1], {
@@ -170,13 +205,13 @@ function collectStories(epicsSource, definitions, violations) {
       section,
     });
   }
-  if (stories.size !== 61) {
+  if (!sameStringSet(new Set(stories.keys()), stableStoryIdsV1)) {
     violations.push(
       violation(
         PLANNING_TRACE_SOURCE_SET_V1.epics,
         "story-coverage",
-        `Story 定义应恰好为 61 个，实际为 ${stories.size} 个。`,
-        "恢复 61 个唯一 Story 标题及关联需求，不从正文顺序推断缺失 Story",
+        `Story 定义必须与稳定 Story ID 集合完全一致，当前识别 ${stories.size} 个。`,
+        "恢复版本化的 61 个稳定 Story ID；新增、删除或重编号必须显式升级追踪合同",
       ),
     );
   }
@@ -185,23 +220,27 @@ function collectStories(epicsSource, definitions, violations) {
 
 /** 只使用各 AD 的 Binds 解析直接需求边，忽略 Capability Map 导航。 */
 function validateAdBinds(architectureSource, definitions, violations) {
-  const headings = [...architectureSource.matchAll(/^### AD-(\d+)\s/mgu)];
+  const semanticSource = maskNonSemanticMarkdown(architectureSource);
+  const headings = [...semanticSource.matchAll(/^### AD-(\d+)\s/mgu)];
   for (const [index, heading] of headings.entries()) {
     const adId = `AD-${heading[1]}`;
     const start = heading.index ?? 0;
     const end = headings[index + 1]?.index ?? architectureSource.length;
-    const section = architectureSource.slice(start, end);
-    const binds = /^- \*\*Binds:\*\*\s*(.+)$/mu.exec(section);
-    if (binds === null) {
+    const section = semanticSource.slice(start, end);
+    const bindLines = [...section.matchAll(/^- \*\*Binds:\*\*\s*(.+)$/mgu)];
+    const binds = bindLines[0];
+    if (bindLines.length !== 1) {
       violations.push(
         violation(
           PLANNING_TRACE_SOURCE_SET_V1.architecture,
           "ad-binds",
-          `${adId} 缺少唯一 Binds。`,
-          `为 ${adId} 添加只含规范 ID 或 all|deployment|traceability 的 Binds`,
+          `${adId} 必须且只能包含一条 Binds，实际为 ${bindLines.length} 条。`,
+          `为 ${adId} 保留唯一一条只含规范 ID 或 all|deployment|traceability 的 Binds`,
           lineForIndex(architectureSource, start),
         ),
       );
+    }
+    if (binds === undefined) {
       continue;
     }
     const tokens = splitReferenceTokens(binds[1]);
@@ -358,19 +397,48 @@ function validateReverseTraceTable(epicsSource, stories, violations) {
     epicsSource,
   );
   if (section === null) {
+    violations.push(
+      violation(
+        PLANNING_TRACE_SOURCE_SET_V1.epics,
+        "reverse-trace",
+        "缺少本次调整的需求追踪表或关键合同映射边界。",
+        "恢复覆盖版本化 Story 集合的五列表格，并保留关键合同映射标题",
+      ),
+    );
     return;
   }
   const rows = section[1]
     .split(/\r?\n/u)
     .filter((line) => /^\|\s*\d+\.\d+\s*\|/u.test(line));
+  const seenStoryIds = new Set();
   for (const row of rows) {
     const cells = row
       .split("|")
       .slice(1, -1)
       .map((cell) => cell.trim());
     if (cells.length !== 5) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.epics,
+          "reverse-trace",
+          `反向追踪行列数必须为 5，当前行为 '${row.trim()}'。`,
+          "恢复 Story、FR/SM/UJ、NFR、AR、UX-DR 五列",
+        ),
+      );
       continue;
     }
+    if (seenStoryIds.has(cells[0])) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.epics,
+          "reverse-trace",
+          `反向追踪表重复包含 Story ${cells[0]}。`,
+          `只保留一行 Story ${cells[0]} 的反向追踪记录`,
+        ),
+      );
+      continue;
+    }
+    seenStoryIds.add(cells[0]);
     const story = stories.get(cells[0]);
     if (story === undefined) {
       violations.push(
@@ -413,38 +481,160 @@ function validateReverseTraceTable(epicsSource, stories, violations) {
       }
     }
   }
+  if (!sameStringSet(seenStoryIds, reverseTraceStoryIdsV1)) {
+    violations.push(
+      violation(
+        PLANNING_TRACE_SOURCE_SET_V1.epics,
+        "reverse-trace",
+        "本次调整的需求追踪表未完整覆盖版本化 Story 集合。",
+        "恢复 1.4、1.19、2.1、2.10、2.8、2.11、4.8、4.9、5.11、5.12 的唯一行",
+      ),
+    );
+  }
 }
 
-/** 验证相对 Markdown 链接只解析到 source set 内现有规范路径。 */
-function validateRelativeLinks(sources, violations) {
-  const availablePaths = new Set(Object.values(PLANNING_TRACE_SOURCE_SET_V1));
+/** 验证关键合同表的完整覆盖、唯一性和稳定最终 Story。 */
+function validateKeyContractStoryMap(epicsSource, stories, violations) {
+  const section = /### 关键合同与 Story 双向映射\s*([\s\S]*?)$/u.exec(epicsSource);
+  if (section === null) {
+    violations.push(
+      violation(
+        PLANNING_TRACE_SOURCE_SET_V1.epics,
+        "contract-story-map",
+        "缺少关键合同与 Story 双向映射表。",
+        "恢复版本化关键合同、最终 Story、Architecture/Guide 与 PRD/UX 四列表格",
+      ),
+    );
+    return;
+  }
+  const rows = section[1]
+    .split(/\r?\n/u)
+    .filter((line) => /^\|\s*[^|-][^|]*\|/u.test(line));
+  const seenContracts = new Set();
+  for (const row of rows) {
+    const cells = row
+      .split("|")
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    if (cells[0] === "合同" || cells[0] === "---") {
+      continue;
+    }
+    if (cells.length !== 4) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.epics,
+          "contract-story-map",
+          `关键合同映射行列数必须为 4，当前行为 '${row.trim()}'。`,
+          "恢复合同、最终 Story、Architecture/Guide、PRD/UX 四列",
+        ),
+      );
+      continue;
+    }
+    const [contractName, storyId, architectureGuide, prdUx] = cells;
+    const expectedMapping = keyContractStoryMapV1.get(contractName);
+    if (
+      expectedMapping === undefined ||
+      seenContracts.has(contractName) ||
+      storyId !== expectedMapping[0] ||
+      architectureGuide !== expectedMapping[1] ||
+      prdUx !== expectedMapping[2] ||
+      !stories.has(storyId)
+    ) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.epics,
+          "contract-story-map",
+          `关键合同 '${contractName}' 的最终 Story 或规范文档映射缺失、重复或漂移。`,
+          "按版本化四列合同映射恢复合同名、最终 Story、Architecture/Guide 与 PRD/UX",
+        ),
+      );
+      continue;
+    }
+    seenContracts.add(contractName);
+  }
+  if (!sameStringSet(seenContracts, new Set(keyContractStoryMapV1.keys()))) {
+    violations.push(
+      violation(
+        PLANNING_TRACE_SOURCE_SET_V1.epics,
+        "contract-story-map",
+        "关键合同映射表未完整覆盖版本化合同集合。",
+        "恢复全部 14 个关键合同映射行，禁止删除或添加未声明合同",
+      ),
+    );
+  }
+}
+
+/** 验证相对 Markdown 链接解析到仓库内实际存在的路径。 */
+function validateRelativeLinks(sources, violations, existingRelativePaths) {
+  const availablePaths =
+    existingRelativePaths ?? new Set(Object.values(PLANNING_TRACE_SOURCE_SET_V1));
   for (const [role, source] of Object.entries(sources)) {
     const sourcePath = PLANNING_TRACE_SOURCE_SET_V1[role];
     if (sourcePath === undefined || role === "sprintStatus") {
       continue;
     }
-    for (const match of source.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu)) {
+    const semanticSource = maskNonSemanticMarkdown(source);
+    for (const match of collectMarkdownLinkTargets(semanticSource)) {
       const rawTarget = match[1].trim();
       if (/^(?:https?:|mailto:|#)/u.test(rawTarget)) {
         continue;
       }
-      const targetPath = decodeURIComponent(rawTarget.split("#")[0]);
-      if (
-        targetPath.length === 0 ||
-        targetPath.includes("\\") ||
-        path.posix.isAbsolute(targetPath)
-      ) {
-        violations.push(relativeLinkViolation(sourcePath, source, match, rawTarget));
-        continue;
-      }
-      const resolved = path.posix.normalize(
-        path.posix.join(path.posix.dirname(sourcePath), targetPath),
-      );
-      if (resolved.startsWith("../") || !availablePaths.has(resolved)) {
+      const resolved = resolveRelativeLinkPath(sourcePath, rawTarget);
+      if (resolved === null || !availablePaths.has(resolved)) {
         violations.push(relativeLinkViolation(sourcePath, source, match, rawTarget));
       }
     }
   }
+}
+
+/** 只探测文档实际引用的仓库路径，不把其他文件内容纳入规划语义。 */
+async function collectExistingRelativeLinkPaths(repositoryRoot, sources) {
+  const existingPaths = new Set(Object.values(PLANNING_TRACE_SOURCE_SET_V1));
+  for (const [role, source] of Object.entries(sources)) {
+    const sourcePath = PLANNING_TRACE_SOURCE_SET_V1[role];
+    if (sourcePath === undefined || role === "sprintStatus") {
+      continue;
+    }
+    const semanticSource = maskNonSemanticMarkdown(source);
+    for (const match of collectMarkdownLinkTargets(semanticSource)) {
+      const rawTarget = match[1].trim();
+      if (/^(?:https?:|mailto:|#)/u.test(rawTarget)) {
+        continue;
+      }
+      const resolved = resolveRelativeLinkPath(sourcePath, rawTarget);
+      if (resolved === null) {
+        continue;
+      }
+      try {
+        await access(resolveRelative(repositoryRoot, resolved));
+        existingPaths.add(resolved);
+      } catch {
+        // 缺失路径由同步语义检查生成稳定、可移植的诊断。
+      }
+    }
+  }
+  return existingPaths;
+}
+
+/** 解码并规范化仓库内相对 Markdown 链接；非法编码直接返回 null。 */
+function resolveRelativeLinkPath(sourcePath, rawTarget) {
+  let targetPath;
+  try {
+    targetPath = decodeURIComponent(rawTarget.split("#")[0]);
+  } catch {
+    return null;
+  }
+  if (
+    targetPath.length === 0 ||
+    targetPath.includes("\\") ||
+    path.posix.isAbsolute(targetPath)
+  ) {
+    return null;
+  }
+  const resolved = path.posix.normalize(
+    path.posix.join(path.posix.dirname(sourcePath), targetPath),
+  );
+  return resolved === ".." || resolved.startsWith("../") ? null : resolved;
 }
 
 /** 创建相对链接失败诊断。 */
@@ -452,8 +642,8 @@ function relativeLinkViolation(sourcePath, source, match, rawTarget) {
   return violation(
     sourcePath,
     "relative-link",
-    `相对 Markdown 链接 '${rawTarget}' 未解析到仓库内当前规范文件。`,
-    "修复为 Planning Trace Source Set 中存在的相对路径，并保留可选 #anchor",
+    `相对 Markdown 链接 '${rawTarget}' 未解析到仓库内现有路径。`,
+    "修复百分号编码或改为仓库内存在的相对路径，并保留可选 #anchor",
     lineForIndex(source, match.index ?? 0),
   );
 }
@@ -466,8 +656,12 @@ function validateProductValidationReferences(sources, violations) {
     ReadinessGatePolicyV1: ["architecture", "implementationGuide", "prdAddendum"],
   };
   for (const [contractName, roles] of Object.entries(requiredRoles)) {
+    const contractPattern = new RegExp(
+      `(?<![A-Za-z0-9_])${contractName}(?![A-Za-z0-9_])`,
+      "u",
+    );
     for (const role of roles) {
-      if (!(sources[role] ?? "").includes(contractName)) {
+      if (!contractPattern.test(sources[role] ?? "")) {
         violations.push(
           violation(
             PLANNING_TRACE_SOURCE_SET_V1[role],
@@ -530,7 +724,32 @@ function validateSprintDependencies(sprintSource, dag, stories, violations) {
       );
       continue;
     }
-    statusByStory.set(storyId, developmentStatus[matchingKeys[0]]);
+    const status = developmentStatus[matchingKeys[0]];
+    if (!storyStatuses.has(status)) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.sprintStatus,
+          "sprint-status",
+          `Story ${storyId} 使用未声明状态 '${String(status)}'。`,
+          "改为 backlog、ready-for-dev、in-progress、review 或 done",
+        ),
+      );
+      continue;
+    }
+    statusByStory.set(storyId, status);
+  }
+  for (const key of Object.keys(developmentStatus)) {
+    const match = /^(\d+)-(\d+)-/u.exec(key);
+    if (match !== null && !stableStoryIdsV1.has(`${match[1]}.${match[2]}`)) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.sprintStatus,
+          "sprint-status",
+          `development_status 包含未知 Story key '${key}'。`,
+          "删除未知 Story key，或先显式升级稳定 Story ID 合同",
+        ),
+      );
+    }
   }
   for (const [storyId, dependencies] of dag) {
     const status = statusByStory.get(storyId);
@@ -556,9 +775,15 @@ function validateSprintDependencies(sprintSource, dag, stories, violations) {
 function parseReferenceList(source, options) {
   const references = new Set();
   const issues = [];
-  const normalized = source.trim().replace(/（[^）]*）/gu, "").replace(/\([^)]*\)/gu, "");
+  const normalized = source.trim();
   if (options.allowNotApplicable && normalized === "N/A") {
     return { issues, references };
+  }
+  if (/[；;]/u.test(normalized)) {
+    issues.push("列表分隔符只允许顿号、中文逗号或英文逗号");
+  }
+  if (/[（）()]/u.test(normalized)) {
+    issues.push("引用列表不得使用括号隐藏说明或引用");
   }
   for (const token of splitReferenceTokens(normalized)) {
     const rangeSeparator = token.includes("至") ? "至" : token.includes("–") ? "–" : null;
@@ -582,6 +807,11 @@ function parseReferenceList(source, options) {
         !options.allowedPrefixes.has(left.prefix)
       ) {
         issues.push(`非法、反向或跨前缀范围 '${token}'`);
+        continue;
+      }
+      const maximum = definitionProfiles[left.prefix]?.maximum;
+      if (maximum === undefined || right.number > maximum) {
+        issues.push(`范围越界 '${token}'`);
         continue;
       }
       for (let number = left.number; number <= right.number; number += 1) {
@@ -617,18 +847,22 @@ function addReference(references, issues, prefix, number, options) {
 function parseReference(source) {
   const standard = /^(AD|AR|FR|NFR|SM|UJ)-([1-9][0-9]*)$/u.exec(source);
   if (standard !== null) {
-    return { number: Number(standard[2]), prefix: standard[1] };
+    const number = Number(standard[2]);
+    return Number.isSafeInteger(number) ? { number, prefix: standard[1] } : null;
   }
   const ux = /^UX-DR([1-9][0-9]*)$/u.exec(source);
-  return ux === null ? null : { number: Number(ux[1]), prefix: "UX-DR" };
+  if (ux === null) {
+    return null;
+  }
+  const number = Number(ux[1]);
+  return Number.isSafeInteger(number) ? { number, prefix: "UX-DR" } : null;
 }
 
 /** 使用规范允许的中英文列表分隔符切分 token。 */
 function splitReferenceTokens(source) {
   return source
-    .split(/[、，,；;]/u)
-    .map((token) => token.trim())
-    .filter(Boolean);
+    .split(/[、，,]/u)
+    .map((token) => token.trim());
 }
 
 /** 格式化规范 ID，UX-DR 不在编号前增加额外连字符。 */
@@ -644,6 +878,23 @@ function prefixOf(reference) {
 /** 比较两个字符串集合。 */
 function sameStringSet(left, right) {
   return left.size === right.size && [...left].every((entry) => right.has(entry));
+}
+
+/** 用等长空白遮蔽 fenced code 与 HTML 注释，避免示例文本伪造规范语义。 */
+function maskNonSemanticMarkdown(source) {
+  return source
+    .replace(/```[\s\S]*?```/gu, (block) => block.replace(/[^\r\n]/gu, " "))
+    .replace(/<!--[\s\S]*?-->/gu, (comment) =>
+      comment.replace(/[^\r\n]/gu, " "),
+    );
+}
+
+/** 收集 inline 与引用式 Markdown 链接定义中的目标。 */
+function collectMarkdownLinkTargets(source) {
+  return [
+    ...source.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu),
+    ...source.matchAll(/^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/mgu),
+  ];
 }
 
 /** 使用 DFS 检测依赖边中的环。 */

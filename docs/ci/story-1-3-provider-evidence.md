@@ -1,7 +1,9 @@
 # Story 1.3 Provider 证据
 
-> 当前结论：生产 Provider 已激活。外部 Controller App、独立 Drift Monitor App、
-> active/strict/无 bypass ruleset、真实失败阻断、App identity 漂移检测与最终恢复均已验证。
+> 当前结论：现有生产 Provider 基线已激活；Story 1.3 审查修复候选尚未部署。
+> 外部 Controller App、独立 Drift Monitor App、active/strict/无 bypass ruleset、真实失败阻断、
+> App identity 漂移检测与历史恢复均已验证。新的 gate 实现摘要信任根仍待明确批准和生产切换，
+> 实际 GitHub account/repository plan 仍缺独立证据，因此 Story 保持 `in-progress`。
 
 ## Provider 与控制面身份
 
@@ -10,7 +12,7 @@
 - repository ID：`1303415307`
 - visibility：`public`
 - default branch：`main`
-- billing plan API 字段：当前授权令牌返回 `null`；不以推测 plan 作为证据，实际 ruleset 能力已通过创建、读取、阻断和恢复验证
+- billing plan API 字段：当前授权令牌返回 `null`；不以 ruleset 能力替代实际 plan 证据，此项仍阻塞验收
 - 外部控制面仓库：`Rockyyy-S/code-graph-gate-controller`
 - 外部控制面最终实现提交：`10487d2`
 - reusable producer SHA：`3a0b53163e91bf14d4a3d1e911292b267e1e968a`
@@ -18,6 +20,25 @@
 - TrustedGateRegistryRecordV1 sequence：`2`
 - gate registry digest：`d1b9e3c2529514dfbe4a058ed4d17f86d4e24e05951a4391ddf09161eb113378`
 - registry approval evidence digest：`3d629b2ab6ace56a23b343189bbc5cb6ac2d3c0b710b94737c3558648954e6a4`
+
+## 审查修复迁移候选（未部署）
+
+- GateHarness 实现提交：`c90a2ceaea134228ce81e1045d27e32de1f4937f`
+- reusable producer 提交：`4d3650e1698afe83dbb347a3f9115dcc40b6d352`
+- 待批准 `gateRegistryDigest`：`0a4937d97bbaaf8288af350fd4f67b1ee9f68d7b00392dcacc9413279f2bf155`
+- 待批准 `gateImplementationDigest`：`3294b01cbe2d0190bc94b275f8bcb4ba3c3bb69ec26e3143131d00c4625ec4b2`
+- 实现摘要投影：九项根命令、根质量工具链，以及 47 个 gate runner、工作区发现器、
+  TypeScript/esbuild/ESLint/Vitest 配置、八个受保护目录、依赖锁定与直接 Node 入口；
+  本地忽略的 `scripts/architecture/graphify-out` 生成缓存明确排除，确保 clean checkout 可复现
+- producer 隔离：候选执行 job 无 OIDC/attestation 权限，候选 lifecycle 被禁用并使用专用
+  UID/GID；候选工作树对 gate 只读，artifact 由不同用户持有，attestation 在第二个干净 runner 完成
+- 目标可信记录：`TrustedGateRegistryRecordV1 sequence=3`，审批类型
+  `gate-trust-root-migration`
+- 迁移状态：仅生成本地不可变提交与候选摘要；未推送、未改写外部可信记录、未切换生产 Controller
+
+生产切换必须在精确 SHA/摘要获得明确批准后执行，并在切换后对同一主仓库候选 SHA
+重新验证 child evidence、Controller umbrella、ruleset 阻断与恢复。下方 Hosted 运行仍是旧信任根的历史证据，
+不能证明本节候选已经上线。
 
 ## GitHub App 与最小权限
 
@@ -52,19 +73,19 @@
 迁移顺序为：保留旧保护 → 创建新 active ruleset → monitor 通过 → Controller App 发布正式 pass →
 移除旧 GitHub Actions required check → monitor/Controller 再次通过。全过程只有阻塞窗口，没有无保护窗口。
 
-## Gate Registry 交付表
+## 审查修复候选 Gate Registry 交付表
 
 | checkId | capabilityOwner | evidenceProducerId | gateDefinitionDigest |
 | --- | --- | --- | --- |
-| `basic-security` | `security` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#basic-security` | `05e0e6e431a48a4e21f50951d4d8f1ca224b76530cf61b13b8f284e27e2447aa` |
-| `build` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#build` | `cea7b1919c73d5cc090d03528b8d10133f936e45f85275fa5967af79c597b4c0` |
-| `contract` | `qa` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#contract` | `bc508cb20a6b80ccbf32d2fe1d691453172137302a8144c36f903a680d019a33` |
-| `dependency-boundary` | `architecture` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#dependency-boundary` | `0fd2575468fbb31d1ecf179323dfefa0df16a241a7cdb3471667a2af65074772` |
-| `lint` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#lint` | `428e57af8f37d9f2d294584b4e918ebfd35e9bddb00c1ae169a1dc5f91d0bf48` |
-| `planning-traceability` | `architecture-po` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#planning-traceability` | `5c7e1adfadf3c2ca09c25dea9628c2d9636a0dd2a406a321db038c63fe8c7158` |
-| `repository-contract-preflight` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#repository-contract-preflight` | `29e68a9aad9154cc3d553e1676ad728a3ccb92244ca881a3b171772b950f967d` |
-| `type` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#type` | `11960ea785a5f56137ed1d0cd0cefe08ed0064489043b71039ab6cd05b0993f0` |
-| `unit` | `qa` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@3a0b53163e91bf14d4a3d1e911292b267e1e968a#unit` | `269f4ec927b79330897695a69994f87e8282ea7b4ca890d4a0f0560d99886b85` |
+| `basic-security` | `security` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#basic-security` | `0877429d7e757f66c2f0ef62deeb86e96522c7fa8fdcbaaf4055ea77e364a547` |
+| `build` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#build` | `e3c3e3f01cc52074bc80d22b3c3732b338281e2f54e2a7d13083cf6d71eda4ca` |
+| `contract` | `qa` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#contract` | `5a19c436a429dd65a39d53d2e15e3ec8cc36022ec9cdf9f1bc03ae2591f01d0a` |
+| `dependency-boundary` | `architecture` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#dependency-boundary` | `871c259477f7022228d4318f72a757347c602155f8a608f0e81ee62ebcff5924` |
+| `lint` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#lint` | `3fa854d0c801494314ea0f32bf40f60bc500397ff1dbc4fa2b8f583b570ba09a` |
+| `planning-traceability` | `architecture-po` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#planning-traceability` | `b89f2ed1d7d74a24f59d3343bcd9d136fcad0cc617926a3b12c1ca1989e533aa` |
+| `repository-contract-preflight` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#repository-contract-preflight` | `f2b9e4ffeb654ed3f1e74f50205eedfdee74baddb61415023a0634588b7e0cbe` |
+| `type` | `dev-enablement` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#type` | `716af6dc1f08e139d579a6e883421b194bd18d72064769826f7e21f1692207a9` |
+| `unit` | `qa` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@4d3650e1698afe83dbb347a3f9115dcc40b6d352#unit` | `28fabd86623e7ab4b00a147426a291d02ef0cb4802b6d53c59e29b705beabee4` |
 
 九项 gate 均为 `blocking:true`、always applicable；旁路 registry digest 如上。
 
@@ -107,8 +128,9 @@ Drift Monitor 使用 REST 验证 ruleset 内容，并使用同一只读 App 的 
 
 ## 最终验证
 
-- 外部 Controller tests：23/23 通过
+- 外部 Controller 审查修复分支 tests：43/43 通过
 - `pnpm install --frozen-lockfile`：通过
 - `pnpm architecture-required`：九项全部通过
-- 最终候选 child evidence、Controller umbrella、ruleset 与 drift monitor：全部通过
+- 历史生产候选 child evidence、Controller umbrella、ruleset 与 drift monitor：全部通过
+- 审查修复候选：本地门禁通过后仍需生产切换与同一候选 SHA 的 Hosted 复验
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果

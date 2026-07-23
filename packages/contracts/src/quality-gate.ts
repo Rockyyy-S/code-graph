@@ -55,6 +55,43 @@ export type GateEvaluationContextDigestInputV1 = Omit<
 /** Child gate 的终态。 */
 export type GateEvidenceStatusV1 = "fail" | "invalid" | "pass";
 
+/** Gate 进程正常退出的封闭终止状态。 */
+export interface GateExitTerminationV1 {
+  code: number;
+  kind: "exit";
+}
+
+/** Gate 进程被信号终止的封闭终止状态。 */
+export interface GateSignalTerminationV1 {
+  kind: "signal";
+  signalName: string;
+}
+
+/** Gate 无法启动或超时的封闭终止状态。 */
+export interface GateSpawnErrorTerminationV1 {
+  kind: "spawn-error";
+  stableCode: string;
+}
+
+/** GateOutputV1 允许的唯一终止联合。 */
+export type GateTerminationV1 =
+  | GateExitTerminationV1
+  | GateSignalTerminationV1
+  | GateSpawnErrorTerminationV1;
+
+/** 绑定有界原始输出和终止原因的封闭 Gate 输出合同。 */
+export interface GateOutputV1 {
+  gateId: string;
+  schemaVersion: 1;
+  stderrBytes: number;
+  stderrDigest: string;
+  stderrTruncated: boolean;
+  stdoutBytes: number;
+  stdoutDigest: string;
+  stdoutTruncated: boolean;
+  termination: GateTerminationV1;
+}
+
 /** Child gate 交付给外部 Controller 的唯一证据合同。 */
 export interface GateEvidenceV1 {
   evaluationContextDigest: string;

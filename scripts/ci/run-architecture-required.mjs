@@ -1,17 +1,19 @@
-import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { sha256CanonicalJson } from "../../packages/contracts/runtime/canonical-json.mjs";
 import {
   createGateEvidenceV1,
   createGateOutputV1,
 } from "./create-gate-evidence.mjs";
-import { createProviderGateEvaluation } from "./evaluate-gate-applicability.mjs";
 import { loadQualityGateRegistry } from "./load-quality-gates.mjs";
+import { runProcessWithDeadline } from "./run-process-with-deadline.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const loadedRegistry = await loadQualityGateRegistry(repositoryRoot);
 const outputLimitBytes = 1024 * 1024;
+const defaultGateTimeoutMs = 2 * 60 * 1000;
+const defaultTotalTimeoutMs = 20 * 60 * 1000;
 
 /** @type {string[]} */
 export const QUALITY_GATES = loadedRegistry.registry.gates.map(
@@ -25,14 +27,27 @@ export const QUALITY_GATES = loadedRegistry.registry.gates.map(
  */
 export async function runArchitectureRequired(options = {}) {
   const registry = options.registry ?? loadedRegistry.registry;
-  const execute = options.execute ?? executeRegistryGate;
+  const gateRegistryDigest =
+    registry === loadedRegistry.registry
+      ? loadedRegistry.gateRegistryDigest
+      : sha256CanonicalJson(registry);
+  const execute = options.execute;
   const providerEvaluation = options.providerEvaluation;
+  if (
+    providerEvaluation !== undefined &&
+    (providerEvaluation.hostedEvidenceEligible !== true ||
+      providerEvaluation.evaluationContext?.gateRegistryDigest !== gateRegistryDigest)
+  ) {
+    throw new Error("provider evidence 只能由绑定当前 registry 的外部可信 Harness 注入。\n");
+  }
   const applicability = new Map(
     providerEvaluation?.applicability?.map((entry) => [entry.gateId, entry.status]) ??
       registry.gates.map(({ gateDefinition }) => [gateDefinition.gateId, "required"]),
   );
   const gates = [];
   const evidence = [];
+  const totalDeadlineAt =
+    Date.now() + (options.totalTimeoutMs ?? defaultTotalTimeoutMs);
   for (const entry of registry.gates) {
     const definition = entry.gateDefinition;
     const applicabilityStatus = applicability.get(definition.gateId) ?? "invalid";
@@ -44,12 +59,25 @@ export async function runArchitectureRequired(options = {}) {
       gates.push({ gateId: definition.gateId, status: "invalid" });
       continue;
     }
-    const execution = await execute(definition.gateId, definition.command);
+    const remainingMs = totalDeadlineAt - Date.now();
+    const execution =
+      remainingMs <= 0
+        ? createTotalDeadlineExecution()
+        : execute === undefined
+          ? await executeRegistryGate(definition.gateId, definition.command, {
+              timeoutMs: Math.min(
+                options.gateTimeoutMs ?? defaultGateTimeoutMs,
+                remainingMs,
+              ),
+            })
+          : await execute(definition.gateId, definition.command);
     const output = createGateOutputV1({
       gateId: definition.gateId,
       stderr: execution.stderr,
+      stderrBytes: execution.stderrBytes,
       stderrTruncated: execution.stderrTruncated,
       stdout: execution.stdout,
+      stdoutBytes: execution.stdoutBytes,
       stdoutTruncated: execution.stdoutTruncated,
       termination: execution.termination,
     });
@@ -78,19 +106,28 @@ export async function runArchitectureRequired(options = {}) {
       stdout: execution.stdout,
     });
   }
-  const requiredGateIds = [...applicability]
-    .filter(([, status]) => status === "required")
-    .map(([gateId]) => gateId);
+  const requiredGateIds = registry.gates
+    .filter(
+      ({ gateDefinition }) =>
+        gateDefinition.blocking &&
+        applicability.get(gateDefinition.gateId) === "required",
+    )
+    .map(({ gateDefinition }) => gateDefinition.gateId);
+  const blockingGateIds = new Set(
+    registry.gates
+      .filter(({ gateDefinition }) => gateDefinition.blocking)
+      .map(({ gateDefinition }) => gateDefinition.gateId),
+  );
   const evidenceGateIds = new Set(evidence.map((entry) => entry.gateId));
   const missingEvidenceGateIds =
     providerEvaluation === undefined
       ? []
       : requiredGateIds.filter((gateId) => !evidenceGateIds.has(gateId));
   const failedGateIds = gates
-    .filter(({ status }) => status === "fail")
+    .filter(({ gateId, status }) => status === "fail" && blockingGateIds.has(gateId))
     .map(({ gateId }) => gateId);
   const invalidGateIds = gates
-    .filter(({ status }) => status === "invalid")
+    .filter(({ gateId, status }) => status === "invalid" && blockingGateIds.has(gateId))
     .map(({ gateId }) => gateId);
   const summary = {
     failedGateIds,
@@ -109,7 +146,7 @@ export async function runArchitectureRequired(options = {}) {
       missingEvidenceGateIds.length === 0
         ? 0
         : 1,
-    gateRegistryDigest: loadedRegistry.gateRegistryDigest,
+    gateRegistryDigest,
     gates,
     summary,
   };
@@ -119,48 +156,32 @@ export async function runArchitectureRequired(options = {}) {
   return result;
 }
 
+/** 总 deadline 耗尽后让剩余 gate 稳定 invalid，并继续生成完整诊断 artifact。 */
+function createTotalDeadlineExecution() {
+  return {
+    status: "invalid",
+    stderr: Buffer.alloc(0),
+    stderrBytes: 0,
+    stderrTruncated: false,
+    stdout: Buffer.alloc(0),
+    stdoutBytes: 0,
+    stdoutTruncated: false,
+    termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
+  };
+}
+
 /** 以 shell:false 执行 registry argv，并捕获最多 1 MiB 的原始 stdout/stderr。 */
-async function executeRegistryGate(_gateId, registryCommand) {
+export async function executeRegistryGate(_gateId, registryCommand, options = {}) {
   const [registryExecutable, ...registryArgs] = registryCommand;
   const resolved = resolveLocalCommand(registryExecutable, registryArgs);
-  return new Promise((resolve) => {
-    const stdout = createBoundedCollector();
-    const stderr = createBoundedCollector();
-    let settled = false;
-    const finish = (result) => {
-      if (!settled) {
-        settled = true;
-        resolve(result);
-      }
-    };
-    let child;
-    try {
-      child = spawn(resolved.executable, resolved.args, {
-        cwd: repositoryRoot,
-        env: process.env,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      finish(spawnErrorResult(error, stdout, stderr));
-      return;
-    }
-    child.stdout.on("data", (chunk) => stdout.append(chunk));
-    child.stderr.on("data", (chunk) => stderr.append(chunk));
-    child.once("error", (error) => finish(spawnErrorResult(error, stdout, stderr)));
-    child.once("close", (code, signal) =>
-      finish({
-        status: code === 0 ? "pass" : "fail",
-        stderr: stderr.bytes(),
-        stderrTruncated: stderr.truncated(),
-        stdout: stdout.bytes(),
-        stdoutTruncated: stdout.truncated(),
-        termination:
-          signal === null
-            ? { code: code ?? 1, kind: "exit" }
-            : { kind: "signal", signalName: signal },
-      }),
-    );
+  return runProcessWithDeadline({
+    args: resolved.args,
+    cwd: repositoryRoot,
+    env: process.env,
+    executable: resolved.executable,
+    killGraceMs: options.killGraceMs,
+    outputLimitBytes,
+    timeoutMs: options.timeoutMs ?? defaultGateTimeoutMs,
   });
 }
 
@@ -176,45 +197,6 @@ function resolveLocalCommand(executable, args) {
     };
   }
   return { args, executable };
-}
-
-/** 创建 spawn-error 的稳定 invalid 结果，不记录本机异常路径或堆栈。 */
-function spawnErrorResult(error, stdout, stderr) {
-  return {
-    status: "invalid",
-    stderr: stderr.bytes(),
-    stderrTruncated: stderr.truncated(),
-    stdout: stdout.bytes(),
-    stdoutTruncated: stdout.truncated(),
-    termination: {
-      kind: "spawn-error",
-      stableCode:
-        typeof error === "object" && error !== null && typeof error.code === "string"
-          ? error.code
-          : "UNKNOWN",
-    },
-  };
-}
-
-/** 创建记录总流量但只保留固定上限原始字节的 collector。 */
-function createBoundedCollector() {
-  const chunks = [];
-  let capturedBytes = 0;
-  let totalBytes = 0;
-  return {
-    append(chunk) {
-      const buffer = Buffer.from(chunk);
-      totalBytes += buffer.length;
-      const remaining = outputLimitBytes - capturedBytes;
-      if (remaining > 0) {
-        const captured = buffer.subarray(0, remaining);
-        chunks.push(captured);
-        capturedBytes += captured.length;
-      }
-    },
-    bytes: () => Buffer.concat(chunks),
-    truncated: () => totalBytes > capturedBytes,
-  };
 }
 
 /** 将原始日志作为旁路文件写入，结构化 evidence 不嵌入日志文本。 */
@@ -238,20 +220,12 @@ async function writeArtifactSet(outputRoot, result) {
   );
 }
 
-/** 读取可选 provider event fixture；无参数时明确运行 local context。 */
-async function loadProviderEvaluation(argv) {
+/** CLI 只允许明确的本地执行，Hosted provider evidence 由仓库外 Harness 独占。 */
+export async function loadProviderEvaluation(argv) {
   if (argv.length === 0) {
     return undefined;
   }
-  if (argv.length !== 2 || argv[0] !== "--provider-context") {
-    throw new Error("仅支持 --provider-context <trusted-event-json>，本地默认明确标记为 local。\n");
-  }
-  const providerInput = JSON.parse(await readFile(path.resolve(argv[1]), "utf8"));
-  return createProviderGateEvaluation(repositoryRoot, {
-    ...providerInput,
-    gateRegistryDigest: loadedRegistry.gateRegistryDigest,
-    registry: loadedRegistry.registry,
-  });
+  throw new Error("CLI 禁止注入 provider context；Hosted evidence 只能由外部可信 Harness 生成。\n");
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

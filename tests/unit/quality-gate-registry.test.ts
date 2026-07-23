@@ -7,14 +7,17 @@ import {
   type GateDefinitionV1,
   type GateEvaluationContextV1,
   type GateEvidenceV1,
+  type GateOutputV1,
   type GateRegistryV1,
   gateDefinitionV1Schema,
   gateEvaluationContextV1Schema,
   gateEvidenceV1Schema,
+  gateOutputV1Schema,
   gateRegistryV1Schema,
   validateGateDefinitionV1,
   validateGateEvaluationContextV1,
   validateGateEvidenceV1,
+  validateGateOutputV1,
   validateGateRegistryV1,
 } from "../../packages/contracts/src/index.js";
 
@@ -50,8 +53,19 @@ describe("quality gate contract", () => {
     expect(gateRegistryV1Schema.additionalProperties).toBe(false);
     expect(gateEvaluationContextV1Schema.additionalProperties).toBe(false);
     expect(gateEvidenceV1Schema.additionalProperties).toBe(false);
+    expect(gateOutputV1Schema.additionalProperties).toBe(false);
 
     expect(validateGateDefinitionV1({ ...createDefinition(), unknown: true })).toBe(false);
+  });
+
+  it("公共 validator 拒绝 no-op、缺字段、非法 owner 和 argv", () => {
+    expect(validateGateDefinitionV1(createDefinition({ command: ["true"] }))).toBe(false);
+    expect(validateGateDefinitionV1(createDefinition({ command: ["node", "--eval", "0"] }))).toBe(false);
+    expect(validateGateDefinitionV1({ ...createDefinition(), capabilityOwner: "unknown" })).toBe(false);
+    expect(validateGateDefinitionV1({ ...createDefinition(), command: ["pnpm", "\0"] })).toBe(false);
+    const missingCommand = { ...createDefinition() } as Partial<GateDefinitionV1>;
+    delete missingCommand.command;
+    expect(validateGateDefinitionV1(missingCommand)).toBe(false);
   });
 
   it("保留 triggerPaths 缺失语义并拒绝空、乱序、重复或非法 glob", () => {
@@ -67,6 +81,7 @@ describe("quality gate contract", () => {
       ["/apps/**"],
       ["..\\apps\\**"],
       ["../apps/**"],
+      ["src/[ab].ts"],
       [""],
     ]) {
       expect(validateGateDefinitionV1({ ...alwaysApplicable, triggerPaths })).toBe(false);
@@ -102,9 +117,42 @@ describe("quality gate contract", () => {
     expect(validateGateRegistryV1(createRegistry([type, lint]))).toBe(false);
     expect(validateGateRegistryV1(createRegistry([type, type]))).toBe(false);
     expect(
+      validateGateRegistryV1(
+        createRegistry([
+          { ...lint, checkId: "shared-check" },
+          { ...type, checkId: "shared-check" },
+        ]),
+      ),
+    ).toBe(false);
+    expect(
       validateGateRegistryV1({
         ...registry,
         gates: [{ ...registry.gates[0]!, gateDefinitionDigest: "0".repeat(64) }, registry.gates[1]!],
+      }),
+    ).toBe(false);
+  });
+
+  it("GateOutputV1 使用封闭 Schema 并校验字节计数与 termination", () => {
+    const output: GateOutputV1 = {
+      gateId: "unit",
+      schemaVersion: 1,
+      stderrBytes: 0,
+      stderrDigest: "a".repeat(64),
+      stderrTruncated: false,
+      stdoutBytes: 4,
+      stdoutDigest: "b".repeat(64),
+      stdoutTruncated: false,
+      termination: { code: 0, kind: "exit" },
+    };
+
+    expect(validateGateOutputV1(output)).toBe(true);
+    expect(validateGateOutputV1({ ...output, schemaVersion: 2 })).toBe(false);
+    expect(validateGateOutputV1({ ...output, stdoutBytes: -1 })).toBe(false);
+    expect(validateGateOutputV1({ ...output, unknown: true })).toBe(false);
+    expect(
+      validateGateOutputV1({
+        ...output,
+        termination: { code: 0, kind: "exit", signalName: "SIGTERM" },
       }),
     ).toBe(false);
   });

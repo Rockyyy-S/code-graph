@@ -94,6 +94,67 @@ export const gateEvaluationContextV1Schema = {
   type: "object",
 } as const;
 
+const gateTerminationV1Schema = {
+  oneOf: [
+    {
+      additionalProperties: false,
+      properties: {
+        code: { minimum: 0, type: "integer" },
+        kind: { const: "exit" },
+      },
+      required: ["code", "kind"],
+      type: "object",
+    },
+    {
+      additionalProperties: false,
+      properties: {
+        kind: { const: "signal" },
+        signalName: { minLength: 1, type: "string" },
+      },
+      required: ["kind", "signalName"],
+      type: "object",
+    },
+    {
+      additionalProperties: false,
+      properties: {
+        kind: { const: "spawn-error" },
+        stableCode: { minLength: 1, type: "string" },
+      },
+      required: ["kind", "stableCode"],
+      type: "object",
+    },
+  ],
+} as const;
+
+/** GateOutputV1 的严格 JSON Schema 2020-12 定义。 */
+export const gateOutputV1Schema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  additionalProperties: false,
+  properties: {
+    gateId: { pattern: stableIdPattern, type: "string" },
+    schemaVersion: { const: 1 },
+    stderrBytes: { minimum: 0, type: "integer" },
+    stderrDigest: { pattern: digestPattern, type: "string" },
+    stderrTruncated: { type: "boolean" },
+    stdoutBytes: { minimum: 0, type: "integer" },
+    stdoutDigest: { pattern: digestPattern, type: "string" },
+    stdoutTruncated: { type: "boolean" },
+    termination: gateTerminationV1Schema,
+  },
+  required: [
+    "gateId",
+    "schemaVersion",
+    "stderrBytes",
+    "stderrDigest",
+    "stderrTruncated",
+    "stdoutBytes",
+    "stdoutDigest",
+    "stdoutTruncated",
+    "termination",
+  ],
+  type: "object",
+} as const;
+
 /** GateEvidenceV1 的严格 JSON Schema 2020-12 定义。 */
 export const gateEvidenceV1Schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",

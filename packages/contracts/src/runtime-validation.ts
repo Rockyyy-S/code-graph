@@ -25,6 +25,7 @@ import {
   gateDefinitionV1Schema,
   gateEvaluationContextV1Schema,
   gateEvidenceV1Schema,
+  gateOutputV1Schema,
   gateRegistryV1Schema,
 } from "./quality-gate-schema.js";
 import {
@@ -34,6 +35,7 @@ import {
   type GateDefinitionV1,
   type GateEvaluationContextV1,
   type GateEvidenceV1,
+  type GateOutputV1,
   type GateRegistryV1,
 } from "./quality-gate.js";
 
@@ -66,6 +68,8 @@ const gateEvaluationContextValidator: ValidateFunction<unknown> =
   ajv.compile(gateEvaluationContextV1Schema);
 const gateEvidenceValidator: ValidateFunction<unknown> =
   ajv.compile(gateEvidenceV1Schema);
+const gateOutputValidator: ValidateFunction<unknown> =
+  ajv.compile(gateOutputV1Schema);
 
 /** 严格校验服务端收到的 initialize 请求。 */
 export function validateInitializeRequest(value: unknown): value is InitializeRequest {
@@ -184,6 +188,9 @@ export function validateGateDefinitionV1(value: unknown): value is GateDefinitio
   if (definition.command.some((argument) => argument.trim().length === 0 || argument.includes("\0"))) {
     return false;
   }
+  if (isNoOpGateCommand(definition.command)) {
+    return false;
+  }
   return (
     definition.triggerPaths === undefined ||
     definition.triggerPaths.every(
@@ -200,15 +207,24 @@ export function validateGateRegistryV1(value: unknown): value is GateRegistryV1 
     return false;
   }
   const registry = value as GateRegistryV1;
+  const checkIds = new Set<string>();
   return registry.gates.every((entry, index) => {
     const previous = registry.gates[index - 1];
+    const checkIdUnique = !checkIds.has(entry.gateDefinition.checkId);
+    checkIds.add(entry.gateDefinition.checkId);
     return (
       validateGateDefinitionV1(entry.gateDefinition) &&
       entry.gateDefinitionDigest === computeGateDefinitionDigest(entry.gateDefinition) &&
+      checkIdUnique &&
       (previous === undefined ||
         previous.gateDefinition.gateId < entry.gateDefinition.gateId)
     );
   });
+}
+
+/** 严格校验封闭 GateOutputV1。 */
+export function validateGateOutputV1(value: unknown): value is GateOutputV1 {
+  return gateOutputValidator(value);
 }
 
 /** 严格校验固定 Git OID 与 evaluationContextDigest。 */
@@ -267,12 +283,25 @@ function isCanonicalTriggerGlob(value: string): boolean {
     value.includes("\\") ||
     value.includes("\0") ||
     value.includes("//") ||
-    value.endsWith("/")
+    value.endsWith("/") ||
+    /[\[\]{}]/u.test(value)
   ) {
     return false;
   }
   const segments = value.split("/");
   return segments.every(
     (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+  );
+}
+
+/** 公共 GateDefinition validator 与运行时 registry loader 共享 no-op 语义。 */
+function isNoOpGateCommand(command: readonly string[]): boolean {
+  const executable = command[0]!.toLowerCase().replace(/\.exe$/u, "");
+  if (["echo", "printf", "true"].includes(executable)) {
+    return true;
+  }
+  return (
+    executable === "node" &&
+    command.slice(1).some((argument) => ["-e", "--eval", "-p", "--print"].includes(argument))
   );
 }

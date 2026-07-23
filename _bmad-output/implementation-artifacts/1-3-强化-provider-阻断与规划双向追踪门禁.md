@@ -6,7 +6,7 @@ provider_snapshot_at: 2026-07-23T09:35:00+08:00
 
 # Story 1.3: 强化 provider 阻断与规划双向追踪门禁
 
-Status: review
+Status: in-progress
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git、provider 与技术版本分析；实现完成状态仍由 dev-story、真实外部门禁证据和独立代码审查流程决定。 -->
 
@@ -111,23 +111,48 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
   - [x] Controller 故障、证据缺失或 provider API 不可验证时暂停合并；回滚只能恢复已验证的外部 Controller/ruleset，不能重新启用管理员 bypass 或退回仓库 workflow 自证。
   - [x] provider 配置、App 创建、凭据、外部部署和受控漂移演练涉及外部/生产状态；执行前必须取得明确授权。若未提供外部仓库、部署目标或所需权限，完成仓库内工作后 HALT，Story 保持 `in-progress`，不得标记 review/done。
 
-- [x] Task 7：建立合同、Git、规划与 provider 的真实负向测试（AC: 1-5）
+- [ ] Task 7：建立合同、Git、规划与 provider 的真实负向测试（AC: 1-5）
   - [x] Contract 测试覆盖所有 Gate Schema、未知字段、缺字段、非法枚举、非法 argv、重复 gateId、gate 顺序、triggerPaths 顺序/重复/反选、owner/producer 和各级 digest 不匹配。
   - [x] Unit/Integration 测试覆盖 SHA-1/SHA-256 OID、空/多 merge-base、Git 输出乱序、NUL diff、删除、rename delete+add、POSIX glob、always applicable 与 not-applicable。
   - [x] Evidence/CAS 测试覆盖 producer 不匹配、definition/context/head 不匹配、相同 digest 幂等、冲突 digest invalid、base/head 变化、旧 registry、required gate 缺证据与陈旧结论拒绝。
   - [x] 规划测试逐类破坏 FR/NFR/SM/UJ/AR/UX-DR/AD/Story/DAG/链接/ProductValidation/sprint 状态，并断言稳定相对路径、位置与修复建议；历史 reviews 中保留的旧编号不得污染当前规范检查。
   - [x] 重写 `tests/contract/ci-workflow.test.ts`、`failure-propagation.test.ts`、`quality-command-contract.test.ts` 等既有测试，从 registry 派生预期，不再复制静态七门禁列表；补充 `ci/` 安全扫描和仓库文档合同测试。
-  - [x] 真实 Hosted PR 中至少制造一次 child gate 失败，证明外部 `architecture-required` 失败且管理员也无法合并；修复后在同一候选 SHA 上所有 baseline gate、planning trace、Controller 与 drift 状态通过。
+  - [ ] 真实 Hosted PR 中至少制造一次 child gate 失败，证明外部 `architecture-required` 失败且管理员也无法合并；审查修复后的 sequence=3 信任根仍需在同一候选 SHA 上复验 baseline gate、planning trace、Controller 与 drift 状态。
   - [x] 在隔离 provider 测试仓库或经批准的受控窗口演练 required check、App identity、bypass 或 ruleset 漂移；monitor 必须检测并使结论 invalid/fail，恢复后才允许重新发布 pass。
   - [x] 完整回归至少执行 `pnpm install --frozen-lockfile` 与 `pnpm architecture-required`；Story 1.2 的 graph-service 控制面、workspace-key、100 个 unit 和 99 个 contract 基线行为继续通过，但测试数量只作历史参考，不写成永久数量断言。
 
-- [x] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
+- [ ] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
   - [x] 更新 `docs/repository-layout.md`，说明 Gate Registry、contracts、planning trace、child evidence、外部 Controller、ruleset 和 drift monitor 的 owner、数据流、失败语义与范围边界。
-  - [x] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；不得记录凭据或绝对本机路径。
+  - [ ] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；当前仍缺实际 plan 与审查修复候选的最终 Hosted 同 SHA 证据。
   - [x] 保留 `docs/ci/story-1-1-provider-evidence.md` 与 `story-1-2-provider-evidence.md` 为历史证据，不回写旧运行冒充本 Story；本地全绿、旧候选或 shadow context 都不能替代最终候选正式 provider 结果。
   - [x] Story 交付说明逐项列出新增/变更 gate 的 `checkId`、`capabilityOwner`、`evidenceProducerId`、definition/registry digest 与验证证据。
   - [x] 只有仓库内门禁、外部 Controller、无 bypass ruleset、独立 drift monitor、真实失败阻断与最终同 SHA 通过全部成立后，才可把 Story 置为 `review`；独立代码审查完成后才可置为 `done`。
   - [x] Story 1.3 未 `done` 前，`sprint-status.yaml` 中 Story 1.4 及其他受其阻断的功能 Story 必须保持 `backlog`；不得提前创建其实现 Story 文件或并行开发。
+
+### Review Findings
+
+- [ ] [Review][Patch] [High] 让外部 GateHarness 校验经批准的 gate 实现摘要 — 代码与 43 项 Controller 测试已完成；候选 `gateImplementationDigest=3294b01c…` 已覆盖根命令、质量工具链和 47 个受保护文件，但 sequence=3 批准记录、推送与生产切换尚未执行。
+- [ ] [Review][Patch] [High] 补充独立的 GitHub account/repository plan 证据 — 已选择保留严格验收要求；当前授权下 user 与 repository API 的 `plan` 均返回 `null`，不得以 ruleset 能力证明替代实际 plan。
+- [ ] [Review][Patch] [High] Provider 证据文档已记录审查修复迁移候选，但生产仍运行旧信任根；需切换后为最终主仓库候选 SHA 补录 child/umbrella/monitor 同 SHA 证据 [docs/ci/story-1-3-provider-evidence.md]
+- [x] [Review][Patch] [High] planning trace 未解析“关键合同与 Story 双向映射”，ProductValidation/Readiness 仅做全文名称包含检查，删除或改错映射仍返回零违规 [scripts/planning/check-planning-traceability.mjs:356]
+- [x] [Review][Patch] [High] planning trace 未固定 61 个稳定 Story ID，协同修改标题、DAG、追踪表和 sprint key 可把 `5.12` 重编号为 `9.9` 并继续通过 [scripts/planning/check-planning-traceability.mjs:121]
+- [x] [Review][Patch] [Medium] sprint 状态未限制为声明枚举，根 Story 或前置已满足 Story 的任意状态字符串可通过 [scripts/planning/check-planning-traceability.mjs:516]
+- [x] [Review][Patch] [Medium] 相对链接检查错误限制到八个 source-set 文件，并对非法百分号编码抛出未处理的 `URIError`，无法提供稳定诊断 [scripts/planning/check-planning-traceability.mjs:419]
+- [x] [Review][Patch] [Medium] Planning Reference Grammar 接受规格禁止的分号、删除括号内引用、未限制范围上界，且未拒绝重复 Binds/关联需求行 [scripts/planning/check-planning-traceability.mjs:187]
+- [x] [Review][Patch] [Medium] trigger glob 的 `**/` 不匹配零级目录，Git 非 UTF-8 路径又会被替换字符静默解码，未来路径门禁可能被错误判为 not-applicable [scripts/ci/evaluate-gate-applicability.mjs:31]
+- [x] [Review][Patch] [Medium] gate 与 Git 子进程缺少内部绝对 deadline 和终止清理；Hosted 仅依赖外层 30 分钟 job timeout，本地聚合可无限等待 [scripts/ci/run-architecture-required.mjs:123]
+- [x] [Review][Patch] [Medium] GateOutputV1 缺少公共封闭 Schema/validator，`validateGateEvidenceBinding` 可接受错误 schemaVersion、非法 outputDigest 和未知字段 [scripts/ci/create-gate-evidence.mjs:55]
+- [x] [Review][Patch] [Medium] GateDefinition 的公共 validator 与 registry loader 对 no-op 命令结论不一致，registry 也未拒绝重复 checkId，合同边界存在双重语义 [packages/contracts/src/runtime-validation.ts:175]
+- [x] [Review][Patch] [High] 外部 producer 在同一 job/runner 中执行候选 lifecycle、gate 与 OIDC attestation，候选可改写可信 Harness 或待签名 artifact；已拆分执行/签名 job、使用非特权 UID/GID、禁用 lifecycle，并隔离 trusted/artifact 所有权 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:25]
+- [x] [Review][Patch] [High] GateHarness 只在全部 gate 前校验一次实现摘要，候选后台进程可在执行期改写后续 gate；候选工作树现对 gate UID 只读，并在每项 gate 前及全部 gate 后复验摘要 [../code-graph-gate-controller/lib/harness.mjs:35]
+- [x] [Review][Patch] [High] 正常退出的 gate 不清理存活后代，后台进程可继续影响后续执行；成功、失败和超时路径现均清理进程组并具备后代回归测试 [../code-graph-gate-controller/lib/run-process-with-deadline.mjs:59]
+- [x] [Review][Patch] [High] Controller 对同一 CAS 的跨 run 不同 artifact/evidence digest 未判冲突；现持久比较 replay digest，不同摘要 fail closed，相同冲突幂等 [../code-graph-gate-controller/bin/run-controller.mjs:206]
+- [x] [Review][Patch] [High] 可信 registry 批准未绑定真实 previous record/approval；现校验 `previous + 1`、前序 registry/producer/implementation 与固定未绑定摘要 sentinel [../code-graph-gate-controller/lib/registry.mjs:94]
+- [x] [Review][Patch] [Medium] 外部 Harness 每 gate 10 分钟但 job 仅 30 分钟，没有总 deadline；现使用 2 分钟逐 gate 与 20 分钟总 deadline，耗尽后生成稳定 invalid artifact [../code-graph-gate-controller/lib/harness.mjs:15]
+- [x] [Review][Patch] [High] 主仓库 CLI 接受任意 `--provider-context` 本地 JSON并生成 `provider-event` evidence；CLI 现禁止 provider 模式，仅允许外部可信 Harness 生成 Hosted evidence [scripts/ci/run-architecture-required.mjs:180]
+- [x] [Review][Patch] [Medium] 主仓库与外部 Harness 会让适用但 `blocking:false` 的 gate 失败阻断聚合结果；现仅 required blocking gate 影响最终结论 [scripts/ci/run-architecture-required.mjs:97]
+- [x] [Review][Patch] [Medium] `runArchitectureRequired` 注入 registry 时仍报告模块加载时 registry digest；现按实际执行 registry 重算摘要并校验 provider context 绑定 [scripts/ci/run-architecture-required.mjs:120]
+- [x] [Review][Patch] [High] workflow 固定旧 producer/Harness SHA；现已按两提交顺序固定 GateHarness `c90a2ce…` 与 producer `4d3650e1…` [.github/workflows/architecture-required.yml:18]
 
 ## Dev Notes
 
@@ -366,6 +391,8 @@ GPT-5 Codex
 - Task 7 真实阻断：候选 `b2c2e540e89d6a8fb2fa53a41c97a741c031430f` 的 child run `29987139754` 与 Controller check `89141740442` 失败，PR 显示 `BLOCKED`；revert 后候选 `e416735c0d42d84324dd3c6dacd4235ae44cd3df` 的 child run `29987370737` 与 Controller check `89142452033` 恢复通过。
 - Task 7 漂移演练：monitor `29987529815` 检出错误 integration ID 的 `required-check-drift`，Controller `29987576544` fail closed；恢复后 monitor `29987637959` 与 Controller `29987688733` 通过。
 - 最终完整回归：`pnpm install --frozen-lockfile` 成功；已知顺序测试的 CI 并行目录同步预算由 500ms 调整为 2s，25ms deadline 负向语义保持；`pnpm architecture-required` 九项全部通过，外部 Controller tests 23/23 通过。
+- Review 修复：planning trace、GateOutput/Evidence、no-op/checkId、glob/UTF-8 与绝对 deadline 的 9 项仓库内 finding 已闭合；完整 `type`、`lint`、160 unit、113 contract 与九项 `architecture-required` 通过。
+- Review 外部迁移：GateHarness `c90a2ceaea134228ce81e1045d27e32de1f4937f`、producer `4d3650e1698afe83dbb347a3f9115dcc40b6d352`、registry `0a4937d9…`、implementation `3294b01c…` 与 43 项 Controller 测试已就绪；未推送、未生成 sequence=3 owner 批准记录、未切换生产。
 
 ### Completion Notes List
 
@@ -377,7 +404,7 @@ GPT-5 Codex
 - Task 5：交付全量继续执行但最终 fail-closed 的 registry runner、GateOutput/GateEvidence、旁路原始日志、外部固定 child workflow 与 provider API/attestation Controller policy。
 - Task 6：已交付独立 App 身份、immutable producer、sequence=2 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset 与独立只读 drift monitor。
 - Task 7：已交付合同/Git/规划/provider 全量负向测试、真实 umbrella 失败阻断、最终恢复和 App identity 漂移演练。
-- Task 8：已交付完整 Provider 证据、九项 gate owner/producer/digest 表、权限摘要、迁移顺序与最终 DoD 结果。
+- Task 8：已更新九项 gate owner/producer/digest 候选表与迁移说明；实际 plan、sequence=3 生产信任根和最终 Hosted 同 SHA 证据仍阻塞完成。
 
 ### File List
 
@@ -396,6 +423,7 @@ GPT-5 Codex
 - package.json
 - scripts/ci/load-quality-gates.mjs
 - scripts/ci/run-architecture-required.mjs
+- scripts/ci/run-process-with-deadline.mjs
 - scripts/contracts/validate-repository-contract.mjs
 - scripts/planning/check-planning-traceability.mjs
 - scripts/security/check-basic-security.mjs
@@ -417,9 +445,11 @@ GPT-5 Codex
 - tests/unit/gate-evidence.test.ts
 - docs/repository-layout.md
 - docs/ci/story-1-3-provider-evidence.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
 - tests/contract/repository-documentation.test.ts
 - tests/unit/connect-first-discovery.test.ts
 
 ### Change Log
 
 - 2026-07-23：完成 Story 1.3 全部 Task 1–8、生产 Provider 激活、真实失败阻断、漂移恢复与最终回归；状态更新为 `review`。
+- 2026-07-23：代码审查修复 8 项仓库内缺陷并准备 sequence=3 外部信任根迁移；因实际 plan、生产切换与最终 Hosted 同 SHA 证据未完成，状态恢复为 `in-progress`。

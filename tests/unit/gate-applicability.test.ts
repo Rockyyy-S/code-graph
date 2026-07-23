@@ -141,6 +141,22 @@ describe("gate applicability", () => {
     ]);
     expect(() => parseNameStatusZ(Buffer.from("A\0../escape.ts\0"))).toThrow(/路径/u);
     expect(() => parseNameStatusZ(Buffer.from("A\0broken"))).toThrow(/NUL/u);
+    expect(() => parseNameStatusZ(Buffer.from([0x41, 0x00, 0xff, 0x00]))).toThrow(
+      /UTF-8/u,
+    );
+  });
+
+  it("globstar 匹配零级或多级目录", () => {
+    const registry = createRegistry([
+      createDefinition("source", ["src/**/*.ts"]),
+    ]);
+
+    expect(evaluateRegistryApplicability(registry, ["src/a.ts"])).toEqual([
+      { gateId: "source", status: "required" },
+    ]);
+    expect(evaluateRegistryApplicability(registry, ["src/nested/a.ts"])).toEqual([
+      { gateId: "source", status: "required" },
+    ]);
   });
 
   it(

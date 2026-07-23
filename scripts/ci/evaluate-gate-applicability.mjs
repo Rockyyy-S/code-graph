@@ -1,9 +1,12 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import {
   sha256CanonicalJson,
 } from "../../packages/contracts/runtime/canonical-json.mjs";
 import { validateQualityGateRegistry } from "./load-quality-gates.mjs";
+import { runProcessWithDeadline } from "./run-process-with-deadline.mjs";
+
+const defaultGitTimeoutMs = 30_000;
 
 /** 校验 objectFormat 对应的完整小写 Git OID。 */
 export function validateFullGitOid(oid, objectFormat) {
@@ -33,7 +36,13 @@ export function parseNameStatusZ(output) {
   if (bytes.length > 0 && bytes.at(-1) !== 0) {
     throw new Error("git name-status NUL 输出缺少结尾分隔符。");
   }
-  const tokens = bytes.toString("utf8").split("\0");
+  let decoded;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error("git name-status 包含非法 UTF-8 路径字节。", { cause: error });
+  }
+  const tokens = decoded.split("\0");
   if (tokens.at(-1) === "") {
     tokens.pop();
   }
@@ -141,7 +150,7 @@ async function evaluateFixedGitContext(repositoryRoot, input) {
     throw new Error("gateRegistryDigest 与 registry 内容不匹配。\n");
   }
   const repositoryObjectFormat = (
-    await runGit(repositoryRoot, ["rev-parse", "--show-object-format"])
+    await runGit(repositoryRoot, ["rev-parse", "--show-object-format"], input.gitTimeoutMs)
   )
     .toString("utf8")
     .trim();
@@ -153,7 +162,7 @@ async function evaluateFixedGitContext(repositoryRoot, input) {
     "--all",
     input.baseOid,
     input.headOid,
-  ]);
+  ], input.gitTimeoutMs);
   const mergeBases = mergeBaseOutput
     .toString("utf8")
     .split(/\r?\n/u)
@@ -166,7 +175,7 @@ async function evaluateFixedGitContext(repositoryRoot, input) {
     "--no-renames",
     comparisonBaseOid,
     input.headOid,
-  ]);
+  ], input.gitTimeoutMs);
   const affectedPaths = [
     ...new Set(parseNameStatusZ(diffOutput).map(({ path: relativePath }) => relativePath)),
   ].sort();
@@ -184,8 +193,13 @@ function globToRegExp(glob) {
     const character = glob[index];
     const next = glob[index + 1];
     if (character === "*" && next === "*") {
-      pattern += ".*";
-      index += 1;
+      if (glob[index + 2] === "/") {
+        pattern += "(?:.*/)?";
+        index += 2;
+      } else {
+        pattern += ".*";
+        index += 1;
+      }
     } else if (character === "*") {
       pattern += "[^/]*";
     } else if (character === "?") {
@@ -210,33 +224,27 @@ function isSafeRelativePosixPath(value) {
 }
 
 /** 以 shell:false 执行固定 Git argv，并保留原始 stdout 字节。 */
-function runGit(repositoryRoot, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("git", ["-C", repositoryRoot, ...args], {
-      env: {
-        ...process.env,
-        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_TERMINAL_PROMPT: "0",
-      },
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      if (code !== 0) {
-        reject(
-          new Error(
-            `git ${args[0]} 失败（code=${code ?? "null"}, signal=${signal ?? "none"}）：${Buffer.concat(stderr).toString("utf8").trim()}`,
-          ),
-        );
-        return;
-      }
-      resolve(Buffer.concat(stdout));
-    });
+async function runGit(repositoryRoot, args, timeoutMs = defaultGitTimeoutMs) {
+  const result = await runProcessWithDeadline({
+    args: ["-C", repositoryRoot, ...args],
+    cleanupProcessTreeOnExit: false,
+    cwd: repositoryRoot,
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+    executable: "git",
+    timeoutMs,
   });
+  if (result.stdoutTruncated || result.stderrTruncated) {
+    throw new Error(`git ${args[0]} 输出超过受控上限，评估上下文 invalid。`);
+  }
+  if (result.status !== "pass") {
+    throw new Error(
+      `git ${args[0]} 失败（termination=${JSON.stringify(result.termination)}）：${result.stderr.toString("utf8").trim()}`,
+    );
+  }
+  return result.stdout;
 }

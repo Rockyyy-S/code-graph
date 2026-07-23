@@ -55,6 +55,7 @@ export function validateQualityGateRegistry(value) {
     throw new Error("GateRegistryV1.gates 必须是非空数组且 schemaVersion=1。");
   }
   let previousGateId = "";
+  const checkIds = new Set();
   for (const entry of value.gates) {
     assertClosedObject(
       entry,
@@ -71,6 +72,10 @@ export function validateQualityGateRegistry(value) {
     if (entry.gateDefinition.gateId <= previousGateId) {
       throw new Error("Gate Registry gates 必须按 gateId 严格升序且 ID 唯一。");
     }
+    if (checkIds.has(entry.gateDefinition.checkId)) {
+      throw new Error(`Gate Registry checkId '${entry.gateDefinition.checkId}' 重复。`);
+    }
+    checkIds.add(entry.gateDefinition.checkId);
     previousGateId = entry.gateDefinition.gateId;
   }
   return value;
@@ -150,7 +155,8 @@ function isCanonicalTriggerGlob(value) {
     value.includes("\\") ||
     value.includes("\0") ||
     value.includes("//") ||
-    value.endsWith("/")
+    value.endsWith("/") ||
+    /[\[\]{}]/u.test(value)
   ) {
     return false;
   }
