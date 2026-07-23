@@ -58,19 +58,26 @@ describe("repository responsibility documentation", () => {
     expect(document).toContain("模板不代表产品 UX 已完成");
   });
 
-  it("records Story 1.3 hosted child evidence and unresolved provider activation", async () => {
+  it("records Story 1.3 hosted failure, provider activation, drift and recovery evidence", async () => {
     const document = await readFile(
       path.join(repositoryRoot, "docs/ci/story-1-3-provider-evidence.md"),
       "utf8",
     );
 
     for (const evidence of [
-      "29979602524",
-      "d54be3b34eddc55c3e7f65dafe8682718290904a",
+      "29987139754",
+      "29987237267",
+      "e416735c0d42d84324dd3c6dacd4235ae44cd3df",
+      "29987370737",
+      "19603163",
+      "4372284",
+      "4372296",
+      "29987529815",
+      "29987637959",
       "d1b9e3c2529514dfbe4a058ed4d17f86d4e24e05951a4391ddf09161eb113378",
-      "1d0d0e573bb8fd5ece802335d89246f0caeaf4965bf59b99f0345f73ed529f44",
+      "962913710943c77513433362224ede7ff1279075cfe316d4419278cc6a15ee47",
       "Rockyyy-S/code-graph-gate-controller",
-      "待激活",
+      "已激活",
     ]) {
       expect(document).toContain(evidence);
     }

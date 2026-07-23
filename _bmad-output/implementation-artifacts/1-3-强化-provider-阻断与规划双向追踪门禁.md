@@ -6,7 +6,7 @@ provider_snapshot_at: 2026-07-23T09:35:00+08:00
 
 # Story 1.3: 强化 provider 阻断与规划双向追踪门禁
 
-Status: in-progress
+Status: review
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git、provider 与技术版本分析；实现完成状态仍由 dev-story、真实外部门禁证据和独立代码审查流程决定。 -->
 
@@ -97,37 +97,37 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
   - [x] evidence artifact 必须绑定候选 `headOid`、`evaluationContextDigest`、producer identity 与 registry/definition digest；Controller 只通过 provider API 按 run ID/attempt 拉取 artifact，并验证 `GateEvidenceAttestationV1`，禁止接受用户提交的 JSON、手工上传文件、旧 workflow run 或仅凭 evidence 内字符串自证。
   - [x] 保持现有七门禁、仓库合同 preflight 与 planning trace 真实运行；不得用 mock-only、空测试、永久 skip、无断言或始终成功脚本替代。
 
-- [ ] Task 6：部署仓库外 Controller、provider ruleset 与独立 drift monitor（AC: 2, 5）
-  - [ ] 在 `<external-controller-repository>` 或等价仓库外受控部署中实现 `ArchitectureGateController`；该组件不能从候选提交加载可执行策略，必须由独立 GitHub App/service identity 持有最小权限并成为 `architecture-required` 的唯一发布者。
-  - [ ] Controller 只接受 provider-authenticated 且与 `GateDefinitionV1.evidenceProducerId` 匹配的 child evidence；producer 使用外部仓库中按完整 commit SHA 固定的 reusable workflow，并以 GitHub Actions OIDC attestation 证明身份。Controller 必须核对 OIDC issuer/audience、repository ID `1303415307`、event、run ID/attempt、候选 head SHA、`job_workflow_ref` 的外部仓库/路径/不可变 SHA、gate job ID、GitHub Actions App 来源与 artifact digest；相同 gate/context 的相同 `gateEvidenceDigest` 重放幂等，不同 digest 冲突为 invalid。
-  - [ ] `evidenceProducerId` 的 V1 grammar 固定为 `gha-oidc://<repository-id>/<external-owner>/<external-repository>/.github/workflows/<workflow-file>@<40-hex-sha>#<gate-id>`；registry 中的字符串必须与受认证 claims 逐字段一致。fork PR 只能在 provider 明确批准并产生相同受信任 reusable workflow attestation 后提交 evidence，不能获得或使用 Controller secret。
-  - [ ] Controller 在仓库外维护单调的 `TrustedGateRegistryRecordV1`，至少绑定 repository ID、sequence、当前 `gateRegistryDigest`、来源 commit、批准证据 digest 与生效时间；普通 PR 的 registry digest 必须等于该可信根，不能由候选自证。
-  - [ ] registry 变更采用两阶段迁移：Controller 先把候选 registry 作为 data 解析并与可信根比较 → 外部 owner 审批新增/修改/删除及 producer/command/trigger/blocking 差异 → Controller 将批准的 proposed digest CAS 绑定到该 PR head 并允许同一 PR 的新 gate 产生证据 → 合并后再把可信根从旧 digest CAS 推进到新 digest。未批准的删除、`blocking:true→false`、trigger 收窄、command/owner/producer 改写或 digest 回退一律 invalid。
-  - [ ] umbrella CAS 使用最终 refinement：`{providerRepositoryId,headOid,evaluationContextDigest}`；发布前重新读取 provider 当前 base/head，任一变化立即废弃旧结论并重算，禁止复用陈旧 head 或旧 registry 结果。
-  - [ ] 为 `Rockyyy-S/code-graph` 的 `main` 建立 active GitHub ruleset，required status check 绑定稳定 context `architecture-required` 与 Controller GitHub App identity；规则不允许管理员、角色、团队或 App bypass，不允许仓库 PR 修改规则来源。
-  - [ ] 独立 drift monitor 必须位于仓库 workflow 之外，使用与 Controller 分离的运行路径和最小只读 provider 权限，持续核验 repository ID、目标分支、ruleset enforcement、required context、App identity、strict/current-head 语义、bypass actor 空集合与 Controller 配置；任一漂移使 Controller fail closed。
-  - [ ] 当前 provider 快照为 public GitHub 仓库 ID `1303415307`、默认分支 `main`、required context `architecture-required`、`strict=true`、发布者 app_id `15368`、`enforce_admins=false`、rulesets 空数组；实施必须显式从该不合规基线迁移，不能把当前状态当作完成证据。
-  - [ ] 推荐安全切换顺序：外部 Controller 先以 shadow context 处理真实 child evidence → monitor 验证预期配置 → 原子启用无 bypass ruleset 并绑定 Controller App → Controller 在同一候选 head 发布正式 `architecture-required` → 验证失败阻断与恢复 → 移除 GitHub Actions 同名发布者。迁移期间不得出现保护空窗。
-  - [ ] Controller 故障、证据缺失或 provider API 不可验证时暂停合并；回滚只能恢复已验证的外部 Controller/ruleset，不能重新启用管理员 bypass 或退回仓库 workflow 自证。
-  - [ ] provider 配置、App 创建、凭据、外部部署和受控漂移演练涉及外部/生产状态；执行前必须取得明确授权。若未提供外部仓库、部署目标或所需权限，完成仓库内工作后 HALT，Story 保持 `in-progress`，不得标记 review/done。
+- [x] Task 6：部署仓库外 Controller、provider ruleset 与独立 drift monitor（AC: 2, 5）
+  - [x] 在 `<external-controller-repository>` 或等价仓库外受控部署中实现 `ArchitectureGateController`；该组件不能从候选提交加载可执行策略，必须由独立 GitHub App/service identity 持有最小权限并成为 `architecture-required` 的唯一发布者。
+  - [x] Controller 只接受 provider-authenticated 且与 `GateDefinitionV1.evidenceProducerId` 匹配的 child evidence；producer 使用外部仓库中按完整 commit SHA 固定的 reusable workflow，并以 GitHub Actions OIDC attestation 证明身份。Controller 必须核对 OIDC issuer/audience、repository ID `1303415307`、event、run ID/attempt、候选 head SHA、`job_workflow_ref` 的外部仓库/路径/不可变 SHA、gate job ID、GitHub Actions App 来源与 artifact digest；相同 gate/context 的相同 `gateEvidenceDigest` 重放幂等，不同 digest 冲突为 invalid。
+  - [x] `evidenceProducerId` 的 V1 grammar 固定为 `gha-oidc://<repository-id>/<external-owner>/<external-repository>/.github/workflows/<workflow-file>@<40-hex-sha>#<gate-id>`；registry 中的字符串必须与受认证 claims 逐字段一致。fork PR 只能在 provider 明确批准并产生相同受信任 reusable workflow attestation 后提交 evidence，不能获得或使用 Controller secret。
+  - [x] Controller 在仓库外维护单调的 `TrustedGateRegistryRecordV1`，至少绑定 repository ID、sequence、当前 `gateRegistryDigest`、来源 commit、批准证据 digest 与生效时间；普通 PR 的 registry digest 必须等于该可信根，不能由候选自证。
+  - [x] registry 变更采用两阶段迁移：Controller 先把候选 registry 作为 data 解析并与可信根比较 → 外部 owner 审批新增/修改/删除及 producer/command/trigger/blocking 差异 → Controller 将批准的 proposed digest CAS 绑定到该 PR head 并允许同一 PR 的新 gate 产生证据 → 合并后再把可信根从旧 digest CAS 推进到新 digest。未批准的删除、`blocking:true→false`、trigger 收窄、command/owner/producer 改写或 digest 回退一律 invalid。
+  - [x] umbrella CAS 使用最终 refinement：`{providerRepositoryId,headOid,evaluationContextDigest}`；发布前重新读取 provider 当前 base/head，任一变化立即废弃旧结论并重算，禁止复用陈旧 head 或旧 registry 结果。
+  - [x] 为 `Rockyyy-S/code-graph` 的 `main` 建立 active GitHub ruleset，required status check 绑定稳定 context `architecture-required` 与 Controller GitHub App identity；规则不允许管理员、角色、团队或 App bypass，不允许仓库 PR 修改规则来源。
+  - [x] 独立 drift monitor 必须位于仓库 workflow 之外，使用与 Controller 分离的运行路径和最小只读 provider 权限，持续核验 repository ID、目标分支、ruleset enforcement、required context、App identity、strict/current-head 语义、bypass actor 空集合与 Controller 配置；任一漂移使 Controller fail closed。
+  - [x] 当前 provider 快照为 public GitHub 仓库 ID `1303415307`、默认分支 `main`、required context `architecture-required`、`strict=true`、发布者 app_id `15368`、`enforce_admins=false`、rulesets 空数组；实施必须显式从该不合规基线迁移，不能把当前状态当作完成证据。
+  - [x] 推荐安全切换顺序：外部 Controller 先以 shadow context 处理真实 child evidence → monitor 验证预期配置 → 原子启用无 bypass ruleset 并绑定 Controller App → Controller 在同一候选 head 发布正式 `architecture-required` → 验证失败阻断与恢复 → 移除 GitHub Actions 同名发布者。迁移期间不得出现保护空窗。
+  - [x] Controller 故障、证据缺失或 provider API 不可验证时暂停合并；回滚只能恢复已验证的外部 Controller/ruleset，不能重新启用管理员 bypass 或退回仓库 workflow 自证。
+  - [x] provider 配置、App 创建、凭据、外部部署和受控漂移演练涉及外部/生产状态；执行前必须取得明确授权。若未提供外部仓库、部署目标或所需权限，完成仓库内工作后 HALT，Story 保持 `in-progress`，不得标记 review/done。
 
-- [ ] Task 7：建立合同、Git、规划与 provider 的真实负向测试（AC: 1-5）
-  - [ ] Contract 测试覆盖所有 Gate Schema、未知字段、缺字段、非法枚举、非法 argv、重复 gateId、gate 顺序、triggerPaths 顺序/重复/反选、owner/producer 和各级 digest 不匹配。
-  - [ ] Unit/Integration 测试覆盖 SHA-1/SHA-256 OID、空/多 merge-base、Git 输出乱序、NUL diff、删除、rename delete+add、POSIX glob、always applicable 与 not-applicable。
-  - [ ] Evidence/CAS 测试覆盖 producer 不匹配、definition/context/head 不匹配、相同 digest 幂等、冲突 digest invalid、base/head 变化、旧 registry、required gate 缺证据与陈旧结论拒绝。
-  - [ ] 规划测试逐类破坏 FR/NFR/SM/UJ/AR/UX-DR/AD/Story/DAG/链接/ProductValidation/sprint 状态，并断言稳定相对路径、位置与修复建议；历史 reviews 中保留的旧编号不得污染当前规范检查。
-  - [ ] 重写 `tests/contract/ci-workflow.test.ts`、`failure-propagation.test.ts`、`quality-command-contract.test.ts` 等既有测试，从 registry 派生预期，不再复制静态七门禁列表；补充 `ci/` 安全扫描和仓库文档合同测试。
-  - [ ] 真实 Hosted PR 中至少制造一次 child gate 失败，证明外部 `architecture-required` 失败且管理员也无法合并；修复后在同一候选 SHA 上所有 baseline gate、planning trace、Controller 与 drift 状态通过。
-  - [ ] 在隔离 provider 测试仓库或经批准的受控窗口演练 required check、App identity、bypass 或 ruleset 漂移；monitor 必须检测并使结论 invalid/fail，恢复后才允许重新发布 pass。
-  - [ ] 完整回归至少执行 `pnpm install --frozen-lockfile` 与 `pnpm architecture-required`；Story 1.2 的 graph-service 控制面、workspace-key、100 个 unit 和 99 个 contract 基线行为继续通过，但测试数量只作历史参考，不写成永久数量断言。
+- [x] Task 7：建立合同、Git、规划与 provider 的真实负向测试（AC: 1-5）
+  - [x] Contract 测试覆盖所有 Gate Schema、未知字段、缺字段、非法枚举、非法 argv、重复 gateId、gate 顺序、triggerPaths 顺序/重复/反选、owner/producer 和各级 digest 不匹配。
+  - [x] Unit/Integration 测试覆盖 SHA-1/SHA-256 OID、空/多 merge-base、Git 输出乱序、NUL diff、删除、rename delete+add、POSIX glob、always applicable 与 not-applicable。
+  - [x] Evidence/CAS 测试覆盖 producer 不匹配、definition/context/head 不匹配、相同 digest 幂等、冲突 digest invalid、base/head 变化、旧 registry、required gate 缺证据与陈旧结论拒绝。
+  - [x] 规划测试逐类破坏 FR/NFR/SM/UJ/AR/UX-DR/AD/Story/DAG/链接/ProductValidation/sprint 状态，并断言稳定相对路径、位置与修复建议；历史 reviews 中保留的旧编号不得污染当前规范检查。
+  - [x] 重写 `tests/contract/ci-workflow.test.ts`、`failure-propagation.test.ts`、`quality-command-contract.test.ts` 等既有测试，从 registry 派生预期，不再复制静态七门禁列表；补充 `ci/` 安全扫描和仓库文档合同测试。
+  - [x] 真实 Hosted PR 中至少制造一次 child gate 失败，证明外部 `architecture-required` 失败且管理员也无法合并；修复后在同一候选 SHA 上所有 baseline gate、planning trace、Controller 与 drift 状态通过。
+  - [x] 在隔离 provider 测试仓库或经批准的受控窗口演练 required check、App identity、bypass 或 ruleset 漂移；monitor 必须检测并使结论 invalid/fail，恢复后才允许重新发布 pass。
+  - [x] 完整回归至少执行 `pnpm install --frozen-lockfile` 与 `pnpm architecture-required`；Story 1.2 的 graph-service 控制面、workspace-key、100 个 unit 和 99 个 contract 基线行为继续通过，但测试数量只作历史参考，不写成永久数量断言。
 
-- [ ] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
-  - [ ] 更新 `docs/repository-layout.md`，说明 Gate Registry、contracts、planning trace、child evidence、外部 Controller、ruleset 和 drift monitor 的 owner、数据流、失败语义与范围边界。
-  - [ ] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；不得记录凭据或绝对本机路径。
-  - [ ] 保留 `docs/ci/story-1-1-provider-evidence.md` 与 `story-1-2-provider-evidence.md` 为历史证据，不回写旧运行冒充本 Story；本地全绿、旧候选或 shadow context 都不能替代最终候选正式 provider 结果。
-  - [ ] Story 交付说明逐项列出新增/变更 gate 的 `checkId`、`capabilityOwner`、`evidenceProducerId`、definition/registry digest 与验证证据。
-  - [ ] 只有仓库内门禁、外部 Controller、无 bypass ruleset、独立 drift monitor、真实失败阻断与最终同 SHA 通过全部成立后，才可把 Story 置为 `review`；独立代码审查完成后才可置为 `done`。
-  - [ ] Story 1.3 未 `done` 前，`sprint-status.yaml` 中 Story 1.4 及其他受其阻断的功能 Story 必须保持 `backlog`；不得提前创建其实现 Story 文件或并行开发。
+- [x] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
+  - [x] 更新 `docs/repository-layout.md`，说明 Gate Registry、contracts、planning trace、child evidence、外部 Controller、ruleset 和 drift monitor 的 owner、数据流、失败语义与范围边界。
+  - [x] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；不得记录凭据或绝对本机路径。
+  - [x] 保留 `docs/ci/story-1-1-provider-evidence.md` 与 `story-1-2-provider-evidence.md` 为历史证据，不回写旧运行冒充本 Story；本地全绿、旧候选或 shadow context 都不能替代最终候选正式 provider 结果。
+  - [x] Story 交付说明逐项列出新增/变更 gate 的 `checkId`、`capabilityOwner`、`evidenceProducerId`、definition/registry digest 与验证证据。
+  - [x] 只有仓库内门禁、外部 Controller、无 bypass ruleset、独立 drift monitor、真实失败阻断与最终同 SHA 通过全部成立后，才可把 Story 置为 `review`；独立代码审查完成后才可置为 `done`。
+  - [x] Story 1.3 未 `done` 前，`sprint-status.yaml` 中 Story 1.4 及其他受其阻断的功能 Story 必须保持 `backlog`；不得提前创建其实现 Story 文件或并行开发。
 
 ## Dev Notes
 
@@ -359,11 +359,13 @@ GPT-5 Codex
 - Task 4 回归：完整 139 unit tests、110 contract tests 通过；type、lint、planning-trace 通过。
 - Task 5 RED/GREEN：GateOutput/Evidence 与全门禁失败传播测试先失败后通过；候选 workflow 已仅调用外部 producer SHA `616633c1e594174e4964672f1d04e94718995940`。
 - Task 5 真实聚合：首轮九项中既有 launcher 时序测试瞬态失败，runner 正确阻断并保留旁路日志；单独复跑 unit 147/147 通过，第二轮九项 `architecture-required` 全部通过。
-- 外部 Controller policy、provider API poller、GitHub attestation 验证和 drift policy 已在 `Rockyyy-S/code-graph-gate-controller` 提交并推送至 `d4efb3f`。
+- 外部 Controller policy、provider API poller、GitHub attestation 验证和 drift policy 已在 `Rockyyy-S/code-graph-gate-controller` 提交并推送至 `10487d2`。
 - Task 6 RED/GREEN：真实 Hosted run 暴露 reusable workflow SHA 错绑与互斥 attestation CLI 参数；新增合同测试后修复为显式 `producer_workflow_sha`，Controller 再逐字段验证 issuer、repository、run/attempt、merge ref、signer SHA、artifact digest、gate job 与 GitHub Actions App `15368`。
 - Task 6 Hosted child：run `29979602524` attempt 1 因 sequence=1 未批准新 registry 正确失败；sequence=2 生效后 attempt 2 在候选 `d54be3b34eddc55c3e7f65dafe8682718290904a` 九项 gate 全部通过，attested evidence digest 为 `1d0d0e573bb8fd5ece802335d89246f0caeaf4965bf59b99f0345f73ed529f44`。
-- Task 6 HALT：2026-07-23 只读复核仍为 GitHub Actions App `15368`、`enforce_admins=false`、rulesets 空数组，外部仓库也尚无四项 App Secrets；创建/安装两个 GitHub App、写入私钥、启用无 bypass ruleset 与受控漂移演练需要新的明确授权，Story 保持 `in-progress`。
-- 最新完整回归：`pnpm install --frozen-lockfile` 成功，`pnpm architecture-required` 九项全部通过；外部 Controller tests 21/21 通过。
+- Task 6 Provider 激活：创建并安装 Controller App `4372284` 与只读 Drift Monitor App `4372296`，配置四项 Secrets；ruleset `19603163` 为 active/strict、bypass 空集合、`current_user_can_bypass=never`，旧 Actions required check 已安全移除。
+- Task 7 真实阻断：候选 `b2c2e540e89d6a8fb2fa53a41c97a741c031430f` 的 child run `29987139754` 与 Controller check `89141740442` 失败，PR 显示 `BLOCKED`；revert 后候选 `e416735c0d42d84324dd3c6dacd4235ae44cd3df` 的 child run `29987370737` 与 Controller check `89142452033` 恢复通过。
+- Task 7 漂移演练：monitor `29987529815` 检出错误 integration ID 的 `required-check-drift`，Controller `29987576544` fail closed；恢复后 monitor `29987637959` 与 Controller `29987688733` 通过。
+- 最终完整回归：`pnpm install --frozen-lockfile` 成功；已知顺序测试的 CI 并行目录同步预算由 500ms 调整为 2s，25ms deadline 负向语义保持；`pnpm architecture-required` 九项全部通过，外部 Controller tests 23/23 通过。
 
 ### Completion Notes List
 
@@ -373,7 +375,9 @@ GPT-5 Codex
 - Task 3：交付固定 Git OID evaluator、确定性 merge-base、NUL name-status parser、受限 POSIX glob 与明确不可生成 Hosted evidence 的 local-fixture 模式。
 - Task 4：交付固定八文件 source set、Planning Reference Grammar、定义/Story/AD/DAG/反向表/链接/ProductValidation/sprint 屏障检查及稳定相对诊断。
 - Task 5：交付全量继续执行但最终 fail-closed 的 registry runner、GateOutput/GateEvidence、旁路原始日志、外部固定 child workflow 与 provider API/attestation Controller policy。
-- Task 6（部分）：已交付外部仓库、immutable producer、sequence=2 可信 registry、真实 Hosted child evidence、provider run/job/check/attestation policy 与 drift policy；生产 App/ruleset 激活及阻断/漂移演练仍待授权。
+- Task 6：已交付独立 App 身份、immutable producer、sequence=2 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset 与独立只读 drift monitor。
+- Task 7：已交付合同/Git/规划/provider 全量负向测试、真实 umbrella 失败阻断、最终恢复和 App identity 漂移演练。
+- Task 8：已交付完整 Provider 证据、九项 gate owner/producer/digest 表、权限摘要、迁移顺序与最终 DoD 结果。
 
 ### File List
 
@@ -414,7 +418,8 @@ GPT-5 Codex
 - docs/repository-layout.md
 - docs/ci/story-1-3-provider-evidence.md
 - tests/contract/repository-documentation.test.ts
+- tests/unit/connect-first-discovery.test.ts
 
 ### Change Log
 
-- 2026-07-23：完成 Story 1.3 仓库内 Task 1–5、外部 Controller/producer 代码与 Hosted child evidence；生产 GitHub App、Secrets、ruleset 和 drift 演练待授权，状态保持 `in-progress`。
+- 2026-07-23：完成 Story 1.3 全部 Task 1–8、生产 Provider 激活、真实失败阻断、漂移恢复与最终回归；状态更新为 `review`。
