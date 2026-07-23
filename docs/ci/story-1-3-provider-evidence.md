@@ -34,9 +34,9 @@
   UID/GID；候选工作树对 gate 只读，artifact 由不同用户持有，attestation 在第二个干净 runner 完成
 - TypeScript 增量状态：11 个 composite 配置均把 `tsconfig*.tsbuildinfo` 固定到已授权 `dist`，
   不再要求 gate UID 写入只读源码目录
-- 目标可信记录：`TrustedGateRegistryRecordV1 sequence=11`，审批类型
+- 目标可信记录：移除过宽 `.gitattributes` 后以 `TrustedGateRegistryRecordV1 sequence=12` 仅推进 source commit；审批类型
   `gate-trust-root-migration`
-- 迁移状态：GateHarness 与 producer 已生成本地不可变提交；尚未写入 sequence=11、推送生产或取得最终 Hosted 证据
+- 迁移状态：sequence=11 已部署；run `30036453098` 因过宽 `.gitattributes` 对历史 CRLF blob 产生 tracked diff 而 fail closed，现已移除该规则，待 sequence=12 绑定新 source
 
 生产切换必须在精确 SHA/摘要获得明确批准后执行，并在切换后对同一主仓库候选 SHA
 重新验证 child evidence、Controller umbrella、ruleset 与 monitor freshness。下方历史成功运行不能证明
@@ -102,6 +102,7 @@
 | Controller run `29987457501` | 同上 | 发布正式 `architecture-required=success`，check run `89142452033` |
 | child run `30033569375` | `7bf20c9d8d2ded763c5252786d6060490c96ef0e` | frozen install、OID、可信 `.git` 与 tracked diff 通过；错误 CRLF 摘要在 gate 前 fail closed，无 raw artifact |
 | PR #5 | 同上 | 两个 child job 失败且无 Controller umbrella，`mergeStateStatus=BLOCKED` |
+| child run `30036453098` | `f196004abf97a5d75cb131d0105ae70c765d509d` | frozen install 完成；新增 `.gitattributes` 使历史 CRLF blob 在 tracked diff 处 fail closed，无 raw artifact |
 
 最终恢复 artifact：
 
@@ -137,5 +138,5 @@ GitHub cron 不提供调度 SLA，因此外部可靠触发证据仍是 Story 完
 - `pnpm install --frozen-lockfile`：通过
 - `pnpm architecture-required`：九项全部通过
 - 历史生产候选 child evidence、Controller umbrella、ruleset 与 drift monitor：全部通过
-- 最新审查修复候选：仍需 sequence=11 生产切换与同一候选 SHA 的 Hosted 复验
+- 最新审查修复候选：仍需 sequence=12 source 绑定与同一候选 SHA 的 Hosted 复验
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果

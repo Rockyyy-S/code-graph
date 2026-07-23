@@ -166,6 +166,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [ ] [Review][Patch] [High] 独立 monitor 与 Controller 仅依赖彼此独立且可能延迟的 GitHub cron，已出现 monitor 超过 15 分钟 freshness、Controller fail closed 的长窗口；需让 monitor 完成事件直接触发 Controller，并错开兜底 schedule，同时保留外部调度 SLA 为完成阻塞 [../code-graph-gate-controller/.github/workflows/controller.yml:3]
 - [ ] [Review][Patch] [High] 当前最终候选缺少同 SHA child artifact、attestation、Controller App `architecture-required`、fresh monitor 与 ruleset 完整结论；run `30033569375` 无 raw artifact，PR #5 保持 `BLOCKED`，历史成功不得替代最终候选 [docs/ci/story-1-3-provider-evidence.md:92]
 - [ ] [Review][Patch] [Medium] Provider 证据文档仍记录 sequence=2/3、旧 producer `4d3650e…` 与旧 registry，无法审计当前 sequence=10、producer `2327559…` 及其失败链；需从最终 registry、可信记录和 Hosted runs 重建当前交付表 [docs/ci/story-1-3-provider-evidence.md:17]
+- [x] [Review][Patch] [High] Hosted run `30036453098` 证明仓库级 `.gitattributes` 会把历史 CRLF blob 在 clean 过滤后判为 tracked 漂移；Harness 已独立规范化受保护文本摘要，现移除过宽属性规则，避免为无关规划文档制造全仓 renormalize 迁移 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:194]
 
 ## Dev Notes
 
@@ -405,7 +406,7 @@ GPT-5 Codex
 - Task 7 漂移演练：monitor `29987529815` 检出错误 integration ID 的 `required-check-drift`，Controller `29987576544` fail closed；恢复后 monitor `29987637959` 与 Controller `29987688733` 通过。
 - 最终完整回归：`pnpm install --frozen-lockfile` 成功；已知顺序测试的 CI 并行目录同步预算由 500ms 调整为 2s，25ms deadline 负向语义保持；`pnpm architecture-required` 九项全部通过，外部 Controller tests 23/23 通过。
 - Review 修复：planning trace、GateOutput/Evidence、no-op/checkId、glob/UTF-8 与绝对 deadline 的 9 项仓库内 finding 已闭合；完整 `type`、`lint`、160 unit、113 contract 与九项 `architecture-required` 通过。
-- Review 外部迁移：GateHarness `61dc5455c2140b594410be40fbbccd4dcf9d57fa`、producer `3be138e4808de92410d2235d772ce7d423ff143d`、registry `2034633e…`、implementation `3411b9c7…` 与 49 项 Controller 测试已就绪；未生成 sequence=11 owner 批准记录、未切换生产。
+- Review 外部迁移：GateHarness `61dc5455c2140b594410be40fbbccd4dcf9d57fa`、producer `3be138e4808de92410d2235d772ce7d423ff143d`、registry `2034633e…`、implementation `3411b9c7…` 与 49 项 Controller 测试已就绪；sequence=11 已部署但候选因过宽 `.gitattributes` fail closed，移除后需 sequence=12 绑定新 source。
 
 ### Completion Notes List
 
@@ -415,9 +416,9 @@ GPT-5 Codex
 - Task 3：交付固定 Git OID evaluator、确定性 merge-base、NUL name-status parser、受限 POSIX glob 与明确不可生成 Hosted evidence 的 local-fixture 模式。
 - Task 4：交付固定八文件 source set、Planning Reference Grammar、定义/Story/AD/DAG/反向表/链接/ProductValidation/sprint 屏障检查及稳定相对诊断。
 - Task 5：交付全量继续执行但最终 fail-closed 的 registry runner、GateOutput/GateEvidence、旁路原始日志、外部固定 child workflow 与 provider API/attestation Controller policy。
-- Task 6：已交付独立 App 身份、immutable producer、sequence=10 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset 与独立只读 drift monitor；最新 sequence=11 迁移仍在执行。
+- Task 6：已交付独立 App 身份、immutable producer、sequence=11 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset 与独立只读 drift monitor；移除过宽 `.gitattributes` 后需 sequence=12 仅推进 source 绑定。
 - Task 7：已交付合同/Git/规划/provider 全量负向测试、真实 umbrella 失败阻断、最终恢复和 App identity 漂移演练。
-- Task 8：已更新九项 gate owner/producer/digest 候选表与迁移说明；实际 plan、sequence=11 生产信任根、外部调度 SLA 和最终 Hosted 同 SHA 证据仍阻塞完成。
+- Task 8：已更新九项 gate owner/producer/digest 候选表与迁移说明；实际 plan、sequence=12 source 绑定、外部调度 SLA 和最终 Hosted 同 SHA 证据仍阻塞完成。
 
 ### File List
 
