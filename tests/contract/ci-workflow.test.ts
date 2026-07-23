@@ -7,7 +7,7 @@ const workflowPath = path.join(
   repositoryRoot,
   ".github/workflows/architecture-required.yml",
 );
-const producerSha = "616633c1e594174e4964672f1d04e94718995940";
+const producerSha = "3a0b53163e91bf14d4a3d1e911292b267e1e968a";
 
 describe("child gate evidence workflow", () => {
   it("runs on every pull request and protected default-branch push", async () => {
@@ -26,6 +26,7 @@ describe("child gate evidence workflow", () => {
       `uses: Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@${producerSha}`,
     );
     expect(workflow).toContain("provider_repository_id:");
+    expect(workflow).toContain(`producer_workflow_sha: ${producerSha}`);
     expect(workflow).toContain("repository:");
     expect(workflow).toContain("base_oid:");
     expect(workflow).toContain("head_oid:");
