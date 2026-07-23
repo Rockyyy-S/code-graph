@@ -159,6 +159,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [x] [Review][Patch] [High] Hosted run `30027196674` 中 UID 20001 继承不可遍历的 runner workspace cwd，pnpm 在启动配置扫描时以 `EACCES` 退出；版本检查现固定切换到隔离 install HOME，依赖安装直接以 canonical candidate root 为 cwd，不再依赖父 workspace 权限 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:138]
 - [x] [Review][Patch] [High] Hosted run `30028379344` 证明 GitHub runner sudoers 禁止 `sudo -D/--chdir`，而父 runner shell 也不能进入 UID 20001 拥有的 `0700` install HOME；版本检查现由降权后的 GNU `env --chdir` 进入隔离目录，依赖安装仍由可信 shell 固定 canonical candidate root 后降权执行，避免放宽权限或依赖 sudoers `runcwd` 特权 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:144]
 - [x] [Review][Patch] [High] Hosted run `30029833621` 中版本检查已通过，但 pnpm 对 workspace 内候选绝对路径扫描仍因祖先不可遍历而 `EACCES`；现保留原 checkout 供 Actions 清理，将 exact-OID 副本置于 root-owned `/tmp` 父目录执行，安装后杀净候选进程、恢复可信 `.git` 并拒绝 tracked 漂移，再只向 gate GID 暴露只读副本与白名单输出写权限 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:150]
+- [x] [Review][Patch] [High] Hosted run `30031874378` 证明外层 runner 仍不能 `cd` 进入 UID 20001 拥有的 `0700` worktree；安装 cwd 现与版本检查一致，由降权后的 GNU `env --chdir` 切换，父 shell 保持 workspace 以继续恢复可信 `.git`、执行 tracked diff 并完成固定路径清理 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:174]
 
 ## Dev Notes
 
