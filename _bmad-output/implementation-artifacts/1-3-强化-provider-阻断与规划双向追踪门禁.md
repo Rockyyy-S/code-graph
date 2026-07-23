@@ -156,6 +156,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [x] [Review][Patch] [High] 外部 producer 通过 `pnpm/action-setup` 的 `standalone: true` 执行无锁 registry 安装、lifecycle 与浮动传递依赖，可在可信 checkout 后污染 Harness/registry/candidate；现改为 checkout 前下载 pnpm v11.12.0 官方 Linux x64 release asset、校验固定 SHA-256、限定提取 `pnpm` 与 `dist` runtime 并 root-owned 安装 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:53]
 - [x] [Review][Patch] [Medium] producer workflow 合同测试未覆盖关键 pnpm 来源完整性与安装时序，删除 checksum、checkout 前安装或 root 权限约束后仍可能全绿；现固定断言官方 URL、SHA-256、HTTPS 限制、严格校验、限定成员提取、checkout 前时序与 UID 20001 实际执行 [../code-graph-gate-controller/tests/workflow-contract.test.mjs:42]
 - [x] [Review][Patch] [High] pnpm v11 SEA 顶层二进制仍从 `dirname(process.execPath)/dist/pnpm.mjs` 加载 runtime，仅提取 `pnpm` 会导致 Hosted 版本验证失败；现从同一校验归档提取 `pnpm` 与 `dist`，逐个约束 canonical path/符号链接边界并整体安装为 root-owned、非组/其他用户可写 runtime [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:64]
+- [x] [Review][Patch] [High] Hosted run `30027196674` 中 UID 20001 继承不可遍历的 runner workspace cwd，pnpm 在启动配置扫描时以 `EACCES` 退出；版本检查现固定切换到隔离 install HOME，依赖安装直接以 canonical candidate root 为 cwd，不再依赖父 workspace 权限 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:138]
 
 ## Dev Notes
 
