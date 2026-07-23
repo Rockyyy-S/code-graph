@@ -5,7 +5,7 @@ created_at: 2026-07-18T12:41:36+08:00
 
 # Story 1.2: 启动空 graph-service 并完成协议握手
 
-Status: in-progress
+Status: done
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git 与技术版本分析；实现完成状态仍由 dev-story 和独立代码审查流程决定。 -->
 
@@ -104,14 +104,14 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
   - [x] 测试中的伪 token 仅放 tests 目录或运行时生成，避免 basic-security 将测试材料误判为产品凭据。
   - [x] 测试保持 Red → Green → Refactor；禁止 skip/todo/only、空断言、passWithNoTests 或恒成功脚本。
 
-- [ ] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
+- [x] Task 6：接入依赖、文档与最小真实 CI 证据（AC: 5）
   - [x] 在 packages/contracts 引入架构锁定的 Ajv 8.20.0，在 packages/service-client 和 apps/graph-service 引入 vscode-jsonrpc 9.0.1，并更新 pnpm-lock.yaml；不要提前安装 better-sqlite3 或 Analyzer 依赖。
   - [x] 更新 scripts/architecture/check-dependency-boundaries.mjs 的角色级第三方 allowlist，只允许 contracts 使用 Ajv、service-client 与 composition-root 使用 vscode-jsonrpc；补充正/负向边界测试，保持其他角色默认拒绝。
   - [x] package.json 内部 workspace 依赖继续使用 workspace:*，tsconfig.build.json project references 与 manifest 依赖完全一致；不得改写既有 type/build 脚本。
   - [x] 更新 docs/repository-layout.md，并新增协议控制面说明，记录 owner、IPC、发现、握手、空状态、错误码和范围外能力；文档路径使用仓库相对路径。
   - [x] 复用现有 .github/workflows/architecture-required.yml 和稳定 check 名；不得增加 path filter、continue-on-error 或 Story 1.3 的 ci/quality-gates.v1.yaml。
   - [x] 使用仓库锁定的 Node 24.18.0、pnpm 11.12.0 执行 pnpm install --frozen-lockfile 和 pnpm architecture-required，确保七条门禁全部真实通过。
-  - [ ] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
+  - [x] 新增 docs/ci/story-1-2-provider-evidence.md，记录候选完整 commit、architecture-required 运行链接、最终结论及失败会阻止合并的证据；不得等待 Story 1.3 补做。
 
 ### Review Findings
 
@@ -177,7 +177,7 @@ so that 后续能力可以复用同一本地服务实例和版本化协议。
 - [x] [Review][Patch] [Medium] 默认 POSIX 缓存路径导致 UDS 超长时公共连接入口直接抛原生 `Error`，缺少 AC4 要求的稳定 ErrorV1 字段 [packages/service-client/src/endpoint.ts:65]
 - [x] [Review][Patch] [Low] `SafeLocalLogger.close()` 在句柄真正关闭前提交 `#closed=true`，首次 close 瞬时失败后所有清理重试都会误判成功 [apps/graph-service/src/safe-log.ts:37]
 - [x] [Review][Patch] [Low] 新增合同类型仍有三个接口缺少项目约束要求的中文 JSDoc [packages/contracts/src/protocol-error.ts:36]
-- [ ] [Review][Patch] [High] 第四轮本地修复尚未形成候选提交与同 SHA Hosted `architecture-required` 证据，当前旧运行不能证明 AC5 [docs/ci/story-1-2-provider-evidence.md:3]
+- [x] [Review][Patch] [High] 第四轮本地修复尚未形成候选提交与同 SHA Hosted `architecture-required` 证据，当前旧运行不能证明 AC5 [docs/ci/story-1-2-provider-evidence.md:3]
 
 ### Review Findings（第五轮复审，2026-07-20）
 
@@ -466,6 +466,7 @@ GPT-5 Codex
 - 2026-07-22：第十轮复审 5 项本地补丁完成 RED → GREEN；保留 fatal cleanup 原始错误，收紧 revision 安全整数、POSIX 日志 no-follow、服务端 canonical Ajv 门禁并统一 token-first 文档；`pnpm architecture-required` 全绿（unit 96/96，contract 98/98）。
 - 2026-07-22：第十一轮复审 3 项本地补丁完成 RED → GREEN；为启动失败日志关闭增加硬 deadline，以 non-block + 普通文件校验拒绝 FIFO，并让 canonical 失败在连接关闭前保持终态；首次并行门禁因资源争用触发既有计时测试超时，单独重跑 `pnpm architecture-required` 全绿（unit 98/98，contract 99/99）。
 - 2026-07-22：第十二轮复审 2 项本地补丁完成 RED → GREEN；POSIX 日志打开前先将既有 workspace 目录收紧为 0700，并拒绝多硬链接日志目标；`pnpm architecture-required` 全绿（unit 100/100，contract 99/99）。
+- 2026-07-23：候选 `01bcf2d` 与 `92d11e5` 的 Hosted 运行依次真实阻断 Unit、Contract 中超长 POSIX 测试夹具；修复后最终候选 `21c25f6c5381539910daba7a151f2d4cc121fc48` 的 run 29908232554 七门禁全部通过。
 
 ### Completion Notes List
 
@@ -475,7 +476,7 @@ GPT-5 Codex
 - Task 3：交付可执行 graph-service、vscode-jsonrpc 本机 IPC、权威 absent 状态、受控 shutdown 与最小安全日志。
 - Task 4：交付共享 service-client 公共 API、受信任 spawn 启动器、双客户端复用与无副作用 Workspace Trust 门禁。
 - Task 5：真实 Windows Named Pipe 结果为两个独立客户端进程获得相同 PID、serviceInstanceId、statusEpoch 和唯一 writer；第三客户端成功复用并 shutdown。
-- Task 6（当前本地工作区）：依赖锁定、角色 allowlist、协议/仓库文档、冻结安装与本地七门禁均已完成；新候选 Hosted Provider 证据待生成。
+- Task 6：最终候选 `21c25f6c5381539910daba7a151f2d4cc121fc48` 的 Hosted run 29908232554 七门禁全部成功，同 SHA Provider 证据已完成。
 - Task 6：第三轮候选 `56f4e63` 的历史 Hosted 证据仍保留，但不替代当前工作区的新候选证据。
 - Code Review：完成 deadline、启动错误传播、Schema 协商、实例身份、异常安全清理、信号窗口、测试孤儿进程与 JSDoc 约束修复，15/15 审查项关闭。
 - Code Review Round 2：本地代码与测试修复 12/12 完成；最终候选的 Hosted required-check 已关闭遗留证据行动项。
@@ -488,7 +489,7 @@ GPT-5 Codex
 - Code Review Round 9：本地代码与回归测试 1/1 完成；客户端响应预算已绑定真实 JSON-RPC request id，仅余当前候选的同 SHA Hosted required-check 证据行动项。
 - Code Review Round 10：本地代码、合同与文档补丁 5/5 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
 - Code Review Round 11：本地代码与回归测试补丁 3/3 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
-- Code Review Round 12：本地代码与回归测试补丁 2/2 完成；仅余当前候选的同 SHA Hosted required-check 证据行动项。
+- Code Review Round 12：本地代码与回归测试补丁 2/2 完成；同 SHA Hosted required-check 证据已关闭最后行动项。
 
 ### File List
 
@@ -573,3 +574,4 @@ GPT-5 Codex
 - 2026-07-22：完成第十轮复审 5 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
 - 2026-07-22：完成第十一轮复审 3 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
 - 2026-07-22：完成第十二轮复审 2 项本地补丁并通过七门禁；仅余同 SHA Hosted `architecture-required` 证据，Story 与 Sprint 保持 in-progress。
+- 2026-07-23：最终候选 `21c25f6c5381539910daba7a151f2d4cc121fc48` 的 Hosted `architecture-required` run 29908232554 全绿，关闭 AC5 与全部复审 finding，Story 更新为 done。
