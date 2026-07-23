@@ -8,7 +8,7 @@ import {
 } from "../../scripts/ci/load-quality-gates.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
-const workflowSha = "7625ab3c58d6e0fd4d6b16e577609ab96b127870";
+const workflowSha = "0792e37950ea90cd653563b571811e1e1628dfd8";
 const temporaryRoots: string[] = [];
 
 const expectedGates = [

@@ -7,7 +7,7 @@ const workflowPath = path.join(
   repositoryRoot,
   ".github/workflows/architecture-required.yml",
 );
-const producerSha = "7625ab3c58d6e0fd4d6b16e577609ab96b127870";
+const producerSha = "0792e37950ea90cd653563b571811e1e1628dfd8";
 
 describe("child gate evidence workflow", () => {
   it("runs on every pull request and protected default-branch push", async () => {
