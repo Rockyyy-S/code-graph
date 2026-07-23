@@ -1,0 +1,7 @@
+*.json text eol=lf
+*.mjs text eol=lf
+*.mts text eol=lf
+*.ts text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+.npmrc text eol=lf

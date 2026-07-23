@@ -6,6 +6,7 @@
     "declarationMap": true,
     "noEmit": false,
     "outDir": "dist",
-    "sourceMap": true
+    "sourceMap": true,
+    "tsBuildInfoFile": "./dist/tsconfig.build.tsbuildinfo"
   }
 }
