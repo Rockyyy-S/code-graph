@@ -15,11 +15,11 @@ permissions:
 jobs:
   gate-evidence:
     name: gate-evidence
-    uses: Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@cf72d883c82c1042bdce3cdbcfb95251cc6257bd
+    uses: Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@d69682a9b4342acaa7048eaf664a77e8d35e1da1
     with:
       base_oid: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
       head_oid: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       object_format: sha1
       provider_repository_id: ${{ format('{0}', github.event.repository.id) }}
-      producer_workflow_sha: cf72d883c82c1042bdce3cdbcfb95251cc6257bd
+      producer_workflow_sha: d69682a9b4342acaa7048eaf664a77e8d35e1da1
       repository: ${{ github.repository }}
