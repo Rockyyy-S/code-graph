@@ -359,11 +359,11 @@ GPT-5 Codex
 - Task 4 回归：完整 139 unit tests、110 contract tests 通过；type、lint、planning-trace 通过。
 - Task 5 RED/GREEN：GateOutput/Evidence 与全门禁失败传播测试先失败后通过；候选 workflow 已仅调用外部 producer SHA `616633c1e594174e4964672f1d04e94718995940`。
 - Task 5 真实聚合：首轮九项中既有 launcher 时序测试瞬态失败，runner 正确阻断并保留旁路日志；单独复跑 unit 147/147 通过，第二轮九项 `architecture-required` 全部通过。
-- 外部 Controller policy、provider API poller、GitHub attestation 验证和 drift policy 已在 `Rockyyy-S/code-graph-gate-controller` 提交并推送至 `8a20843`。
+- 外部 Controller policy、provider API poller、GitHub attestation 验证和 drift policy 已在 `Rockyyy-S/code-graph-gate-controller` 提交并推送至 `d4efb3f`。
 - Task 6 RED/GREEN：真实 Hosted run 暴露 reusable workflow SHA 错绑与互斥 attestation CLI 参数；新增合同测试后修复为显式 `producer_workflow_sha`，Controller 再逐字段验证 issuer、repository、run/attempt、merge ref、signer SHA、artifact digest、gate job 与 GitHub Actions App `15368`。
 - Task 6 Hosted child：run `29979602524` attempt 1 因 sequence=1 未批准新 registry 正确失败；sequence=2 生效后 attempt 2 在候选 `d54be3b34eddc55c3e7f65dafe8682718290904a` 九项 gate 全部通过，attested evidence digest 为 `1d0d0e573bb8fd5ece802335d89246f0caeaf4965bf59b99f0345f73ed529f44`。
 - Task 6 HALT：2026-07-23 只读复核仍为 GitHub Actions App `15368`、`enforce_admins=false`、rulesets 空数组，外部仓库也尚无四项 App Secrets；创建/安装两个 GitHub App、写入私钥、启用无 bypass ruleset 与受控漂移演练需要新的明确授权，Story 保持 `in-progress`。
-- 最新完整回归：`pnpm install --frozen-lockfile` 成功，`pnpm architecture-required` 九项全部通过；外部 Controller tests 20/20 通过。
+- 最新完整回归：`pnpm install --frozen-lockfile` 成功，`pnpm architecture-required` 九项全部通过；外部 Controller tests 21/21 通过。
 
 ### Completion Notes List
 

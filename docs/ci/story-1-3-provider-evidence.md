@@ -64,7 +64,7 @@
 - ruleset enforcement、strict/current-head、required context、Controller App integration ID、
   bypass 空集合与 repository/default-branch 的独立 drift policy
 
-外部仓库测试当前为 20/20 通过。私钥、installation token、webhook secret 均未写入源码、
+外部仓库测试当前为 21/21 通过。私钥、installation token、webhook secret 均未写入源码、
 artifact、日志或本文档。
 
 ## 待激活的 provider 配置
