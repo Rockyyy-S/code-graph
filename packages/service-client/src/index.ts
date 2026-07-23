@@ -1,4 +1,10 @@
-/**
- * @file 服务发现与连接行为属于用户故事 1.2；此处不伪造任何协议能力。
- */
-export {};
+/** @file 导出工作区身份、IPC 连接与受信任启动器公共边界。 */
+export * from "./errors.js";
+export {
+  GraphServiceConnection,
+  connectToGraphService,
+  type ConnectToGraphServiceOptions,
+  type WorkspaceTrustGate,
+} from "./connection.js";
+export * from "./launcher.js";
+export * from "./workspace-identity.js";

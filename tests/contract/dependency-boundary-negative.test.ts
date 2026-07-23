@@ -60,6 +60,57 @@ async function expectRule(root: string, rule: string): Promise<void> {
 }
 
 describe("dependency boundary negative paths", () => {
+  it("allows only the architecture-approved Story 1.2 external dependencies", async () => {
+    const root = await createRepository();
+    await addWorkspace(
+      root,
+      "packages/contracts",
+      "@codegraph/contracts",
+      "contracts",
+      { ajv: "8.20.0" },
+      'import "ajv";\n',
+    );
+    await addWorkspace(
+      root,
+      "packages/service-client",
+      "@codegraph/service-client",
+      "service-client",
+      { "vscode-jsonrpc": "9.0.1" },
+      'import "vscode-jsonrpc";\n',
+    );
+    await addWorkspace(
+      root,
+      "apps/graph-service",
+      "@codegraph/graph-service",
+      "composition-root",
+      { "vscode-jsonrpc": "9.0.1" },
+      'import "vscode-jsonrpc";\n',
+    );
+
+    await expect(checkDependencyBoundaries(root)).resolves.toEqual([]);
+  });
+
+  it.each([
+    ["packages/contracts", "@codegraph/contracts", "contracts", "vscode-jsonrpc"],
+    ["packages/service-client", "@codegraph/service-client", "service-client", "ajv"],
+    ["apps/graph-service", "@codegraph/graph-service", "composition-root", "ajv"],
+  ])(
+    "rejects Story 1.2 dependencies assigned to the wrong role",
+    async (relativePath, name, role, dependency) => {
+      const root = await createRepository();
+      await addWorkspace(
+        root,
+        relativePath,
+        name,
+        role,
+        { [dependency]: "1.0.0" },
+        `import "${dependency}";\n`,
+      );
+
+      await expectRule(root, "external-dependency-allowlist");
+    },
+  );
+
   it("rejects domain importing another project package", async () => {
     const root = await createRepository();
     await addWorkspace(root, "packages/contracts", "@codegraph/contracts", "contracts");

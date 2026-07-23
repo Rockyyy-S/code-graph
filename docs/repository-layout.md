@@ -10,14 +10,14 @@
 
 | Workspace | Owner 与允许依赖 | 禁止事项 |
 | --- | --- | --- |
-| `apps/graph-service` | 唯一组合根；允许依赖 application、contracts 和 adapters | 实现 Story 1.2 之前不得伪造服务、握手或索引状态 |
+| `apps/graph-service` | 唯一组合根；拥有本机 IPC 服务、握手、空状态与实例资源 | TCP fallback、全局 daemon，或提前组合索引/存储能力 |
 | `apps/cli` | 薄客户端；允许依赖 service-client、contracts | 直接访问 store/analyzer 或复制业务逻辑 |
 | `apps/extension` | VS Code 薄客户端；允许依赖 service-client、contracts | 直接访问 adapter，或提前注册未实现的产品能力 |
 | `apps/webview` | 渲染边界；只依赖 contracts | 直接连接服务、读取文件或持有业务计算 |
 | `packages/domain` | 领域行为与不变量；不依赖其他项目包 | application、contracts、service-client、adapter、宿主 API |
 | `packages/application` | 用例与稳定端口；只依赖 domain | adapter、VS Code、SQLite、Compiler API、传输 DTO |
-| `packages/contracts` | 共享 Schema/DTO 的独立边界 | 领域行为、适配器实现、渲染库内部格式 |
-| `packages/service-client` | 服务发现与连接边界；只依赖 contracts | 业务查询语义、图存储、adapter |
+| `packages/contracts` | 共享 Schema/DTO 与 Ajv 运行时校验的独立边界 | 领域行为、适配器实现、渲染库内部格式 |
+| `packages/service-client` | 工作区身份、用户缓存发现、deadline 连接、握手与客户端生命周期 | 业务查询语义、图存储、adapter、graph-service 入口定位 |
 | `packages/adapters/store-sqlite` | 存储端口实现；依赖 application/domain | 承担组合根职责或被核心反向导入 |
 | `packages/adapters/analyzer-typescript` | 分析端口实现；依赖 application/domain | 向核心泄露 Compiler API 类型 |
 | `packages/adapters/git-local` | Git 端口实现；依赖 application/domain | 承担业务用例或组合逻辑 |
@@ -37,6 +37,10 @@
 `workspace:*` 声明；第三方依赖按 workspace 角色默认拒绝，引入前必须更新架构所有的
 allowlist。
 
+Story 1.2 的角色级第三方 allowlist 只允许 `packages/contracts` 使用 `ajv`，只允许
+`packages/service-client` 与 `apps/graph-service` 使用 `vscode-jsonrpc`；其他角色及其他
+Schema/RPC 库继续默认拒绝。版本由各 workspace manifest 与 `pnpm-lock.yaml` 锁定。
+
 TypeScript workspace 通过 project references 表达 manifest 依赖，质量 runner 按依赖拓扑
 执行 type/build，保证 clean checkout 不依赖历史 `dist` 产物。
 
@@ -55,6 +59,22 @@ TypeScript workspace 通过 project references 表达 manifest 依赖，质量 r
 GitHub 以稳定 check 名 `architecture-required` always-run 执行以上七条命令，
 workflow 使用完整 commit SHA 固定第三方 Actions。
 真实 required-check 与受控失败证据见 `docs/ci/story-1-1-provider-evidence.md`。
+
+## 本地服务控制面
+
+每个 realpath 后的 indexing root 最多对应一个 `graph-service`。客户端统一通过
+`packages/service-client` 计算 workspace-key、读取用户缓存中的 metadata/token、执行
+connect-first 发现并按需启动。Windows 使用随机 Named Pipe；macOS/Linux 使用长度受控
+且权限为 `0600` 的 UDS。公开 API 不接受 host/port，也不存在 TCP fallback。
+
+每条连接的首请求必须是 `initialize`，并依次通过 token、封闭请求形状、workspace-key 和协议
+主版本校验。握手前不会返回 `service/status`；失败返回脱敏 `ErrorV1` 后关闭连接。
+成功后仅声明 `service/status` 与 `service/shutdown`，详细合同见
+`docs/protocol/service-control-v1.md`。
+
+当前空状态是合法产品状态：`availability=absent`、`freshness=null`、
+`completeness=empty`、`committed=null`。本 Story 不创建 SQLite、节点、边、Findings、
+graphRevision、索引 Job 或成功索引时间。
 
 ## VS Code extension 模板来源
 

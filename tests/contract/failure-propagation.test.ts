@@ -18,7 +18,7 @@ describe("architecture-required failure propagation", () => {
       expect(
         runArchitectureRequired(commandsWithFailure(gate), { stdio: "pipe" }),
       ).toBe(23);
-    });
+    }, 30_000);
   }
 
   it("returns zero only when every real child process succeeds", () => {

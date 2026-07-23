@@ -22,10 +22,10 @@ const dependencyFields = [
 const externalDependencyAllowlistByRole = new Map([
   ["domain", new Set()],
   ["application", new Set()],
-  ["contracts", new Set()],
-  ["service-client", new Set()],
+  ["contracts", new Set(["ajv"])],
+  ["service-client", new Set(["vscode-jsonrpc"])],
   ["adapter", new Set()],
-  ["composition-root", new Set()],
+  ["composition-root", new Set(["vscode-jsonrpc"])],
   ["client-app", new Set(["@types/vscode", "esbuild", "typescript"])],
   ["renderer-app", new Set()],
 ]);
