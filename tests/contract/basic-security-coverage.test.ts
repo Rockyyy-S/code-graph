@@ -37,4 +37,28 @@ describe("basic security coverage", () => {
       "apps/sample/view.tsx",
     ]);
   });
+
+  it("scans top-level ci registry and provider evidence files", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-security-ci-"));
+    temporaryRoots.push(root);
+    await mkdir(path.join(root, "ci"), { recursive: true });
+    await mkdir(path.join(root, "docs", "ci"), { recursive: true });
+    await writeFile(
+      path.join(root, "ci", "quality-gates.v1.yaml"),
+      'controllerToken: "replace-me"\n',
+      "utf8",
+    );
+    await writeFile(
+      path.join(root, "docs", "ci", "provider-evidence.json"),
+      '{"webhook_secret":"dummy-secret"}\n',
+      "utf8",
+    );
+
+    const findings = await scanBasicSecurity(root);
+
+    expect(findings.map(({ relativePath }) => relativePath).sort()).toEqual([
+      "ci/quality-gates.v1.yaml",
+      "docs/ci/provider-evidence.json",
+    ]);
+  });
 });

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { validateRepositoryContract } from "../../scripts/contracts/validate-repository-contract.mjs";
+import { sha256CanonicalJson } from "../../packages/contracts/runtime/canonical-json.mjs";
 
 const temporaryRoots: string[] = [];
 
@@ -36,12 +37,16 @@ async function createValidContractFixture(): Promise<string> {
       unit: "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
     }),
   );
+  const rootScripts = {
+    ...scripts,
+    "architecture-required": "node scripts/ci/run-architecture-required.mjs",
+  };
 
   await writeJson(root, "package.json", {
     devDependencies: { typescript: "6.0.3" },
     engines: { node: "24.18.0", pnpm: "11.12.0" },
     packageManager: "pnpm@11.12.0",
-    scripts,
+    scripts: rootScripts,
   });
   await writeFile(path.join(root, ".node-version"), "24.18.0\n", "utf8");
   await writeFile(path.join(root, ".nvmrc"), "24.18.0\n", "utf8");
@@ -61,6 +66,24 @@ async function createValidContractFixture(): Promise<string> {
   await writeJson(root, "packages/domain/package.json", {
     name: "@codegraph/domain",
   });
+  const workflowSha = "1".repeat(40);
+  const gates = Object.keys(scripts)
+    .sort()
+    .map((gateId) => {
+      const gateDefinition = {
+        blocking: true,
+        capabilityOwner: "dev-enablement",
+        checkId: gateId,
+        command: ["pnpm", gateId],
+        evidenceProducerId: `gha-oidc://1303415307/example/controller/.github/workflows/produce-gate-evidence.yml@${workflowSha}#${gateId}`,
+        gateId,
+      };
+      return {
+        gateDefinition,
+        gateDefinitionDigest: sha256CanonicalJson(gateDefinition),
+      };
+    });
+  await writeJson(root, "ci/quality-gates.v1.yaml", { gates, schemaVersion: 1 });
   return root;
 }
 

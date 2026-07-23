@@ -21,6 +21,21 @@ import {
 } from "./service-control-schema.js";
 import type { ServiceMetadataV1 } from "./service-metadata.js";
 import type { ServiceStatusV1 } from "./service-status.js";
+import {
+  gateDefinitionV1Schema,
+  gateEvaluationContextV1Schema,
+  gateEvidenceV1Schema,
+  gateRegistryV1Schema,
+} from "./quality-gate-schema.js";
+import {
+  computeEvaluationContextDigest,
+  computeGateDefinitionDigest,
+  computeGateEvidenceDigest,
+  type GateDefinitionV1,
+  type GateEvaluationContextV1,
+  type GateEvidenceV1,
+  type GateRegistryV1,
+} from "./quality-gate.js";
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 
@@ -43,6 +58,14 @@ const shutdownResultValidator: ValidateFunction<unknown> =
   ajv.compile(shutdownResultSchema);
 const shutdownResultCompatibleValidator: ValidateFunction<unknown> =
   ajv.compile(shutdownResultCompatibleSchema);
+const gateDefinitionValidator: ValidateFunction<unknown> =
+  ajv.compile(gateDefinitionV1Schema);
+const gateRegistryValidator: ValidateFunction<unknown> =
+  ajv.compile(gateRegistryV1Schema);
+const gateEvaluationContextValidator: ValidateFunction<unknown> =
+  ajv.compile(gateEvaluationContextV1Schema);
+const gateEvidenceValidator: ValidateFunction<unknown> =
+  ajv.compile(gateEvidenceV1Schema);
 
 /** 严格校验服务端收到的 initialize 请求。 */
 export function validateInitializeRequest(value: unknown): value is InitializeRequest {
@@ -149,6 +172,78 @@ export function validateErrorV1(value: unknown): value is ErrorV1 {
   );
 }
 
+/** 严格校验 GateDefinitionV1 的 Schema、producer 绑定与 trigger glob 规范。 */
+export function validateGateDefinitionV1(value: unknown): value is GateDefinitionV1 {
+  if (!gateDefinitionValidator(value)) {
+    return false;
+  }
+  const definition = value as GateDefinitionV1;
+  if (!definition.evidenceProducerId.endsWith(`#${definition.gateId}`)) {
+    return false;
+  }
+  if (definition.command.some((argument) => argument.trim().length === 0 || argument.includes("\0"))) {
+    return false;
+  }
+  return (
+    definition.triggerPaths === undefined ||
+    definition.triggerPaths.every(
+      (triggerPath, index) =>
+        isCanonicalTriggerGlob(triggerPath) &&
+        (index === 0 || definition.triggerPaths![index - 1]! < triggerPath),
+    )
+  );
+}
+
+/** 严格校验 GateRegistryV1 的顺序、唯一性与 definition digest。 */
+export function validateGateRegistryV1(value: unknown): value is GateRegistryV1 {
+  if (!gateRegistryValidator(value)) {
+    return false;
+  }
+  const registry = value as GateRegistryV1;
+  return registry.gates.every((entry, index) => {
+    const previous = registry.gates[index - 1];
+    return (
+      validateGateDefinitionV1(entry.gateDefinition) &&
+      entry.gateDefinitionDigest === computeGateDefinitionDigest(entry.gateDefinition) &&
+      (previous === undefined ||
+        previous.gateDefinition.gateId < entry.gateDefinition.gateId)
+    );
+  });
+}
+
+/** 严格校验固定 Git OID 与 evaluationContextDigest。 */
+export function validateGateEvaluationContextV1(
+  value: unknown,
+): value is GateEvaluationContextV1 {
+  if (!gateEvaluationContextValidator(value)) {
+    return false;
+  }
+  const context = value as GateEvaluationContextV1;
+  const oidLength = context.objectFormat === "sha1" ? 40 : 64;
+  if (
+    [context.baseOid, context.comparisonBaseOid, context.headOid].some(
+      (oid) => oid.length !== oidLength,
+    )
+  ) {
+    return false;
+  }
+  const { evaluationContextDigest, ...digestInput } = context;
+  return evaluationContextDigest === computeEvaluationContextDigest(digestInput);
+}
+
+/** 严格校验 GateEvidenceV1 的 producer/gate 绑定与证据摘要。 */
+export function validateGateEvidenceV1(value: unknown): value is GateEvidenceV1 {
+  if (!gateEvidenceValidator(value)) {
+    return false;
+  }
+  const evidence = value as GateEvidenceV1;
+  if (!evidence.evidenceProducerId.endsWith(`#${evidence.gateId}`)) {
+    return false;
+  }
+  const { gateEvidenceDigest, ...digestInput } = evidence;
+  return gateEvidenceDigest === computeGateEvidenceDigest(digestInput);
+}
+
 /** capability 必须保持字面量升序，确保跨进程协商结果确定。 */
 function hasSortedCapabilities(value: unknown): boolean {
   if (typeof value !== "object" || value === null || !("capabilities" in value)) {
@@ -160,5 +255,24 @@ function hasSortedCapabilities(value: unknown): boolean {
   }
   return capabilities.every(
     (capability, index) => index === 0 || capabilities[index - 1]! < capability,
+  );
+}
+
+/** trigger glob 必须是仓库内、相对、POSIX 且无反选/逃逸的 canonical 形式。 */
+function isCanonicalTriggerGlob(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.startsWith("!") ||
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    value.includes("//") ||
+    value.endsWith("/")
+  ) {
+    return false;
+  }
+  const segments = value.split("/");
+  return segments.every(
+    (segment) => segment.length > 0 && segment !== "." && segment !== "..",
   );
 }

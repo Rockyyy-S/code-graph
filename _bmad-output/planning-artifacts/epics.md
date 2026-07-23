@@ -3101,16 +3101,16 @@ storyDependencyDagV1:
 
 | Story | FR / SM / UJ | NFR | AR | UX-DR |
 | --- | --- | --- | --- | --- |
-| 1.4 | FR-1、FR-4、FR-5、FR-22 | 9、10、11 | 6、8、9、12、28 | N/A，CLI/服务状态由后续宿主消费 |
-| 1.19 | FR-1、FR-5、FR-22 | 9、10、11、22 | 4、5、6、9、12、28 | N/A |
-| 2.1 | FR-21、FR-22 | 8、13、27 | 19、21、28 | 1、19、20、37 |
-| 2.10 | FR-21、FR-22 | 10、17、18、20 | 19 | 4、15、16、21、22、24、25、34–37 |
-| 2.8 | FR-3、FR-22 | 5、9、10 | 4、5、12、13 | 后台状态由 2.11 验收 |
-| 2.11 | FR-3、FR-22 | 5、8、10、17、20 | 11、20 | 6、15、23、27、30、32 |
-| 4.8 | FR-16、FR-17、FR-20 | 12、21 | 18、22、28 | 17 |
-| 4.9 | FR-20、FR-23 | 12、14、16、21 | 22、24、28 | 18、25 |
-| 5.11 | SM-1、SM-6、SM-7、SM-8、UJ-5 | 由 manifest 引用适用 NFR | 29、30、32 | 由任务和 evidence 引用适用 UX-DR |
-| 5.12 | FR-1–23、SM-1–8 | NFR-1–27 | 29–32 | 发布 manifest 逐项展开适用 UX-DR |
+| 1.4 | FR-1、FR-4、FR-5、FR-22 | NFR-9、NFR-10、NFR-11 | AR-6、AR-8、AR-9、AR-12、AR-28 | N/A |
+| 1.19 | FR-1、FR-5、FR-22 | NFR-9、NFR-10、NFR-11、NFR-22 | AR-4、AR-5、AR-6、AR-9、AR-12、AR-28 | N/A |
+| 2.1 | FR-21、FR-22 | NFR-8、NFR-13、NFR-27 | AR-19、AR-21、AR-28 | UX-DR1、UX-DR19、UX-DR20、UX-DR37 |
+| 2.10 | FR-21、FR-22 | NFR-10、NFR-17、NFR-18、NFR-20 | AR-19 | UX-DR4、UX-DR15、UX-DR16、UX-DR21、UX-DR22、UX-DR24、UX-DR25、UX-DR34 至 UX-DR37 |
+| 2.8 | FR-3、FR-22 | NFR-5、NFR-9、NFR-10 | AR-4、AR-5、AR-12、AR-13 | N/A |
+| 2.11 | FR-3、FR-22 | NFR-5、NFR-8、NFR-10、NFR-17、NFR-20 | AR-11、AR-20 | UX-DR6、UX-DR15、UX-DR23、UX-DR27、UX-DR30、UX-DR32 |
+| 4.8 | FR-16、FR-17、FR-20 | NFR-12、NFR-21 | AR-18、AR-22、AR-28 | UX-DR17 |
+| 4.9 | FR-20、FR-23 | NFR-12、NFR-14、NFR-16、NFR-21 | AR-22、AR-24、AR-28 | UX-DR18、UX-DR25 |
+| 5.11 | SM-1、SM-6、SM-7、SM-8、UJ-5 | N/A | AR-29、AR-30、AR-32 | N/A |
+| 5.12 | FR-1 至 FR-23、SM-1 至 SM-8 | NFR-1 至 NFR-27 | AR-29 至 AR-32 | N/A |
 
 ### 关键合同与 Story 双向映射
 

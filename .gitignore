@@ -5,6 +5,7 @@ dist/
 build/
 out/
 coverage/
+artifacts/
 .vitest/
 *.log
 *.tsbuildinfo

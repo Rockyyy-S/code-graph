@@ -1,7 +1,9 @@
-import { createHash } from "node:crypto";
 import { realpath as nativeRealpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { sha256CanonicalJson } from "@codegraph/contracts";
+
+export { canonicalizeJson } from "@codegraph/contracts";
 
 /** Git 工作区身份输入；字段集合封闭且可进行 JCS canonicalization。 */
 export interface GitWorkspaceIdentityInputV1 {
@@ -41,41 +43,6 @@ export interface WorkspaceIdentityResult {
   identity: WorkspaceIdentityInputV1;
   indexingRoot: string;
   workspaceKey: string;
-}
-
-/**
- * 对 JSON 值执行 RFC 8785 所需的确定性键排序与 JSON 序列化。
- *
- * WorkspaceIdentityInputV1 只包含整数与字符串；此实现仍拒绝非有限数字和 undefined，
- * 避免未来扩展悄然产生不稳定哈希。
- */
-export function canonicalizeJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError("JCS 不接受非有限数字。");
-    }
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalizeJson(item)).join(",")}]`;
-  }
-  if (typeof value === "object" && value !== null) {
-    const record = value as Record<string, unknown>;
-    const entries = Object.keys(record)
-      .sort()
-      .map((key) => {
-        const entry = record[key];
-        if (entry === undefined) {
-          throw new TypeError("JCS 不接受 undefined 字段。");
-        }
-        return `${JSON.stringify(key)}:${canonicalizeJson(entry)}`;
-      });
-    return `{${entries.join(",")}}`;
-  }
-  throw new TypeError("JCS 输入必须是 JSON 值。");
 }
 
 /** 规范化 Git remote，移除凭据、默认端口、尾随斜杠与 `.git`。 */
@@ -138,9 +105,7 @@ export async function deriveWorkspaceIdentity(
   return {
     identity,
     indexingRoot: resolvedRoot,
-    workspaceKey: createHash("sha256")
-      .update(canonicalizeJson(identity), "utf8")
-      .digest("hex"),
+    workspaceKey: sha256CanonicalJson(identity),
   };
 }
 
