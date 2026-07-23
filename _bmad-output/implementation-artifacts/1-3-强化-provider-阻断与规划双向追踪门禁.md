@@ -6,7 +6,7 @@ provider_snapshot_at: 2026-07-23T09:35:00+08:00
 
 # Story 1.3: 强化 provider 阻断与规划双向追踪门禁
 
-Status: ready-for-dev
+Status: in-progress
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git、provider 与技术版本分析；实现完成状态仍由 dev-story、真实外部门禁证据和独立代码审查流程决定。 -->
 
@@ -359,7 +359,11 @@ GPT-5 Codex
 - Task 4 回归：完整 139 unit tests、110 contract tests 通过；type、lint、planning-trace 通过。
 - Task 5 RED/GREEN：GateOutput/Evidence 与全门禁失败传播测试先失败后通过；候选 workflow 已仅调用外部 producer SHA `616633c1e594174e4964672f1d04e94718995940`。
 - Task 5 真实聚合：首轮九项中既有 launcher 时序测试瞬态失败，runner 正确阻断并保留旁路日志；单独复跑 unit 147/147 通过，第二轮九项 `architecture-required` 全部通过。
-- 外部 Controller policy、provider API poller、GitHub attestation 验证和 drift policy 已在 `Rockyyy-S/code-graph-gate-controller` 提交并推送至 `b4ee3fe`。
+- 外部 Controller policy、provider API poller、GitHub attestation 验证和 drift policy 已在 `Rockyyy-S/code-graph-gate-controller` 提交并推送至 `8a20843`。
+- Task 6 RED/GREEN：真实 Hosted run 暴露 reusable workflow SHA 错绑与互斥 attestation CLI 参数；新增合同测试后修复为显式 `producer_workflow_sha`，Controller 再逐字段验证 issuer、repository、run/attempt、merge ref、signer SHA、artifact digest、gate job 与 GitHub Actions App `15368`。
+- Task 6 Hosted child：run `29979602524` attempt 1 因 sequence=1 未批准新 registry 正确失败；sequence=2 生效后 attempt 2 在候选 `d54be3b34eddc55c3e7f65dafe8682718290904a` 九项 gate 全部通过，attested evidence digest 为 `1d0d0e573bb8fd5ece802335d89246f0caeaf4965bf59b99f0345f73ed529f44`。
+- Task 6 HALT：2026-07-23 只读复核仍为 GitHub Actions App `15368`、`enforce_admins=false`、rulesets 空数组，外部仓库也尚无四项 App Secrets；创建/安装两个 GitHub App、写入私钥、启用无 bypass ruleset 与受控漂移演练需要新的明确授权，Story 保持 `in-progress`。
+- 最新完整回归：`pnpm install --frozen-lockfile` 成功，`pnpm architecture-required` 九项全部通过；外部 Controller tests 20/20 通过。
 
 ### Completion Notes List
 
@@ -369,6 +373,7 @@ GPT-5 Codex
 - Task 3：交付固定 Git OID evaluator、确定性 merge-base、NUL name-status parser、受限 POSIX glob 与明确不可生成 Hosted evidence 的 local-fixture 模式。
 - Task 4：交付固定八文件 source set、Planning Reference Grammar、定义/Story/AD/DAG/反向表/链接/ProductValidation/sprint 屏障检查及稳定相对诊断。
 - Task 5：交付全量继续执行但最终 fail-closed 的 registry runner、GateOutput/GateEvidence、旁路原始日志、外部固定 child workflow 与 provider API/attestation Controller policy。
+- Task 6（部分）：已交付外部仓库、immutable producer、sequence=2 可信 registry、真实 Hosted child evidence、provider run/job/check/attestation policy 与 drift policy；生产 App/ruleset 激活及阻断/漂移演练仍待授权。
 
 ### File List
 
@@ -406,3 +411,10 @@ GPT-5 Codex
 - tests/contract/ci-workflow.test.ts
 - tests/contract/failure-propagation.test.ts
 - tests/unit/gate-evidence.test.ts
+- docs/repository-layout.md
+- docs/ci/story-1-3-provider-evidence.md
+- tests/contract/repository-documentation.test.ts
+
+### Change Log
+
+- 2026-07-23：完成 Story 1.3 仓库内 Task 1–5、外部 Controller/producer 代码与 Hosted child evidence；生产 GitHub App、Secrets、ruleset 和 drift 演练待授权，状态保持 `in-progress`。
