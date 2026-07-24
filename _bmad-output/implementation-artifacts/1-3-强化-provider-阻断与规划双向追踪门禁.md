@@ -123,7 +123,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 
 - [ ] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
   - [x] 更新 `docs/repository-layout.md`，说明 Gate Registry、contracts、planning trace、child evidence、外部 Controller、ruleset 和 drift monitor 的 owner、数据流、失败语义与范围边界。
-  - [ ] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；sequence=15 已闭合 Hosted 证据，当前仍缺实际 plan、外部调度/PR webhook SLA 与 sequence=16 审查修复候选的 Hosted 复验。
+  - [ ] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；sequence=16 已闭合 Hosted 证据，当前仍缺实际 plan、外部调度/PR webhook SLA 与新撤销路径的真实 drift failure→App failure→恢复演练。
   - [x] 保留 `docs/ci/story-1-1-provider-evidence.md` 与 `story-1-2-provider-evidence.md` 为历史证据，不回写旧运行冒充本 Story；本地全绿、旧候选或 shadow context 都不能替代最终候选正式 provider 结果。
   - [x] Story 交付说明逐项列出新增/变更 gate 的 `checkId`、`capabilityOwner`、`evidenceProducerId`、definition/registry digest 与验证证据。
   - [x] 只有仓库内门禁、外部 Controller、无 bypass ruleset、独立 drift monitor、真实失败阻断与最终同 SHA 通过全部成立后，才可把 Story 置为 `review`；独立代码审查完成后才可置为 `done`。
@@ -172,7 +172,8 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [x] [Review][Patch] [High] monitor 失败/过期时 Controller 在开放 PR 枚举前退出，旧 App-owned success 不会被撤销；现先枚举并对全部已读取开放 PR best-effort 发布 failure，且恢复后允许相同 evidence 覆盖较新的 drift failure [../code-graph-gate-controller/bin/run-controller.mjs]
 - [x] [Review][Patch] [High] 旧 Controller run 可在新 drift failure 后覆盖回 success，幂等 success 也会跳过 freshness；现 Controller 串行排队，发布或保留任何 success 前重新读取 monitor，60 项行为/合同测试通过 [../code-graph-gate-controller/lib/controller-check-publisher.mjs]
 - [x] [Review][Patch] [Medium] GitHub check-runs 默认只返回同名 latest，且 PR/check/workflow/job/artifact 列表缺完整分页；现使用 `filter=all`、完整分页、每页重试与部分结果保留，drift failure 在历史读取失败时仍直接追加失败 [../code-graph-gate-controller/lib/github-pagination.mjs]
-- [ ] [Review][Patch] [High] sequence=16 尚未把 producer `78e84ade…`、registry `779bc1d3…`、cleanup ownership 与 Controller drift/replay 修复接入可信根并完成同 SHA Hosted 九项及真实 success→drift failure→恢复复验 [docs/ci/story-1-3-provider-evidence.md]
+- [x] [Review][Patch] [High] sequence=16 已把 producer `78e84ade…`、registry `779bc1d3…`、cleanup ownership 与 Controller drift/replay 修复接入可信根；run `30063231289` attempt 2 九项全绿，artifact `8585366355`、attestation `36881454`、monitor `30063386894`、Controller `30063500387` 与 PR `CLEAN` 已闭合 [docs/ci/story-1-3-provider-evidence.md]
+- [ ] [Review][Patch] [High] sequence=16 新撤销路径尚缺真实 success→monitor drift failure/expiry→App-owned failure→merge blocked→恢复 success 的受控演练 [docs/ci/story-1-3-provider-evidence.md]
 - [ ] [Review][Patch] [High] 缺少具备 SLA 的外部 monitor 调度与 Provider PR opened/reopened/synchronize、child run 完成可信事件源；仓库 cron/workflow_run 无法消除 force-push/重开到旧 success SHA 的轮询竞态 [../code-graph-gate-controller/.github/workflows/controller.yml]
 
 ## Dev Notes
@@ -413,7 +414,7 @@ GPT-5 Codex
 - Task 7 漂移演练：monitor `29987529815` 检出错误 integration ID 的 `required-check-drift`，Controller `29987576544` fail closed；恢复后 monitor `29987637959` 与 Controller `29987688733` 通过。
 - 最终完整回归：`pnpm install --frozen-lockfile` 成功；已知顺序测试的 CI 并行目录同步预算由 500ms 调整为 2s，25ms deadline 负向语义保持；`pnpm architecture-required` 九项全部通过，外部 Controller tests 23/23 通过。
 - Review 修复：planning trace、GateOutput/Evidence、no-op/checkId、glob/UTF-8 与绝对 deadline 的 9 项仓库内 finding 已闭合；完整 `type`、`lint`、160 unit、113 contract 与九项 `architecture-required` 通过。
-- Review 外部迁移：sequence=15 已绑定 `7d600fd8…`；run `30061084230` attempt 2 九项全绿，artifact `8584643225`、attestation `36877829`、monitor `30061322093`、Controller `30061381372` 与 PR `CLEAN` 已闭合。新 producer `78e84ade…`、registry `779bc1d3…`、implementation `c6544b7d…` 已就绪，待 sequence=16 接入 cleanup ownership 与 drift/replay 修复。
+- Review 外部迁移：sequence=16 已绑定 `b853937…`、producer `78e84ade…`、registry `779bc1d3…` 与 implementation `c6544b7d…`；run `30063231289` attempt 2 九项全绿，artifact `8585366355`、attestation `36881454`、monitor `30063386894`、Controller `30063500387` 与 PR `CLEAN` 已闭合。
 
 ### Completion Notes List
 
@@ -423,9 +424,9 @@ GPT-5 Codex
 - Task 3：交付固定 Git OID evaluator、确定性 merge-base、NUL name-status parser、受限 POSIX glob 与明确不可生成 Hosted evidence 的 local-fixture 模式。
 - Task 4：交付固定八文件 source set、Planning Reference Grammar、定义/Story/AD/DAG/反向表/链接/ProductValidation/sprint 屏障检查及稳定相对诊断。
 - Task 5：交付全量继续执行但最终 fail-closed 的 registry runner、GateOutput/GateEvidence、旁路原始日志、外部固定 child workflow 与 provider API/attestation Controller policy。
-- Task 6：已交付独立 App 身份、immutable producer、sequence=15 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset 与独立只读 drift monitor；sequence=16 仍需推进 cleanup ownership 与 Controller drift/replay 修复，外部调度/PR webhook SLA 保持阻塞。
+- Task 6：已交付独立 App 身份、immutable producer、sequence=16 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset、独立只读 drift monitor、cleanup ownership 与 Controller drift/replay 修复；外部调度/PR webhook SLA 保持阻塞。
 - Task 7：已交付合同/Git/规划/provider 全量负向测试、真实 umbrella 失败阻断、最终恢复和 App identity 漂移演练。
-- Task 8：已更新 sequence=15 生产证据与 sequence=16 九项 gate owner/producer/digest 候选表；实际 plan、外部调度/PR webhook SLA、sequence=16 Hosted 与受控 drift 恢复证据仍阻塞完成。
+- Task 8：已更新 sequence=16 生产证据与九项 gate owner/producer/digest 交付表；实际 plan、外部调度/PR webhook SLA 与 sequence=16 受控 drift 撤销/恢复证据仍阻塞完成。
 
 ### File List
 
@@ -477,3 +478,4 @@ GPT-5 Codex
 - 2026-07-24：Hosted run `30058268244` 发现 pnpm 11 默认依赖自检在只读 gate 阶段二次安装；sequence=13 修复后，run `30059173968` attempt 2 又发现 SEA 相对 `npm_execpath`，修复 workspace runner 并准备 sequence=14，Story 保持 `in-progress`。
 - 2026-07-24：sequence=14 的 run `30059752064` 已使 type/build 等七项通过，并暴露 Harness TMP 路径叠加完整 gateId 导致 Unix socket fixture 超限；已交付短 base36 槽位与 `/g` 临时根，准备 sequence=15，Story 保持 `in-progress`。
 - 2026-07-24：sequence=15 的 run `30061084230` attempt 2 已九项全绿并闭合 artifact/attestation/Controller/monitor/ruleset 证据；审查继续发现 cleanup ownership、drift failure 撤销、check history 分页与 Controller 竞态，已准备 producer `78e84ade…` 与 registry `779bc1d3…` 推进 sequence=16。实际 plan 和可靠外部事件调度仍未解决，Story 保持 `in-progress`。
+- 2026-07-24：sequence=16 已在候选 `b853937…` 完成九项全绿、artifact/attestation、fresh monitor、Controller App success、active/strict/无 bypass ruleset 与 PR `CLEAN` 复验。实际 plan、可靠外部调度/PR webhook 与新撤销路径的真实 drift 演练仍未解决，Story 保持 `in-progress`。

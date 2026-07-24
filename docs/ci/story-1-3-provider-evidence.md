@@ -1,10 +1,10 @@
 # Story 1.3 Provider 证据
 
 > 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset 与真实失败阻断均已激活；
-> sequence=15 已绑定候选 `7d600fd8…`。Hosted run `30061084230` attempt 2 的九项 gate 全部
-> 通过，final artifact、attestation、fresh monitor、Controller App success 与 PR `CLEAN` 已闭合。
-> 后续审查又修复 `/g` cleanup ownership、drift failure 撤销、历史 check 全分页及 Controller
-> 并发竞态，正在以 producer `78e84ade…` 推进 sequence=16 Hosted 复验。实际 GitHub
+> sequence=16 已绑定候选 `b853937a…`。Hosted run `30063231289` attempt 2 的九项 gate 全部
+> 通过，final artifact、attestation、fresh monitor、Controller App success 与 PR `CLEAN` 已闭合；
+> `/g` cleanup ownership、drift failure 撤销、历史 check 全分页及 Controller 并发竞态均已接入
+> 生产可信链。实际 GitHub
 > account/repository plan、具备 SLA 的外部调度和 PR opened/reopened/synchronize 可信事件源仍缺
 > 独立证据，因此 Story 保持 `in-progress`。
 
@@ -17,18 +17,18 @@
 - default branch：`main`
 - billing plan API 字段：当前授权令牌返回 `null`；不以 ruleset 能力替代实际 plan 证据，此项仍阻塞验收
 - 外部控制面仓库：`Rockyyy-S/code-graph-gate-controller`
-- 当前生产可信记录：sequence `15`，source commit `7d600fd8f0f5752c8cbd3ec6aac1a61b97e01733`
-- 当前生产 reusable producer：`48a9ee8b1034f4b656a209bc6f1138dcd3755311`
-- 当前生产 gate registry digest：`ee24d8e953625d32ab6a11f12678dff0bf86e3a62115b1272f3c2f3cf10f050b`
+- 当前生产可信记录：sequence `16`，source commit `b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf`
+- 当前生产 reusable producer：`78e84adecc7ef1b73a881dbd4bb6224ce7a7a769`
+- 当前生产 gate registry digest：`779bc1d3fd9a35b7f8fe15180d9f542ca7497cade97daff434f4bc91477f6e34`
 - 当前生产 gate implementation digest：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
-- 当前生产 approval evidence digest：`acf36e6fa1edacce66ac3076bd42fec9c9b1ee218c6c7f555ce20ad7a2fea594`
+- 当前生产 approval evidence digest：`3967706832096969d6469cfb41a7f1bbc9009890afe05745826348f3a9a82328`
 
-## 最新审查修复迁移候选
+## 最新审查修复生产迁移
 
 - GateHarness 实现提交：`da694bce36baf82a5e839ab72fe24139f4d0a25d`
 - reusable producer 提交：`78e84adecc7ef1b73a881dbd4bb6224ce7a7a769`
-- 待批准 `gateRegistryDigest`：`779bc1d3fd9a35b7f8fe15180d9f542ca7497cade97daff434f4bc91477f6e34`
-- 待批准 `gateImplementationDigest`：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
+- 已批准 `gateRegistryDigest`：`779bc1d3fd9a35b7f8fe15180d9f542ca7497cade97daff434f4bc91477f6e34`
+- 已批准 `gateImplementationDigest`：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
 - 实现摘要投影：九项根命令、根质量工具链，以及 47 个 gate runner、工作区发现器、
   TypeScript/esbuild/ESLint/Vitest 配置、八个受保护目录、依赖锁定与直接 Node 入口；
   本地忽略的 `scripts/architecture/graphify-out` 生成缓存明确排除；受保护文本的 CRLF 统一
@@ -49,14 +49,14 @@
   当前 Node 执行，绝对 native launcher 直接执行，其他相对值 fail closed
 - TypeScript 增量状态：11 个 composite 配置均把 `tsconfig*.tsbuildinfo` 固定到已授权 `dist`，
   不再要求 gate UID 写入只读源码目录
-- 目标可信记录：以 `TrustedGateRegistryRecordV1 sequence=16` 推进 source commit、producer 与 registry；
+- 生产可信记录：`TrustedGateRegistryRecordV1 sequence=16` 已绑定 source commit、producer 与 registry；
   审批类型 `gate-trust-root-migration`
-- 迁移状态：sequence=15 已部署并取得九项全绿证据；Controller 最新修复已通过 60 项测试，
-  待 sequence=16 绑定 producer `78e84ade…`、registry `779bc1d3…` 与新 Provider 候选
+- 迁移状态：sequence=16 已部署；Controller 最新修复通过 60 项测试，Hosted run
+  `30063231289` attempt 2、monitor `30063386894` 与 Controller `30063500387` 均成功
 
 生产切换必须在精确 SHA/摘要获得明确批准后执行，并在切换后对同一主仓库候选 SHA
 重新验证 child evidence、Controller umbrella、ruleset 与 monitor freshness。下方历史成功运行不能证明
-本节 sequence=16 候选已经上线；run `30061084230` attempt 2 证明的是 sequence=15 全绿生产链。
+本节生产链已经上线；sequence=15 与 sequence=16 的全绿运行分别保留为迁移前后证据。
 
 ## GitHub App 与最小权限
 
@@ -91,7 +91,7 @@
 迁移顺序为：保留旧保护 → 创建新 active ruleset → monitor 通过 → Controller App 发布正式 pass →
 移除旧 GitHub Actions required check → monitor/Controller 再次通过。全过程只有阻塞窗口，没有无保护窗口。
 
-## 当前生产 Gate Registry 交付表（sequence=15）
+## 历史生产 Gate Registry 交付表（sequence=15）
 
 | checkId | capabilityOwner | evidenceProducerId | gateDefinitionDigest |
 | --- | --- | --- | --- |
@@ -107,7 +107,7 @@
 
 九项 gate 均为 `blocking:true`、always applicable；旁路 registry digest 如上。
 
-## sequence=16 候选 Gate Registry 交付表
+## 当前生产 Gate Registry 交付表（sequence=16）
 
 | checkId | capabilityOwner | evidenceProducerId | gateDefinitionDigest |
 | --- | --- | --- | --- |
@@ -145,6 +145,9 @@
 | child run `30061084230` attempt 2 | `7d600fd8f0f5752c8cbd3ec6aac1a61b97e01733` | sequence=15 生效后九项 gate 全部 `pass`，raw/final artifact 与 attestation 全部成功 |
 | Controller run `30061381372` | 同上 | App `4372284` 发布 `architecture-required=success`；结果 `accepted`，九项无 failed/invalid/missing evidence |
 | PR #5 | 同上 | `mergeStateStatus=CLEAN`；ruleset `19603163` 仍为 active/strict、无 bypass、`current_user_can_bypass=never` |
+| child run `30063231289` attempt 2 | `b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf` | sequence=16 生效后九项 gate 全部 `pass`，`evidenceCount=9, passed=true`，raw/final artifact 与 attestation 全部成功 |
+| Controller run `30063500387` | 同上 | App `4372284` 发布 check `89389784122` 为 `architecture-required=success`；结果 `accepted`，trusted sequence `16` |
+| PR #5 | 同上 | `mergeStateStatus=CLEAN`；required check 仅由 Controller App `4372284` 满足 |
 
 sequence=15 最终恢复 artifact：
 
@@ -154,6 +157,19 @@ sequence=15 最终恢复 artifact：
 - attested `gate-evidence.json` digest：`cc832223880665648d536131c4eb82d65b170a1ea221aa6094740c2de1a032b7`
 - attestation ID：`36877829`
 - gate registry digest：`ee24d8e953625d32ab6a11f12678dff0bf86e3a62115b1272f3c2f3cf10f050b`
+- gate implementation digest：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
+
+sequence=16 最终恢复 artifact：
+
+- raw artifact ID：`8585360068`
+- final artifact ID：`8585366355`
+- artifact name：`gate-evidence-30063231289-2-b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf`
+- final archive digest：`sha256:9caf4b28a767e4ee0efac1c812783fa3af4ad15c17fcf6960dbbc5d18bb1bed6`
+- attested `gate-evidence.json` digest：`310e95b6485bdd1e9d284d2bfb2d307ac2a15007f20b1e3c21d23e8faaeba54b`
+- attestation ID：`36881454`
+- evaluation context digest：`110c4e1a074e31870932138f02b6ee45460a6a4b2ed72ff6050d622c63c5ae85`
+- replay digest：`cb4bee1c40eb142091129ce71b32d9eb1934b16bc175714d8d3180fbfec125aa`
+- gate registry digest：`779bc1d3fd9a35b7f8fe15180d9f542ca7497cade97daff434f4bc91477f6e34`
 - gate implementation digest：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
 
 ## Drift 演练与恢复
@@ -170,6 +186,8 @@ sequence=15 最终恢复 artifact：
 | Controller `30059874721` | fresh monitor 完成事件触发后成功执行控制面检查 |
 | monitor `30061322093` | sequence=15 上返回 `{"issues":[],"status":"valid"}`，为 Controller success 提供 fresh monitor |
 | Controller `30061381372` | sequence=15 可信根验证通过并发布 App-owned success |
+| monitor `30063386894` | sequence=16 Controller commit `6bf1bde…` 上返回 `{"issues":[],"status":"valid"}` |
+| Controller `30063500387` | sequence=16 验证 producer/registry/artifact/attestation 后发布 check `89389784122` success |
 
 Drift Monitor 使用 REST 验证 ruleset 内容，并使用同一只读 App 的 GraphQL
 `bypassActors.totalCount` 验证 bypass 空集合，避免因 REST 对只读 token 隐藏 `bypass_actors`
@@ -186,5 +204,6 @@ workflow 完成事件；在缺少 Controller App webhook、可信跨仓库 dispa
 - `pnpm install --frozen-lockfile`：通过
 - `pnpm architecture-required`：九项全部通过
 - sequence=15 候选 child evidence、artifact、attestation、Controller umbrella、ruleset 与 fresh monitor：全部通过
-- sequence=16 候选已完成本地合同与 Controller 回归，仍需新的可信记录、同 SHA Hosted 九项复验及真实 drift failure→App failure→恢复演练
+- sequence=16 候选已完成可信记录、同 SHA Hosted 九项、artifact/attestation、fresh monitor、Controller App success 与 PR `CLEAN` 复验
+- 真实 success→drift failure→App failure→恢复演练尚未针对 sequence=16 新撤销路径执行；外部可靠调度/PR webhook 与实际 plan 仍阻塞 Story 完成
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果
