@@ -1,10 +1,10 @@
 # Story 1.3 Provider 证据
 
 > 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset 与历史失败阻断均已激活；
-> sequence=12 已绑定候选 `c07840f3…`。Hosted run `30058268244` 已生成 raw/final artifact 与
-> attestation，但 pnpm 11 的默认依赖状态自检在只读 gate 阶段触发二次安装，八项 pnpm gate 因
-> `EACCES` 失败，Controller App 正确发布 failure。修复后的 Harness/producer 正在迁移到
-> sequence=13，尚未取得最终候选同 SHA 的全绿证据。实际 GitHub
+> sequence=13 已绑定候选 `eb4665fe…`。Hosted run `30059173968` attempt 2 已证明 pnpm 不再
+> 二次安装，五项 gate 通过；但 workspace runner 把 SEA 提供的相对 `npm_execpath=pnpm` 当作
+> Node 脚本路径，导致 type/build 失败并使 contract/unit 缺少先行 dist。runner 修复正在迁移到
+> sequence=14，尚未取得最终候选同 SHA 的全绿证据。实际 GitHub
 > account/repository plan 和外部调度 SLA 仍缺独立证据，因此 Story 保持 `in-progress`。
 
 ## Provider 与控制面身份
@@ -16,18 +16,18 @@
 - default branch：`main`
 - billing plan API 字段：当前授权令牌返回 `null`；不以 ruleset 能力替代实际 plan 证据，此项仍阻塞验收
 - 外部控制面仓库：`Rockyyy-S/code-graph-gate-controller`
-- 当前生产可信记录：sequence `12`，source commit `c07840f3f343e79a4c8ae82d2662dcda341fd88f`
-- 当前生产 reusable producer：`3be138e4808de92410d2235d772ce7d423ff143d`
-- 当前生产 gate registry digest：`2034633e962fc22f7d7174cb63a6babb15a9c87d8eac7db23352def56fd3e2f0`
+- 当前生产可信记录：sequence `13`，source commit `eb4665fe3f65ca172f3a38506976e8424c759612`
+- 当前生产 reusable producer：`d49aec5544cbfece9451c92a1c0de91a9fdb6ceb`
+- 当前生产 gate registry digest：`21b35a8408468c1c71800dcf2408497047a3aab429bed3a0bfc515077c4c56fe`
 - 当前生产 gate implementation digest：`3411b9c742fea63cc11211d10cef615b97c570936b8f886e923ddf34849e8fed`
-- 当前生产 approval evidence digest：`d06d1e8b14c57727102a3790fdc674f10163ca1665f9a572feb9cca30edf8e81`
+- 当前生产 approval evidence digest：`4624b3fe32c4000428f7fadc20b4f0fbbca456684b48fe0130a35e72cdb12eae`
 
 ## 最新审查修复迁移候选
 
 - GateHarness 实现提交：`9b76436d1e7cbb7e81b348f503f481fb00c06933`
 - reusable producer 提交：`d49aec5544cbfece9451c92a1c0de91a9fdb6ceb`
 - 待批准 `gateRegistryDigest`：`21b35a8408468c1c71800dcf2408497047a3aab429bed3a0bfc515077c4c56fe`
-- 待批准 `gateImplementationDigest`：`3411b9c742fea63cc11211d10cef615b97c570936b8f886e923ddf34849e8fed`
+- 待批准 `gateImplementationDigest`：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
 - 实现摘要投影：九项根命令、根质量工具链，以及 47 个 gate runner、工作区发现器、
   TypeScript/esbuild/ESLint/Vitest 配置、八个受保护目录、依赖锁定与直接 Node 入口；
   本地忽略的 `scripts/architecture/graphify-out` 生成缓存明确排除；受保护文本的 CRLF 统一
@@ -36,16 +36,18 @@
   UID/GID；候选工作树对 gate 只读，artifact 由不同用户持有，attestation 在第二个干净 runner 完成
 - pnpm 只读执行：隔离安装阶段已执行 frozen install；gate 阶段固定
   `verify-deps-before-run=false`，并向嵌套 pnpm 传递同一约束，禁止 pnpm 11 默认再次执行 install
+- workspace pnpm 启动：相对 `npm_execpath=pnpm` 只允许从受控 PATH 解析；绝对 JS launcher 由
+  当前 Node 执行，绝对 native launcher 直接执行，其他相对值 fail closed
 - TypeScript 增量状态：11 个 composite 配置均把 `tsconfig*.tsbuildinfo` 固定到已授权 `dist`，
   不再要求 gate UID 写入只读源码目录
-- 目标可信记录：以 `TrustedGateRegistryRecordV1 sequence=13` 同时推进 producer、registry 与 source commit；
+- 目标可信记录：以 `TrustedGateRegistryRecordV1 sequence=14` 仅推进 source commit 与实现摘要；
   审批类型 `gate-trust-root-migration`
-- 迁移状态：sequence=12 已部署；run `30058268244` 暴露 pnpm 11 在只读 gate 阶段默认二次安装，
-  修复已通过 Controller 49/49 测试，待 sequence=13 绑定新候选
+- 迁移状态：sequence=13 已部署；run `30059173968` attempt 2 暴露 SEA 相对 `npm_execpath`，
+  修复已通过 5 项定向测试、相对路径 type/build 实跑，待 sequence=14 绑定新候选
 
 生产切换必须在精确 SHA/摘要获得明确批准后执行，并在切换后对同一主仓库候选 SHA
 重新验证 child evidence、Controller umbrella、ruleset 与 monitor freshness。下方历史成功运行不能证明
-本节候选已经上线；run `30058268244` 仅证明只读违规会安全阻断并保留可审计 artifact。
+本节候选已经上线；run `30059173968` attempt 2 仅证明嵌套 launcher 漂移会安全阻断并保留 artifact。
 
 ## GitHub App 与最小权限
 
@@ -110,6 +112,8 @@
 | child run `30036453098` | `f196004abf97a5d75cb131d0105ae70c765d509d` | frozen install 完成；新增 `.gitattributes` 使历史 CRLF blob 在 tracked diff 处 fail closed，无 raw artifact |
 | child run `30058268244` | `c07840f3f343e79a4c8ae82d2662dcda341fd88f` | raw/final artifact 与 attestation 成功；preflight 通过，八项 pnpm gate 因默认二次 install 写只读候选根而失败 |
 | Controller run `30058315791` | 同上 | App `4372284` 发布 `architecture-required=failure`，check run `89374586128`；PR #5 保持 `BLOCKED` |
+| child run `30059173968` attempt 2 | `eb4665fe3f65ca172f3a38506976e8424c759612` | basic-security、dependency-boundary、lint、planning-traceability、preflight 通过；type/build 因相对 `npm_execpath` 失败，contract/unit 级联失败 |
+| final artifact `8583944858` | 同上 | archive digest `sha256:5f63005f4586bfe6e7dee10087dd6ff2f54e53794c0eeafda2dad130b6f2dd6b`；attested evidence digest `0a3c2326247ac39d03b641fb2564ee3e0a2261100a82fff9f920d4f157d2d8d8` |
 
 最终恢复 artifact：
 
@@ -145,5 +149,5 @@ GitHub cron 不提供调度 SLA，因此外部可靠触发证据仍是 Story 完
 - `pnpm install --frozen-lockfile`：通过
 - `pnpm architecture-required`：九项全部通过
 - 历史生产候选 child evidence、Controller umbrella、ruleset 与 drift monitor：全部通过
-- sequence=12 候选已验证 fail closed；只读 pnpm 修复候选仍需 sequence=13 绑定与同一 SHA Hosted 复验
+- sequence=13 候选已验证 fail closed；workspace runner 修复候选仍需 sequence=14 与同一 SHA Hosted 复验
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果

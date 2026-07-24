@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { orderWorkspacesByDependencies } from "../../scripts/quality/run-workspace-script.mjs";
+import path from "node:path";
+import {
+  createWorkspacePnpmInvocation,
+  orderWorkspacesByDependencies,
+} from "../../scripts/quality/run-workspace-script.mjs";
 
 function workspace(relativePath: string, name: string, dependencies = {}) {
   return {
@@ -41,5 +45,34 @@ describe("workspace dependency order", () => {
     const result = orderWorkspacesByDependencies([left, right]);
 
     expect(result.errors.join("\n")).toContain("workspace dependency cycle");
+  });
+});
+
+describe("workspace pnpm invocation", () => {
+  it("uses controlled PATH for pnpm SEA relative npm_execpath", () => {
+    expect(createWorkspacePnpmInvocation("pnpm", "/workspace/contracts", "build")).toEqual({
+      args: ["--dir", "/workspace/contracts", "run", "build"],
+      executable: "pnpm",
+    });
+  });
+
+  it("distinguishes absolute JavaScript launchers from native pnpm executables", () => {
+    const jsLauncher = path.resolve("tools/pnpm.cjs");
+    const nativeLauncher = path.resolve("tools/pnpm");
+
+    expect(createWorkspacePnpmInvocation(jsLauncher, "/workspace/contracts", "type")).toEqual({
+      args: [jsLauncher, "--dir", "/workspace/contracts", "run", "type"],
+      executable: process.execPath,
+    });
+    expect(createWorkspacePnpmInvocation(nativeLauncher, "/workspace/contracts", "type")).toEqual({
+      args: ["--dir", "/workspace/contracts", "run", "type"],
+      executable: nativeLauncher,
+    });
+  });
+
+  it("rejects untrusted relative npm_execpath values", () => {
+    expect(() =>
+      createWorkspacePnpmInvocation("tools/pnpm.cjs", "/workspace/contracts", "build"),
+    ).toThrow(/npm_execpath/u);
   });
 });

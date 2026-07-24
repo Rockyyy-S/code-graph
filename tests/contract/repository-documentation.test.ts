@@ -77,7 +77,7 @@ describe("repository responsibility documentation", () => {
       "30033569375",
       "30058268244",
       "21b35a8408468c1c71800dcf2408497047a3aab429bed3a0bfc515077c4c56fe",
-      "3411b9c742fea63cc11211d10cef615b97c570936b8f886e923ddf34849e8fed",
+      "c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec",
       "962913710943c77513433362224ede7ff1279075cfe316d4419278cc6a15ee47",
       "Rockyyy-S/code-graph-gate-controller",
       "已激活",
