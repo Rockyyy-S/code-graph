@@ -1,4 +1,4 @@
-name: architecture-required
+name: child-gate-evidence
 
 on:
   pull_request:
@@ -7,52 +7,19 @@ on:
       - main
 
 permissions:
+  actions: read
+  attestations: write
   contents: read
+  id-token: write
 
 jobs:
-  architecture-required:
-    name: architecture-required
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
-        with:
-          version: 11.12.0
-          run_install: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24.18.0
-          cache: pnpm
-
-      - name: Install locked dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Validate repository command contract
-        run: node scripts/contracts/validate-repository-contract.mjs
-
-      - name: Type check
-        run: pnpm type
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Unit tests
-        run: pnpm unit
-
-      - name: Build
-        run: pnpm build
-
-      - name: Repository contracts
-        run: pnpm contract
-
-      - name: Dependency boundaries
-        run: pnpm dependency-boundary
-
-      - name: Basic security
-        run: pnpm basic-security
+  gate-evidence:
+    name: gate-evidence
+    uses: Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@78e84adecc7ef1b73a881dbd4bb6224ce7a7a769
+    with:
+      base_oid: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      head_oid: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      object_format: sha1
+      provider_repository_id: ${{ format('{0}', github.event.repository.id) }}
+      producer_workflow_sha: 78e84adecc7ef1b73a881dbd4bb6224ce7a7a769
+      repository: ${{ github.repository }}

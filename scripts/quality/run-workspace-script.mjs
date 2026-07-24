@@ -168,6 +168,29 @@ export async function validateWorkspaceScripts(root, scriptName) {
 }
 
 /**
+ * 为嵌套 workspace 命令选择可执行的 pnpm 启动形状。
+ *
+ * pnpm SEA 在 Linux 上可能把 `npm_execpath` 暴露为相对字符串 `pnpm`；该值不能作为
+ * JavaScript 文件交给 Node。相对值只接受固定命令名并交给受控 PATH 解析，绝对的 JS
+ * launcher 继续由当前 Node 执行，其他绝对 launcher 则直接执行。
+ *
+ * 参数 `npmExecPath` 来自外层 pnpm，`workspacePath` 是目标工作区，`scriptName` 是脚本名；
+ * 返回封闭的 executable/args 调用描述。
+ */
+export function createWorkspacePnpmInvocation(npmExecPath, workspacePath, scriptName) {
+  const nestedArgs = ["--dir", workspacePath, "run", scriptName];
+  if (path.isAbsolute(npmExecPath)) {
+    return [".cjs", ".js", ".mjs"].includes(path.extname(npmExecPath).toLowerCase())
+      ? { args: [npmExecPath, ...nestedArgs], executable: process.execPath }
+      : { args: nestedArgs, executable: npmExecPath };
+  }
+  if (npmExecPath !== "pnpm") {
+    throw new Error("package.json: pnpm 提供了非法的相对 npm_execpath。\n");
+  }
+  return { args: nestedArgs, executable: "pnpm" };
+}
+
+/**
  * 按依赖顺序在所有工作区执行指定质量命令。
  *
  * 校验失败或任一子进程失败时立即返回非零退出码，并将子进程输出直接转发到当前终端。
@@ -192,9 +215,20 @@ export async function runWorkspaceScript(root, scriptName) {
   }
 
   for (const workspace of workspaces) {
+    let invocation;
+    try {
+      invocation = createWorkspacePnpmInvocation(
+        packageManagerCli,
+        workspace.absolutePath,
+        scriptName,
+      );
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "pnpm 启动参数无效。");
+      return 1;
+    }
     const result = spawnSync(
-      process.execPath,
-      [packageManagerCli, "--dir", workspace.absolutePath, "run", scriptName],
+      invocation.executable,
+      invocation.args,
       { env: process.env, stdio: "inherit" },
     );
 

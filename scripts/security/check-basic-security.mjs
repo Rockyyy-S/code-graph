@@ -8,6 +8,8 @@ const repositoryRoot = path.resolve(
 );
 const includedDirectories = [
   "apps",
+  "ci",
+  "docs/ci",
   "packages",
   "scripts",
   ".github/workflows",
@@ -39,6 +41,7 @@ const supportedExtensions = new Set([
   ".js",
   ".jsx",
   ".json",
+  ".md",
   ".mjs",
   ".mts",
   ".toml",
@@ -122,6 +125,16 @@ function findPatternMatches(source) {
       message: "AWS access key-shaped credential is hardcoded",
       pattern: /\bAKIA[0-9A-Z]{16}\b/g,
       rule: "hardcoded-token",
+    },
+    {
+      message: "remote content is piped directly into a command shell",
+      pattern: /\b(?:curl|wget)\b[^\r\n|]*\|\s*(?:ba)?sh\b/g,
+      rule: "dangerous-command",
+    },
+    {
+      message: "PowerShell dynamic expression execution is enabled",
+      pattern: new RegExp(`\\b(?:Invoke-${"Expression"}|i${"ex"})\\b`, "gi"),
+      rule: "dangerous-command",
     },
   ];
 

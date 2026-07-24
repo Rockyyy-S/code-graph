@@ -55,10 +55,20 @@ TypeScript workspace 通过 project references 表达 manifest 依赖，质量 r
 | `pnpm contract` | 验证工具链、workspace、extension 与 CI 仓库合同 |
 | `pnpm dependency-boundary` | 验证 manifest 和 import 的依赖方向 |
 | `pnpm basic-security` | 扫描产品实现/配置（含 TSX/JSX 与根 `.env*`）中的硬编码秘密和危险占位凭据 |
+| `pnpm planning-trace` | 校验需求、Architecture AD、Story、DAG、相对链接、ProductValidation 引用与 sprint 屏障 |
+| `pnpm architecture-required` | 从唯一 registry 执行全部适用 blocking gate，并生成 GateEvidenceV1 |
 
-GitHub 以稳定 check 名 `architecture-required` always-run 执行以上七条命令，
-workflow 使用完整 commit SHA 固定第三方 Actions。
-真实 required-check 与受控失败证据见 `docs/ci/story-1-1-provider-evidence.md`。
+`ci/quality-gates.v1.yaml` 是九项 blocking gate 的唯一机器清单，其中包含以上质量命令与
+`repository-contract-preflight`。候选仓库的 `child-gate-evidence` workflow 只调用按完整 commit
+SHA 固定的 `Rockyyy-S/code-graph-gate-controller` reusable workflow，产出 child evidence 和
+GitHub attestation；它不能发布权威 `architecture-required` umbrella check。
+
+权威 `architecture-required` 只能由仓库外 Controller GitHub App 发布。Controller 通过 provider
+API 拉取指定 run/attempt 的 artifact，核对 GitHub Actions App、workflow/job、OIDC issuer、
+repository ID、PR merge ref、候选 head、registry/context/evidence digest，并在独立 drift monitor
+确认 active、strict、无 bypass 且绑定 Controller App 的 ruleset 后才发布结论。任何证据缺失、
+provider 漂移或 monitor 过期均 fail closed。Story 1.3 的真实运行与待激活项见
+`docs/ci/story-1-3-provider-evidence.md`；Story 1.1/1.2 的历史基线证据继续保留。
 
 ## 本地服务控制面
 

@@ -8,6 +8,20 @@ const repositoryRoot = path.resolve(
   "../..",
 );
 
+const compositeTypeScriptConfigs = [
+  "apps/cli/tsconfig.build.json",
+  "apps/extension/tsconfig.json",
+  "apps/graph-service/tsconfig.build.json",
+  "apps/webview/tsconfig.build.json",
+  "packages/adapters/analyzer-typescript/tsconfig.build.json",
+  "packages/adapters/git-local/tsconfig.build.json",
+  "packages/adapters/store-sqlite/tsconfig.build.json",
+  "packages/application/tsconfig.build.json",
+  "packages/contracts/tsconfig.build.json",
+  "packages/domain/tsconfig.build.json",
+  "packages/service-client/tsconfig.build.json",
+] as const;
+
 async function readText(relativePath: string): Promise<string> {
   return readFile(path.join(repositoryRoot, relativePath), "utf8");
 }
@@ -60,5 +74,17 @@ describe("root toolchain contract", () => {
   it("pins Node consistently across version files", async () => {
     await expect(readText(".node-version")).resolves.toBe("24.18.0\n");
     await expect(readText(".nvmrc")).resolves.toBe("24.18.0\n");
+  });
+
+  it("keeps composite TypeScript state inside writable dist directories", async () => {
+    for (const configPath of compositeTypeScriptConfigs) {
+      const config = await readJson(configPath);
+      const compilerOptions = config.compilerOptions as Record<string, unknown>;
+
+      expect(compilerOptions.composite, configPath).toBe(true);
+      expect(compilerOptions.tsBuildInfoFile, configPath).toMatch(
+        /^\.\/dist\/tsconfig(?:\.build)?\.tsbuildinfo$/u,
+      );
+    }
   });
 });
