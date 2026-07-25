@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "bindings": [
+    { "capabilityId": "rpc:initialize", "gateId": "contract" },
+    { "capabilityId": "rpc:service/shutdown", "gateId": "contract" },
+    { "capabilityId": "rpc:service/status", "gateId": "contract" },
+    { "capabilityId": "schema:errorV1Schema", "gateId": "contract" },
+    {
+      "capabilityId": "schema:gateDefinitionV1Schema",
+      "gateId": "public-gate-definition-v1",
+      "verification": {
+        "assertionTarget": {
+          "modulePath": "packages/contracts/src/index.ts",
+          "exportName": "validateGateDefinitionV1"
+        },
+        "entryPath": "scripts/contracts/verify-public-gate-definition-v1.mjs",
+        "evidenceId": "public-capability:schema:gateDefinitionV1Schema",
+        "fixturePath": "tests/fixtures/public-gate-definition-v1.json",
+        "testPath": "tests/unit/public-gate-definition-v1-capability.test.ts"
+      }
+    },
+    {
+      "capabilityId": "schema:gateEvaluationContextV1Schema",
+      "gateId": "public-gate-evaluation-context-v1",
+      "verification": {
+        "assertionTarget": {
+          "modulePath": "packages/contracts/src/index.ts",
+          "exportName": "validateGateEvaluationContextV1"
+        },
+        "entryPath": "scripts/contracts/verify-public-gate-evaluation-context-v1.mjs",
+        "evidenceId": "public-capability:schema:gateEvaluationContextV1Schema",
+        "fixturePath": "tests/fixtures/public-gate-evaluation-context-v1.json",
+        "testPath": "tests/unit/public-gate-evaluation-context-v1-capability.test.ts"
+      }
+    },
+    {
+      "capabilityId": "schema:gateEvidenceV1Schema",
+      "gateId": "public-gate-evidence-v1",
+      "verification": {
+        "assertionTarget": {
+          "modulePath": "packages/contracts/src/index.ts",
+          "exportName": "validateGateEvidenceV1"
+        },
+        "entryPath": "scripts/contracts/verify-public-gate-evidence-v1.mjs",
+        "evidenceId": "public-capability:schema:gateEvidenceV1Schema",
+        "fixturePath": "tests/fixtures/public-gate-evidence-v1.json",
+        "testPath": "tests/unit/public-gate-evidence-v1-capability.test.ts"
+      }
+    },
+    {
+      "capabilityId": "schema:gateOutputV1Schema",
+      "gateId": "public-gate-output-v1",
+      "verification": {
+        "assertionTarget": {
+          "modulePath": "packages/contracts/src/index.ts",
+          "exportName": "validateGateOutputV1"
+        },
+        "entryPath": "scripts/contracts/verify-public-gate-output-v1.mjs",
+        "evidenceId": "public-capability:schema:gateOutputV1Schema",
+        "fixturePath": "tests/fixtures/public-gate-output-v1.json",
+        "testPath": "tests/unit/public-gate-output-v1-capability.test.ts"
+      }
+    },
+    {
+      "capabilityId": "schema:gateRegistryV1Schema",
+      "gateId": "public-gate-registry-v1",
+      "verification": {
+        "assertionTarget": {
+          "modulePath": "packages/contracts/src/index.ts",
+          "exportName": "validateGateRegistryV1"
+        },
+        "entryPath": "scripts/contracts/verify-public-gate-registry-v1.mjs",
+        "evidenceId": "public-capability:schema:gateRegistryV1Schema",
+        "fixturePath": "tests/fixtures/public-gate-registry-v1.json",
+        "testPath": "tests/unit/public-gate-registry-v1-capability.test.ts"
+      }
+    },
+    { "capabilityId": "schema:initializeRequestSchema", "gateId": "contract" },
+    { "capabilityId": "schema:initializeResultCompatibleSchema", "gateId": "contract" },
+    { "capabilityId": "schema:initializeResultSchema", "gateId": "contract" },
+    { "capabilityId": "schema:serviceControlRequestSchema", "gateId": "contract" },
+    { "capabilityId": "schema:serviceMetadataV1Schema", "gateId": "contract" },
+    { "capabilityId": "schema:serviceStatusV1CompatibleSchema", "gateId": "contract" },
+    { "capabilityId": "schema:serviceStatusV1Schema", "gateId": "contract" },
+    { "capabilityId": "schema:shutdownResultCompatibleSchema", "gateId": "contract" },
+    { "capabilityId": "schema:shutdownResultSchema", "gateId": "contract" },
+    { "capabilityId": "schema:telemetryStatusV1Schema", "gateId": "contract" }
+  ]
+}

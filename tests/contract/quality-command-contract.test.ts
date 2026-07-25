@@ -27,7 +27,10 @@ describe("real root quality commands", () => {
       "scripts/architecture/check-dependency-boundaries.mjs",
       "scripts/contracts/validate-repository-contract.mjs",
       "scripts/ci/run-architecture-required.mjs",
+      "scripts/ci/load-quality-gates.mjs",
+      "scripts/planning/check-planning-traceability.mjs",
       "scripts/security/check-basic-security.mjs",
+      "ci/quality-gates.v1.yaml",
     ];
 
     await Promise.all(

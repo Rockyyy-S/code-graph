@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   chmod,
   link,
@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import {
   createErrorV1,
+  sha256CanonicalJson,
   type ErrorCategory,
   type ErrorV1,
   type ServiceEndpointKind,
@@ -373,30 +374,7 @@ async function publishMetadata(
 
 /** 对 metadata payload 使用与客户端一致的 JCS 子集和 SHA-256。 */
 function calculateIntegrity(payload: ServiceMetadataPayloadV1): string {
-  return `sha256:${createHash("sha256")
-    .update(canonicalize(payload), "utf8")
-    .digest("hex")}`;
-}
-
-/** metadata 仅含 JSON 标量对象，按 UTF-16 键序生成确定性表示。 */
-function canonicalize(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalize(item)).join(",")}]`;
-  }
-  if (typeof value === "object" && value !== null) {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalize(record[key])}`)
-      .join(",")}}`;
-  }
-  throw startupError("SERVICE_ENDPOINT_START_FAILED");
+  return `sha256:${sha256CanonicalJson(payload)}`;
 }
 
 /** 创建不会暴露路径、token 或堆栈的稳定启动错误。 */

@@ -1,0 +1,14 @@
+{
+  "gateId": "type",
+  "schemaVersion": 1,
+  "stderrBytes": 0,
+  "stderrDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "stderrTruncated": false,
+  "stdoutBytes": 4,
+  "stdoutDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "stdoutTruncated": false,
+  "termination": {
+    "code": 0,
+    "kind": "exit"
+  }
+}

@@ -465,7 +465,7 @@ MVP 分两段验证：首个可用版本优先验证 IDE 内的项目结构概�
 
 **Primary**
 
-- **SM-1:** 使用 `ProductValidationPlanV1` 中版本化的 UJ-2 task pack。每个 task 固定 fixture commit/digest、targetFile、requiredEntities、affectedAggregates、acceptableAliases、criticalDistractors 和 groundTruthDigest。计时在 warm cache 已提交、目标文件和任务提示同时可见时触发 `taskStarted`；参与者提交最终答案时触发 `taskSubmitted`，安装、首次索引和说明时间不计入。产品崩溃、查询失败或超时计为失败而不是剔除。单次答案正确需识别全部 requiredEntities、至少 80% affectedAggregates，且不选择 criticalDistractor；至少 10 个有效会话中，至少 80% 必须在 180 秒内正确完成。验证 FR-6、FR-7、FR-9；FR-17 由结构变更任务单独验证。
+- **SM-1:** 使用 ProductValidationPlanV1 中版本化的 UJ-2 task pack。每个 task 固定 fixture commit/digest、targetFile、requiredEntities、affectedAggregates、acceptableAliases、criticalDistractors 和 groundTruthDigest。计时在 warm cache 已提交、目标文件和任务提示同时可见时触发 `taskStarted`；参与者提交最终答案时触发 `taskSubmitted`，安装、首次索引和说明时间不计入。产品崩溃、查询失败或超时计为失败而不是剔除。单次答案正确需识别全部 requiredEntities、至少 80% affectedAggregates，且不选择 criticalDistractor；至少 10 个有效会话中，至少 80% 必须在 180 秒内正确完成。验证 FR-6、FR-7、FR-9；FR-17 由结构变更任务单独验证。
 - **SM-2:** 打开文件后 300ms 内显示缓存邻域图，并在后台刷新。验证 FR-7、FR-22。
 - **SM-3:** 保存文件后 2 秒内完成局部依赖更新和 findings 刷新。验证 FR-3、FR-13。
 - **SM-4:** 使用版本化人工标注语料验收 FR-2：语料至少包含 500 条依赖声明，覆盖 ESM、CJS、re-export、type-only、literal `require`、literal dynamic `import()`、path alias、跨 package、Node built-in 和负样本；以人工标注的依赖边为真值，micro-F1 不低于 0.80，高置信度依赖边 precision 不低于 0.90。验收报告必须输出 precision、recall、F1、分类结果和失败样本，标注争议经人工复核并留痕。
@@ -487,8 +487,8 @@ MVP 分两段验证：首个可用版本优先验证 IDE 内的项目结构概�
 
 **Go / No-Go 门禁**
 
-- `ReadinessGateManifestV1` 是 release slice 适用性的唯一来源。Beta entry、Beta exit、Beta+ release 和 v1.1 entry 必须分别使用独立、版本化、逐项展开的 gate 列表，禁止在执行时人工解释“全部适用”。
-- Beta 可以按第 9.2 节作为首个可用版本验证，但不得被表述为完整 MVP；Beta exit 必须通过 SM-1、SM-7 及对应 `ProductValidationPlanV1`。
+- ReadinessGateManifestV1 是 release slice 适用性的唯一来源。Beta entry、Beta exit、Beta+ release 和 v1.1 entry 必须分别使用独立、版本化、逐项展开的 gate 列表，禁止在执行时人工解释“全部适用”。
+- Beta 可以按第 9.2 节作为首个可用版本验证，但不得被表述为完整 MVP；Beta exit 必须通过 SM-1、SM-7 及对应 ProductValidationPlanV1。
 - Beta+ release manifest 必须逐项列出 FR-1 至 FR-23、NFR-1 至 NFR-27、SM-1 至 SM-8 和发布完整性、信任链 gate。任一 blocking gate 为 fail 或 invalid 均为 No-Go，并记录失败样本、负责人和复测条件。
 - v1.1 / MCP 候选只有在完整 MVP 门禁通过、且 UJ-5 的版本化价值门禁通过后才能启动；MCP 本身不得进入当前 manifest 的 MVP requirementRefs。
 

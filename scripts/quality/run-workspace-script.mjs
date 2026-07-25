@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { discoverWorkspaces } from "../workspace/discover-workspaces.mjs";
+import { createPnpmInvocation } from "./resolve-pnpm-invocation.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -62,12 +63,27 @@ function internalDependencyNames(manifest, workspacesByName) {
 export function orderWorkspacesByDependencies(workspaces) {
   const errors = [];
   const ordered = [];
-  const stateByName = new Map();
-  const workspacesByName = new Map(
-    workspaces
-      .filter(({ manifest }) => typeof manifest?.name === "string")
-      .map((workspace) => [workspace.manifest.name, workspace]),
-  );
+  const stateByPath = new Map();
+  const workspacesGroupedByName = new Map();
+  for (const workspace of workspaces) {
+    const name = workspace.manifest?.name;
+    if (typeof name !== "string") {
+      continue;
+    }
+    const grouped = workspacesGroupedByName.get(name) ?? [];
+    grouped.push(workspace);
+    workspacesGroupedByName.set(name, grouped);
+  }
+  const workspacesByName = new Map();
+  for (const [name, grouped] of workspacesGroupedByName) {
+    if (grouped.length !== 1) {
+      errors.push(
+        `${grouped.map(({ relativePath }) => `${relativePath}/package.json`).join(", ")}：工作区包名 '${name}' 重复。修复：在执行 type/build 前为每个工作区分配唯一包名。`,
+      );
+      continue;
+    }
+    workspacesByName.set(name, grouped[0]);
+  }
 
   /**
    * 递归访问单个工作区并维护拓扑遍历状态。
@@ -76,7 +92,7 @@ export function orderWorkspacesByDependencies(workspaces) {
    */
   function visit(workspace, trail) {
     const name = workspace.manifest?.name ?? workspace.relativePath;
-    const state = stateByName.get(name);
+    const state = stateByPath.get(workspace.relativePath);
     if (state === "visited") {
       return;
     }
@@ -87,14 +103,14 @@ export function orderWorkspacesByDependencies(workspaces) {
       return;
     }
 
-    stateByName.set(name, "visiting");
+    stateByPath.set(workspace.relativePath, "visiting");
     for (const dependencyName of internalDependencyNames(
       workspace.manifest,
       workspacesByName,
     )) {
       visit(workspacesByName.get(dependencyName), [...trail, name]);
     }
-    stateByName.set(name, "visited");
+    stateByPath.set(workspace.relativePath, "visited");
     ordered.push(workspace);
   }
 
@@ -168,6 +184,21 @@ export async function validateWorkspaceScripts(root, scriptName) {
 }
 
 /**
+ * 为嵌套 workspace 命令选择可执行的 pnpm 启动形状。
+ *
+ * pnpm SEA 在 Linux 上可能把 `npm_execpath` 暴露为相对字符串 `pnpm`；该值不能作为
+ * JavaScript 文件交给 Node。相对值只接受固定命令名并交给受控 PATH 解析，绝对的 JS
+ * launcher 继续由当前 Node 执行，其他绝对 launcher 则直接执行。
+ *
+ * 参数 `npmExecPath` 来自外层 pnpm，`workspacePath` 是目标工作区，`scriptName` 是脚本名；
+ * 返回封闭的 executable/args 调用描述。
+ */
+export function createWorkspacePnpmInvocation(npmExecPath, workspacePath, scriptName) {
+  const nestedArgs = ["--dir", workspacePath, "run", scriptName];
+  return createPnpmInvocation(npmExecPath, nestedArgs);
+}
+
+/**
  * 按依赖顺序在所有工作区执行指定质量命令。
  *
  * 校验失败或任一子进程失败时立即返回非零退出码，并将子进程输出直接转发到当前终端。
@@ -192,10 +223,25 @@ export async function runWorkspaceScript(root, scriptName) {
   }
 
   for (const workspace of workspaces) {
+    let invocation;
+    try {
+      invocation = createWorkspacePnpmInvocation(
+        packageManagerCli,
+        workspace.absolutePath,
+        scriptName,
+      );
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "pnpm 启动参数无效。");
+      return 1;
+    }
     const result = spawnSync(
-      process.execPath,
-      [packageManagerCli, "--dir", workspace.absolutePath, "run", scriptName],
-      { env: process.env, stdio: "inherit" },
+      invocation.executable,
+      invocation.args,
+      {
+        env: process.env,
+        stdio: "inherit",
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+      },
     );
 
     if (result.status !== 0) {

@@ -75,7 +75,8 @@ describe("connect-first discovery", () => {
       paths,
       pollIntervalMs: 5,
       start,
-      timeoutMs: 500,
+      /** 本用例验证启动顺序；并行 CI 的目录同步预算不属于 deadline 性能断言。 */
+      timeoutMs: 2_000,
     });
 
     expect(result).toBe(owners[0]?.statusEpoch);

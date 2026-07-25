@@ -1,27 +1,15 @@
+import { accessSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { parse } from "yaml";
+import { loadQualityGateRegistry } from "../ci/load-quality-gates.mjs";
 import { discoverWorkspaces } from "../workspace/discover-workspaces.mjs";
+import {
+  collectPublicCapabilityVerificationCommands,
+  validatePublicCapabilityGateDiff,
+} from "./validate-public-capability-gates.mjs";
 
-const requiredScripts = new Map([
-  [
-    "type",
-    "node scripts/quality/run-workspace-script.mjs type && tsc --noEmit -p tsconfig.quality.json",
-  ],
-  [
-    "lint",
-    "eslint . --max-warnings=0 --no-warn-ignored --format ./scripts/quality/relative-eslint-formatter.mjs && node scripts/quality/check-test-markers.mjs",
-  ],
-  [
-    "unit",
-    "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
-  ],
-  ["build", "node scripts/quality/run-workspace-script.mjs build"],
-  ["contract", "vitest run --config vitest.contract.config.ts"],
-  ["dependency-boundary", "node scripts/architecture/check-dependency-boundaries.mjs"],
-  ["basic-security", "node scripts/security/check-basic-security.mjs"],
-]);
 const requiredWorkspaceRoots = ["apps/*", "packages/*", "packages/adapters/*"];
 const ignoredDirectoryNames = new Set([
   "node_modules",
@@ -105,8 +93,21 @@ async function collectProductManifests(root, relativeDirectory) {
   return manifests;
 }
 
-export async function validateRepositoryContract(root) {
+export async function validateRepositoryContract(root, options = {}) {
   const violations = [];
+  let gateRegistry = null;
+  try {
+    gateRegistry = await loadQualityGateRegistry(root);
+  } catch (error) {
+    violations.push(
+      violation(
+        "ci/quality-gates.v1.yaml",
+        "gate-registry-contract",
+        error instanceof Error ? error.message : "Gate Registry 无法验证。",
+        "恢复唯一、升序、摘要闭合且命令真实的 GateRegistryV1",
+      ),
+    );
+  }
   const rootManifest = await readJson(root, "package.json", violations);
   const workspaceSource = await readText(root, "pnpm-workspace.yaml", violations);
   const nodeVersion = await readText(root, ".node-version", violations);
@@ -116,19 +117,45 @@ export async function validateRepositoryContract(root) {
     "apps/extension/package.json",
     violations,
   );
+  let capabilityVerificationCommands = new Set();
+  try {
+    const bindingsSource = await readFile(
+      path.join(root, "ci/public-capability-gates.v1.json"),
+      "utf8",
+    );
+    capabilityVerificationCommands = collectPublicCapabilityVerificationCommands(bindingsSource);
+  } catch (error) {
+    if (!(error && typeof error === "object" && error.code === "ENOENT")) {
+      violations.push(
+        violation(
+          "ci/public-capability-gates.v1.json",
+          "public-capability-gate",
+          error instanceof Error ? error.message : "公共能力 bindings 无法验证。",
+          "恢复封闭、升序且命令可派生的公共能力 bindings",
+        ),
+      );
+    }
+  }
 
   if (rootManifest) {
-    for (const [script, expectedCommand] of requiredScripts) {
-      if (rootManifest.scripts?.[script] !== expectedCommand) {
-        violations.push(
-          violation(
-            "package.json",
-            "root-script-contract",
-            `required root script '${script}' must use its fail-closed implementation.`,
-            `restore '${script}' to '${expectedCommand}'`,
-          ),
-        );
-      }
+    if (rootManifest.scripts?.["architecture-required"] !== "node scripts/ci/run-architecture-required.mjs") {
+      violations.push(
+        violation(
+          "package.json",
+          "root-script-contract",
+          "architecture-required 必须指向 checked-in registry runner。",
+          "将 architecture-required 恢复为 node scripts/ci/run-architecture-required.mjs",
+        ),
+      );
+    }
+    for (const entry of gateRegistry?.registry.gates ?? []) {
+      validateGateCommandContract(
+        root,
+        rootManifest,
+        entry.gateDefinition,
+        violations,
+        capabilityVerificationCommands,
+      );
     }
     if (rootManifest.packageManager !== "pnpm@11.12.0") {
       violations.push(
@@ -265,10 +292,105 @@ export async function validateRepositoryContract(root) {
     }
   }
 
+  const baseOid = options.baseOid ?? process.env.CODEGRAPH_BASE_OID;
+  const headOid = options.headOid ?? process.env.CODEGRAPH_HEAD_OID;
+  if (baseOid !== undefined || headOid !== undefined) {
+    try {
+      violations.push(...await validatePublicCapabilityGateDiff(root, baseOid, headOid));
+    } catch (error) {
+      violations.push(
+        violation(
+          "ci/quality-gates.v1.yaml",
+          "public-capability-gate",
+          error instanceof Error ? error.message : "公共能力门禁差异无法验证。",
+          "恢复完整 provider base/head OID，并为新增公共能力加入新的 blocking gate",
+        ),
+      );
+    }
+  }
+
   return violations.sort((left, right) =>
     `${left.relativePath}:${left.rule}`.localeCompare(
       `${right.relativePath}:${right.rule}`,
     ),
+  );
+}
+
+/** 从唯一 Gate Registry 派生并验证根脚本或 checked-in Node 入口。 */
+function validateGateCommandContract(
+  root,
+  rootManifest,
+  definition,
+  violations,
+  capabilityVerificationCommands,
+) {
+  const [executable, ...args] = definition.command;
+  if (executable === "pnpm" && args.length === 1) {
+    const scriptName = args[0];
+    const implementation = rootManifest.scripts?.[scriptName];
+    if (typeof implementation !== "string" || isNoOpScript(implementation)) {
+      violations.push(
+        violation(
+          "package.json",
+          "root-script-contract",
+          `registry gate '${definition.gateId}' 引用缺失或 no-op 的根脚本 '${scriptName}'。`,
+          `为 '${scriptName}' 恢复 checked-in fail-closed 实现`,
+        ),
+      );
+    }
+    return;
+  }
+  const approvedCapabilityCommand = capabilityVerificationCommands.has(
+    JSON.stringify(definition.command),
+  );
+  if (
+    executable === "node" &&
+    isSafeScriptPath(args[0]) &&
+    (args.length === 1 || approvedCapabilityCommand)
+  ) {
+    const absolutePath = path.join(root, ...args[0].split("/"));
+    try {
+      accessSync(absolutePath);
+    } catch {
+      violations.push(
+        violation(
+          args[0],
+          "gate-command-contract",
+          `registry gate '${definition.gateId}' 的 checked-in 入口缺失。`,
+          `恢复 ${args[0]} 或同步更新已批准 registry`,
+        ),
+      );
+    }
+    return;
+  }
+  violations.push(
+    violation(
+      "ci/quality-gates.v1.yaml",
+      "gate-command-contract",
+      `registry gate '${definition.gateId}' 使用未批准的命令形状。`,
+      "使用 ['pnpm','<root-script>']、单入口 Node 命令或 bindings 精确派生的能力验证 argv",
+    ),
+  );
+}
+
+/** 拒绝恒成功、内联执行或弱化失败传播的根脚本。 */
+function isNoOpScript(source) {
+  return (
+    source.trim().length === 0 ||
+    /(?:^|\s)(?:true|echo|printf)(?:\s|$)/u.test(source) ||
+    /node\s+(?:-e|--eval|-p|--print)(?:\s|$)/u.test(source) ||
+    /process\.exit\(0\)|\|\|\s*true|continue-on-error/u.test(source)
+  );
+}
+
+/** checked-in Node 入口必须是仓库内规范 POSIX 相对路径。 */
+function isSafeScriptPath(relativePath) {
+  return (
+    typeof relativePath === "string" &&
+    relativePath.endsWith(".mjs") &&
+    !relativePath.startsWith("/") &&
+    !relativePath.includes("\\") &&
+    relativePath.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
   );
 }
 

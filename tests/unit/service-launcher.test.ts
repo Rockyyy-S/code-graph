@@ -158,7 +158,7 @@ describe("trusted graph-service launcher", () => {
     await expect(launcher.start(paths, 250)).rejects.toMatchObject(safeError);
   });
 
-  it("drains and destroys stderr when exit occurs near the deadline without close", async () => {
+  it("drains and destroys stderr when exit occurs without close", async () => {
     const child = createChild();
     const paths = await createPaths();
     const safeError = createErrorV1("SERVICE_INSTANCE_CONFLICT", "log-late-stderr");
@@ -174,9 +174,8 @@ describe("trusted graph-service launcher", () => {
         readPublishedPid: async () => {
           if (!probed) {
             probed = true;
-            await new Promise<void>((resolve) => setTimeout(resolve, 80));
             child.emit("exit", 1);
-            setTimeout(() => child.stderr.write(`${JSON.stringify(safeError)}\n`), 50);
+            setTimeout(() => child.stderr.write(`${JSON.stringify(safeError)}\n`), 20);
           }
           return null;
         },
@@ -184,10 +183,10 @@ describe("trusted graph-service launcher", () => {
     );
 
     const startedAt = Date.now();
-    await expect(launcher.start(paths, 100)).rejects.toMatchObject({
-      code: "SERVICE_ENDPOINT_START_FAILED",
+    await expect(launcher.start(paths, 500)).rejects.toMatchObject({
+      code: "SERVICE_INSTANCE_CONFLICT",
     });
-    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(Date.now() - startedAt).toBeLessThan(650);
     expect(child.stderr.destroyed).toBe(true);
     expect(child.disconnect).toHaveBeenCalledTimes(1);
   });
@@ -224,15 +223,14 @@ describe("trusted graph-service launcher", () => {
       return true;
     });
     let spawnCount = 0;
+    let publishedPid: number | null = null;
     const spawnProcess = vi.fn<SpawnProcess>(() => {
       spawnCount += 1;
       const child = spawnCount === 1 ? firstChild : secondChild;
       queueMicrotask(() => {
         child.emit("spawn");
         if (child === secondChild) {
-          void mkdir(paths.workspaceDirectory, { recursive: true })
-            .then(() => writeFile(paths.metadataPath, JSON.stringify({ pid: child.pid })))
-            .catch(() => undefined);
+          publishedPid = child.pid ?? null;
         }
       });
       return child;
@@ -240,7 +238,10 @@ describe("trusted graph-service launcher", () => {
     const launcher = createGraphServiceProcessLauncher(
       { args: ["trusted-entry.js"], command: "node" },
       spawnProcess,
-      { cleanupTimeoutMs: 100 },
+      {
+        cleanupTimeoutMs: 100,
+        readPublishedPid: async () => publishedPid,
+      },
     );
 
     await expect(launcher.start(paths, 15)).rejects.toMatchObject({

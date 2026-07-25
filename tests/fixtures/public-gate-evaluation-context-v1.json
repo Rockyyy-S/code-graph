@@ -1,0 +1,10 @@
+{
+  "baseOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "comparisonBaseOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evaluationContextDigest": "b472fdba34342c56462145e4fb36c86a341bf2329998ca022757efa4818afc5a",
+  "gateRegistryDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "headOid": "dddddddddddddddddddddddddddddddddddddddd",
+  "objectFormat": "sha1",
+  "providerRepositoryId": "1303415307",
+  "schemaVersion": 1
+}

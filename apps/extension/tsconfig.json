@@ -6,6 +6,7 @@
     "moduleResolution": "Bundler",
     "noEmit": true,
     "rootDir": "src",
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo",
     "types": ["node", "vscode"]
   },
   "include": ["src/**/*.ts"],

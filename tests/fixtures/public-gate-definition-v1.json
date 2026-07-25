@@ -1,0 +1,8 @@
+{
+  "blocking": true,
+  "capabilityOwner": "dev-enablement",
+  "checkId": "type",
+  "command": ["pnpm", "type"],
+  "evidenceProducerId": "gha-oidc://1303415307/example/controller/.github/workflows/produce-gate-evidence.yml@1111111111111111111111111111111111111111#type",
+  "gateId": "type"
+}

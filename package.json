@@ -16,6 +16,7 @@
     "contract": "vitest run --config vitest.contract.config.ts",
     "dependency-boundary": "node scripts/architecture/check-dependency-boundaries.mjs",
     "basic-security": "node scripts/security/check-basic-security.mjs",
+    "planning-trace": "node scripts/planning/check-planning-traceability.mjs",
     "architecture-required": "node scripts/ci/run-architecture-required.mjs"
   },
   "devDependencies": {
