@@ -1,59 +1,89 @@
 # Story 1.4 Provider 与门禁证据
 
-> 当前结论：Story 1.4 的 8 个变化公共能力已完成一能力一 gate、本地专属 verification、
-> repository preflight 与基线差异验证；当前工作树尚未形成候选 commit，因此同 SHA Hosted child
-> evidence、外部可信 GateRegistry proposal、Controller App `architecture-required=success`、fresh
-> drift monitor 与无 bypass ruleset 复验仍待执行。本地全绿不替代这些 provider 结论。
+> 当前结论：Story 1.4 的 8 个变化公共能力已完成一能力一 blocking gate、本地专属
+> verification、repository preflight、基线差异验证和外部可信 provider 闭环。候选
+> `754cc52177ae3ee42dff7a2a545b6faf7ab503d2` 的 Hosted child evidence、GitHub attestation、
+> Controller App `architecture-required=success`、fresh drift monitor 与无 bypass ruleset 均已通过。
 
-## 候选与 Registry 状态
+## 候选与可信 Registry
 
 - 比较基线：`cb60d0039507da4c1629cd478e0bd43f287eb663`
-- 候选 SHA：待生成；当前 Story 1.4 工作树未提交
-- 当前本地 blocking gate 数：22
-- 当前本地 `gateRegistryDigest`：`39eaaa920a87948a9cd563c5f76498e6bf1e31a74cd8e724e7c9a5331633a885`
-- 固定 producer commit：`c01e7c0550b9d9150df26c20cebb10aaefdf648d`
-- Hosted child run/attempt：待候选 SHA 与外部 registry proposal 批准后执行
-- Controller App umbrella check：待执行
-- fresh drift monitor / active strict ruleset / bypass 空集合：待当前候选复验
+- 候选 SHA：`754cc52177ae3ee42dff7a2a545b6faf7ab503d2`
+- Provider repository ID：`1303415307`
+- PR：`Rockyyy-S/code-graph#8`
+- 可信 proposal sequence：`18`
+- Controller proposal PR：`Rockyyy-S/code-graph-gate-controller#9`
+- Controller proposal merge commit：`bedd8e6a83b3ba263d70ee47f53c59f7389fac2f`
+- blocking gate 数：`22`
+- `gateRegistryDigest`：`b91f8793a5edb4a1f8428c2aca88ba6ecd7b89e23a4a5af1ab72217979903a4f`
+- `gateImplementationDigest`：`84665464a3cead64925ede02cad4d509442916e7ffa4fffa2a57d994dc1f5ce2`
+- 固定 producer commit：`0981130a71a3960aa374a82829d42aa9d9f15012`
 
 ## 变化公共能力交付表
 
-下列 gate 均为 `blocking:true`，`capabilityOwner=qa`，命令、fixture、测试、evidenceId 与能力一一独占。
+下列 gate 均为 `blocking:true`、`capabilityOwner=qa`，命令、fixture、测试与 evidenceId 一一独占。
+`evidenceProducerId` 的共同前缀为
+`gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@0981130a71a3960aa374a82829d42aa9d9f15012#`。
 
-| capabilityId | checkId | evidenceProducerId | gateDefinitionDigest | 本地 verification |
+| capabilityId | checkId | evidenceProducerId 后缀 | gateDefinitionDigest | Hosted |
 | --- | --- | --- | --- | --- |
-| `rpc:job/start` | `graph-bootstrap-rpc-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-rpc-v1` | `3594adfe8f65d2066e9528e0c8528b3ba4552b7340c361005554d75267a71d62` | 通过；`verificationDigest=9d6c93452f473770102641b566ad73056da7b8cbba513dd491c02df2ab3d7ceb` |
-| `schema:errorV1Schema` | `graph-bootstrap-error-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-error-v1` | `2138d90ca2955e7bf8f3ff2dc140dbadc74d1a08f46620c554112082aebf0b10` | 通过；`verificationDigest=dc80a88964a6b5ba8d852611fa4fd154c71b179361b0c628ebda403bb5fe58db` |
-| `schema:initializeResultCompatibleSchema` | `graph-bootstrap-initialize-compatible-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-initialize-compatible-v1` | `3d73f9b28de866247d59eec867ef4fe6f66c32b04e43354e895223fb6976be85` | 通过；`verificationDigest=bd4dbabf10f01a545034a0e02e195b75b2d184daf5df8df5bdb2a1e9e3be7355` |
-| `schema:initializeResultSchema` | `graph-bootstrap-initialize-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-initialize-v1` | `e43e1d319eae0afac6a689ad86a4696335b0dce477491c6066a88bcdff4b0090` | 通过；`verificationDigest=2a25dce8f1b0cfd9e7c9821b4e0055fded2c4f8461fb176b7794272b35dafba2` |
-| `schema:jobStartRequestV1Schema` | `graph-bootstrap-job-request-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-job-request-v1` | `ae695f172d007c08e4500287008df4a36b0feaf26d0750aedbbb47a9a60dfd63` | 通过；`verificationDigest=ab8c51e772fd06ba7be8733f2d3441a2e9be79c61745d4fe1aa5ddfc23015850` |
-| `schema:jobStartResultV1Schema` | `graph-bootstrap-job-result-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-job-result-v1` | `ae415b6cc3b8b5874e9c2030bf046ccdca08cc708cfe1ddced7972ffae05a26e` | 通过；`verificationDigest=fe7a217f3ce1389188ae4fca6272b1274ffc31dc4b07b8892cfe209c9aeab6f8` |
-| `schema:serviceStatusV1CompatibleSchema` | `graph-bootstrap-status-compatible-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-status-compatible-v1` | `8ad0f2cacbb083788281dcf7530b803632ccfd801194b4cfb830e4a214a9aeed` | 通过；`verificationDigest=12e968cde6db74e69e9a79cd3e34b52bd1383ad71cfc3421171c895abb64afcd` |
-| `schema:serviceStatusV1Schema` | `graph-bootstrap-status-v1` | `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-status-v1` | `ad2b59698dac4fc90c516ed8da092ace5d169639a6822684318ed49400cc128d` | 通过；`verificationDigest=efeee0cb3ffcb42cfcb26468fd3eafc9a8a275adc8b4943a6b9a84f9e558d7fd` |
+| `rpc:job/start` | `graph-bootstrap-rpc-v1` | `graph-bootstrap-rpc-v1` | `14e024a8f6edf1ae95672340031ea9556b4c600fe946c2c4bd1122eaa71770e0` | pass |
+| `schema:errorV1Schema` | `graph-bootstrap-error-v1` | `graph-bootstrap-error-v1` | `68496d099135d1b21823957ca56c2156bb62619d9c72ff463680a10c97172f2e` | pass |
+| `schema:initializeResultCompatibleSchema` | `graph-bootstrap-initialize-compatible-v1` | `graph-bootstrap-initialize-compatible-v1` | `f4487e9987753b674830ea05b43b411909dac8de8a11ccc6a9ad6e4da830fd66` | pass |
+| `schema:initializeResultSchema` | `graph-bootstrap-initialize-v1` | `graph-bootstrap-initialize-v1` | `eb2000ec5b5ae296c7b809b4c2c8358d6e0ea7041f099735d2960a75f64715b6` | pass |
+| `schema:jobStartRequestV1Schema` | `graph-bootstrap-job-request-v1` | `graph-bootstrap-job-request-v1` | `5147390e95fa9f7ace2b46d7b95516fcdfddd3b1425e88b5d5a02bcc4fc69f3c` | pass |
+| `schema:jobStartResultV1Schema` | `graph-bootstrap-job-result-v1` | `graph-bootstrap-job-result-v1` | `9fe406f0886eb3bb4e715a96aee8bdf923f8798d6f9b7afe238acc119630db76` | pass |
+| `schema:serviceStatusV1CompatibleSchema` | `graph-bootstrap-status-compatible-v1` | `graph-bootstrap-status-compatible-v1` | `d355ac69c6e628db69c5e6367d40d157bc1e8c26a0d66ecf0403974945d47858` | pass |
+| `schema:serviceStatusV1Schema` | `graph-bootstrap-status-v1` | `graph-bootstrap-status-v1` | `581e789825bb14d45a836bd5e94c66fd0a64089f357053149ff333a91f89da51` | pass |
 
-## 本地差异与验证结果
+## Hosted artifact、attestation 与 Controller 结论
 
-- base/worktree 公共能力差异：精确为上述 8 项；`violations=[]`
-- 8 个专属 verification entry：全部通过
-- `node scripts/contracts/validate-repository-contract.mjs`：通过
-- `tests/unit/public-capability-gate.test.ts`：36/36 通过
+- child workflow：`child-gate-evidence`
+- run / attempt：`30152595619` / `2`
+- gate execution job：`89665747084`
+- evidence signing job：`89665866589`
+- 结果：22/22 gate `pass`，`evidenceCount=22`，`passed=true`
+- raw artifact ID：`8618127556`
+- raw artifact name：`gate-evidence-raw-30152595619-2-754cc52177ae3ee42dff7a2a545b6faf7ab503d2`
+- raw archive digest：`sha256:f18413861efe6079cd081cfa6ffa855f884ecb26bdf847e28fb152668cd1680c`
+- final artifact ID：`8618128971`
+- final artifact name：`gate-evidence-30152595619-2-754cc52177ae3ee42dff7a2a545b6faf7ab503d2`
+- final archive digest：`sha256:a911579aa317e7e61900e940f1cc8839f94a164c6f54cc883a660eea2c553549`
+- attested `gate-evidence.json` digest：`fbb2a4172220940180f580056d60790ef3f7cd1dbeb439384acd97e3fdd61568`
+- attestation ID：`37075065`
+- evaluation context digest：`901dd4d778b3136c89b4e11022d835c24d85e356b2d97306a3bbe79f61319725`
+- replay digest：`ed35b03aa20f642822d7cea034a01b7f8e2fac56eaf24fd68ca997f1199db65a`
+- Controller run：`30152720833`
+- Controller App check：`89665917352`
+- Controller App integration：`4372284`（`rockyyy-code-graph-controller`）
+- Controller 结果：`status=accepted`、`trustedSequence=18`、`failedGateIds=[]`、
+  `invalidGateIds=[]`、`missingEvidenceGateIds=[]`
+
+## Drift monitor 与 ruleset
+
+- fresh monitor run：`30152715265`
+- monitor head：`bedd8e6a83b3ba263d70ee47f53c59f7389fac2f`
+- monitor event / conclusion：`push` / `success`
+- ruleset ID：`19603163`
+- enforcement：`active`
+- branch：`refs/heads/main`
+- required context：`architecture-required`
+- required integration：Controller App `4372284`
+- strict current-head：`strict_required_status_checks_policy=true`
+- bypass：`bypass_actors=[]`、`current_user_can_bypass=never`
+- PR #8：`mergeStateStatus=CLEAN`
+
+## 本地与真实进程验证
+
+- base/head 公共能力差异精确为上述 8 项；`violations=[]`
+- 8 个专属 verification entry 全部通过
+- repository contract preflight 通过
+- `pnpm unit`：45 文件 / 259 用例通过
+- `pnpm contract`：21 文件 / 173 用例通过
+- 本地 `architecture-required`：22/22 通过
 - SQLite：精确八表、WAL、foreign keys、NORMAL、5000 ms busy timeout、迁移幂等、未知高版本拒绝、
-  故障副本、事务回滚与真实 `SQLITE_BUSY` 竞争均通过
-- 真实进程：Named Pipe/UDS 上完成 initialize → `job/start` → status；共享状态、Builtin 排除、
-  `.codegraphignore` fail closed 与外部 symlink 不入库均通过
+  故障副本、事务回滚与真实 `SQLITE_BUSY` 竞争通过
+- 真实 Named Pipe/UDS：initialize → `job/start` → status 通过；共享状态、Builtin 排除、
+  `.codegraphignore` fail closed、外部 symlink 不入库与 100-byte Hosted socket 路径预算通过
 
-完整根级质量命令结果在 Story 文件的 Dev Agent Record 中记录；本文件只保留 provider 与公共能力
-治理所需的可审计摘要。
-
-## 外部完成条件
-
-形成候选 commit 后，必须按 Story 1.3 的受信任流程完成以下全部条件，才能把 Story 1.4 推进到
-`review`：
-
-1. 以候选完整 SHA 提交并批准新的可信 GateRegistry proposal，摘要必须与本仓库候选一致。
-2. Hosted child 使用固定 producer 运行 22 项 gate，产出同 SHA artifact 与 GitHub attestation。
-3. Controller App 验证 producer、registry/context/evidence digest 后发布
-   `architecture-required=success`。
-4. fresh drift monitor 再次确认 ruleset active、strict、required context 绑定 Controller App 且无 bypass。
-5. 文档回填候选 SHA、proposal sequence、Hosted run/attempt、artifact/attestation、Controller check 与
-   monitor 结果；不得用 Story 1.3 或其他旧候选证据替代。
+私钥、installation token、webhook secret、工作区绝对路径与源码正文均未写入 artifact、公开日志或本文档。
