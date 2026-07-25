@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runGraphServiceProcess } from "../../apps/graph-service/src/main.js";
 import type { OwnedServiceInstance } from "../../apps/graph-service/src/instance-owner.js";
@@ -7,7 +8,7 @@ import type { OwnedServiceInstance } from "../../apps/graph-service/src/instance
 function createEnvironment(workspaceKey: string, endpoint: string) {
   return {
     CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-      indexingRoot: "C:\\workspace",
+      indexingRoot: path.resolve("test-workspace"),
       paths: {
         endpoint,
         endpointKind: "named-pipe",
