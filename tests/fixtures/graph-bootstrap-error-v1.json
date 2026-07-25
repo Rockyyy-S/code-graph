@@ -1,0 +1,8 @@
+{
+  "category": "indexing",
+  "code": "GRAPH_SCAN_FAILED",
+  "logId": "log-graph-scan-v1",
+  "message": "工作区安全扫描失败。",
+  "retryable": true,
+  "suggestedAction": "检查工作区读取权限与安全限制后重试。"
+}

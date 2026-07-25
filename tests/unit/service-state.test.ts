@@ -34,8 +34,8 @@ describe("empty graph-service state", () => {
     });
     expect(status).not.toHaveProperty("graphRevision");
     expect(status).not.toHaveProperty("findingsRevision");
-    expect(status).not.toHaveProperty("currentIndexJob");
-    expect(status).not.toHaveProperty("lastIndexJob");
+    expect(status.currentIndexJob).toBeNull();
+    expect(status.lastIndexJob).toBeNull();
   });
 
   it("returns independent versions and only implemented capabilities", () => {

@@ -16,6 +16,46 @@ const expectedGates = [
   ["build", ["pnpm", "build"], "dev-enablement"],
   ["contract", ["pnpm", "contract"], "qa"],
   ["dependency-boundary", ["pnpm", "dependency-boundary"], "architecture"],
+  [
+    "graph-bootstrap-error-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-error-v1.mjs", "--capability", "schema:errorV1Schema", "--test", "tests/unit/graph-bootstrap-error-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-error-v1.json", "--evidence-id", "public-capability:schema:errorV1Schema"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-initialize-compatible-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-initialize-compatible-v1.mjs", "--capability", "schema:initializeResultCompatibleSchema", "--test", "tests/unit/graph-bootstrap-initialize-compatible-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-initialize-compatible-v1.json", "--evidence-id", "public-capability:schema:initializeResultCompatibleSchema"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-initialize-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-initialize-v1.mjs", "--capability", "schema:initializeResultSchema", "--test", "tests/unit/graph-bootstrap-initialize-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-initialize-v1.json", "--evidence-id", "public-capability:schema:initializeResultSchema"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-job-request-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-job-request-v1.mjs", "--capability", "schema:jobStartRequestV1Schema", "--test", "tests/unit/graph-bootstrap-job-request-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-request-v1.json", "--evidence-id", "public-capability:schema:jobStartRequestV1Schema"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-job-result-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-job-result-v1.mjs", "--capability", "schema:jobStartResultV1Schema", "--test", "tests/unit/graph-bootstrap-job-result-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-result-v1.json", "--evidence-id", "public-capability:schema:jobStartResultV1Schema"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-rpc-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-rpc-v1.mjs", "--capability", "rpc:job/start", "--test", "tests/unit/graph-bootstrap-rpc-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-rpc-v1.json", "--evidence-id", "public-capability:rpc:job/start"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-status-compatible-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-status-compatible-v1.mjs", "--capability", "schema:serviceStatusV1CompatibleSchema", "--test", "tests/unit/graph-bootstrap-status-compatible-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-status-compatible-v1.json", "--evidence-id", "public-capability:schema:serviceStatusV1CompatibleSchema"],
+    "qa",
+  ],
+  [
+    "graph-bootstrap-status-v1",
+    ["node", "scripts/contracts/verify-graph-bootstrap-status-v1.mjs", "--capability", "schema:serviceStatusV1Schema", "--test", "tests/unit/graph-bootstrap-status-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-status-v1.json", "--evidence-id", "public-capability:schema:serviceStatusV1Schema"],
+    "qa",
+  ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
   ["planning-traceability", ["pnpm", "planning-trace"], "architecture-po"],
   [
@@ -59,7 +99,7 @@ afterEach(async () => {
 });
 
 describe("quality-gates.v1 registry", () => {
-  it("登记唯一、升序、always-applicable 的十四项 blocking gate", async () => {
+  it("登记唯一、升序、always-applicable 的二十二项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);

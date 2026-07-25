@@ -5,7 +5,15 @@ import {
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
 } from "./service-control.js";
-import { SERVICE_ERROR_CODES } from "./protocol-error.js";
+import {
+  failedIndexJobV1Schema,
+  indexCommitSummaryV1Schema,
+  queuedIndexJobV1Schema,
+  runningIndexJobV1Schema,
+  succeededIndexJobV1Schema,
+} from "./index-job-schema.js";
+
+export { errorV1Schema } from "./protocol-error-schema.js";
 
 const positiveRevisionSchema = {
   maximum: Number.MAX_SAFE_INTEGER,
@@ -30,11 +38,17 @@ export const serviceStatusV1Schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   additionalProperties: false,
   properties: {
-    availability: { const: "absent" },
-    committed: { type: "null" },
-    completeness: { const: "empty" },
+    availability: { enum: ["absent", "available"] },
+    committed: { anyOf: [{ type: "null" }, indexCommitSummaryV1Schema] },
+    completeness: { enum: ["complete", "empty"] },
     configRevision: positiveRevisionSchema,
-    freshness: { type: "null" },
+    currentIndexJob: {
+      anyOf: [{ type: "null" }, queuedIndexJobV1Schema, runningIndexJobV1Schema],
+    },
+    freshness: { enum: ["fresh", null] },
+    lastIndexJob: {
+      anyOf: [{ type: "null" }, failedIndexJobV1Schema, succeededIndexJobV1Schema],
+    },
     lifecycle: { const: "running" },
     serviceInstanceId: { minLength: 1, type: "string" },
     serviceStatusRevision: positiveRevisionSchema,
@@ -49,7 +63,9 @@ export const serviceStatusV1Schema = {
     "committed",
     "completeness",
     "configRevision",
+    "currentIndexJob",
     "freshness",
+    "lastIndexJob",
     "lifecycle",
     "serviceInstanceId",
     "serviceStatusRevision",
@@ -68,6 +84,26 @@ export const serviceStatusV1CompatibleSchema = {
   additionalProperties: true,
   properties: {
     ...serviceStatusV1Schema.properties,
+    committed: {
+      anyOf: [
+        { type: "null" },
+        { ...indexCommitSummaryV1Schema, additionalProperties: true },
+      ],
+    },
+    currentIndexJob: {
+      anyOf: [
+        { type: "null" },
+        { ...queuedIndexJobV1Schema, additionalProperties: true },
+        { ...runningIndexJobV1Schema, additionalProperties: true },
+      ],
+    },
+    lastIndexJob: {
+      anyOf: [
+        { type: "null" },
+        { ...failedIndexJobV1Schema, additionalProperties: true },
+        { ...succeededIndexJobV1Schema, additionalProperties: true },
+      ],
+    },
     telemetry: { ...telemetryStatusV1Schema, additionalProperties: true },
   },
 } as const;
@@ -174,31 +210,6 @@ export const initializeResultSchema = {
   type: "object",
 } as const;
 
-/** ErrorV1 的严格 JSON Schema 2020-12 定义。 */
-export const errorV1Schema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  additionalProperties: false,
-  properties: {
-    category: {
-      enum: ["compatibility", "lifecycle", "protocol", "security", "transport"],
-    },
-    code: { enum: SERVICE_ERROR_CODES },
-    logId: { minLength: 1, type: "string" },
-    message: { minLength: 1, type: "string" },
-    retryable: { type: "boolean" },
-    suggestedAction: { minLength: 1, type: "string" },
-  },
-  required: [
-    "category",
-    "code",
-    "logId",
-    "message",
-    "retryable",
-    "suggestedAction",
-  ],
-  type: "object",
-} as const;
-
 /** ServiceMetadataV1 的封闭 JSON Schema 2020-12 定义。 */
 export const serviceMetadataV1Schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -235,13 +246,6 @@ export const initializeResultCompatibleSchema = {
   properties: {
     ...initializeResultSchema.properties,
     capabilities: compatibleCapabilitiesSchema,
-    serviceStatus: {
-      ...serviceStatusV1Schema,
-      additionalProperties: true,
-      properties: {
-        ...serviceStatusV1Schema.properties,
-        telemetry: { ...telemetryStatusV1Schema, additionalProperties: true },
-      },
-    },
+    serviceStatus: serviceStatusV1CompatibleSchema,
   },
 } as const;

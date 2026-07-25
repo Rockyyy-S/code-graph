@@ -10,6 +10,7 @@ import {
   type OwnedServiceInstance,
   type ServiceInstancePaths,
 } from "./instance-owner.js";
+import type { StartGraphServiceOptions } from "./index.js";
 
 const CONFIG_ENVIRONMENT_KEY = "CODEGRAPH_SERVICE_CONFIG";
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -32,16 +33,19 @@ export interface GraphServiceProcessDependencies {
   startService?: typeof startGraphService;
 }
 
+/** 受信任启动器通过私有环境变量注入的封闭启动配置。 */
+export type GraphServiceProcessConfig = Pick<StartGraphServiceOptions, "indexingRoot" | "paths">;
+
 /** 从受信任启动器注入的环境变量读取服务路径，不接受 workspace 配置。 */
 export function parseServiceProcessConfig(
   environment: NodeJS.ProcessEnv,
-): ServiceInstancePaths {
+): GraphServiceProcessConfig {
   const source = environment[CONFIG_ENVIRONMENT_KEY];
   if (source === undefined) {
     throw new Error("缺少 graph-service 启动配置。");
   }
   const value: unknown = JSON.parse(source);
-  if (!isServiceInstancePaths(value)) {
+  if (!isGraphServiceProcessConfig(value)) {
     throw new Error("graph-service 启动配置不合法。");
   }
   return value;
@@ -52,7 +56,7 @@ export async function runGraphServiceProcess(
   environment: NodeJS.ProcessEnv = process.env,
   dependencies: GraphServiceProcessDependencies = {},
 ): Promise<OwnedServiceInstance> {
-  const paths = parseServiceProcessConfig(environment);
+  const config = parseServiceProcessConfig(environment);
   delete environment[CONFIG_ENVIRONMENT_KEY];
   const signalTarget = dependencies.signalTarget ?? process;
   const controlTarget = dependencies.controlTarget ?? process;
@@ -143,7 +147,7 @@ export async function runGraphServiceProcess(
   signalTarget.on("SIGTERM", requestShutdown);
   controlTarget.on("message", receiveParentControlMessage);
   try {
-    runtime = await startService({ paths });
+    runtime = await startService(config);
     if (shutdownRequested) {
       await closeRuntime();
     }
@@ -200,6 +204,29 @@ function isServiceInstancePaths(value: unknown): value is ServiceInstancePaths {
     typeof record.workspaceKey === "string" &&
     /^[a-f0-9]{64}$/.test(record.workspaceKey)
   );
+}
+
+/** 严格校验私有启动配置，indexingRoot 不得混入公开 metadata 路径对象。 */
+function isGraphServiceProcessConfig(value: unknown): value is GraphServiceProcessConfig {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    JSON.stringify(Object.keys(record).sort()) !==
+      JSON.stringify(["indexingRoot", "paths"])
+  ) {
+    return false;
+  }
+  if (
+    typeof record.indexingRoot !== "string" ||
+    record.indexingRoot.includes("\0") ||
+    !path.isAbsolute(record.indexingRoot) ||
+    path.normalize(record.indexingRoot) !== record.indexingRoot
+  ) {
+    return false;
+  }
+  return isServiceInstancePaths(record.paths);
 }
 
 if (

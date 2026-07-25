@@ -40,7 +40,9 @@ function createAbsentStatus() {
     committed: null,
     completeness: "empty" as const,
     configRevision: 1,
+    currentIndexJob: null,
     freshness: null,
+    lastIndexJob: null,
     lifecycle: "running" as const,
     serviceInstanceId: "instance-test",
     serviceStatusRevision: 1,
@@ -63,6 +65,7 @@ describe("service control contract", () => {
     expect(RULES_SCHEMA_VERSION).toBe(1);
     expect(CLI_SCHEMA_VERSION).toBe(1);
     expect(SERVICE_CAPABILITIES).toEqual([
+      "job/start",
       "service/shutdown",
       "service/status",
     ]);

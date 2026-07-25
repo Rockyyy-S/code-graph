@@ -4,6 +4,8 @@ import type {
   CompatibleInitializeResult,
   InitializeRequest,
   InitializeResult,
+  JobStartRequest,
+  JobStartResult,
   ServiceControlRequest,
   ShutdownResult,
 } from "./service-control.js";
@@ -19,6 +21,11 @@ import {
   shutdownResultCompatibleSchema,
   shutdownResultSchema,
 } from "./service-control-schema.js";
+import {
+  jobStartRequestV1Schema,
+  jobStartResultV1CompatibleSchema,
+  jobStartResultV1Schema,
+} from "./index-job-schema.js";
 import type { ServiceMetadataV1 } from "./service-metadata.js";
 import type { ServiceStatusV1 } from "./service-status.js";
 import {
@@ -60,6 +67,12 @@ const shutdownResultValidator: ValidateFunction<unknown> =
   ajv.compile(shutdownResultSchema);
 const shutdownResultCompatibleValidator: ValidateFunction<unknown> =
   ajv.compile(shutdownResultCompatibleSchema);
+const jobStartRequestValidator: ValidateFunction<unknown> =
+  ajv.compile(jobStartRequestV1Schema);
+const jobStartResultValidator: ValidateFunction<unknown> =
+  ajv.compile(jobStartResultV1Schema);
+const jobStartResultCompatibleValidator: ValidateFunction<unknown> =
+  ajv.compile(jobStartResultV1CompatibleSchema);
 const gateDefinitionValidator: ValidateFunction<unknown> =
   ajv.compile(gateDefinitionV1Schema);
 const gateRegistryValidator: ValidateFunction<unknown> =
@@ -109,6 +122,21 @@ export function validateShutdownResultCompatible(value: unknown): value is Shutd
   return shutdownResultCompatibleValidator(value);
 }
 
+/** 严格校验服务端收到的 job/start 请求。 */
+export function validateJobStartRequest(value: unknown): value is JobStartRequest {
+  return jobStartRequestValidator(value);
+}
+
+/** 严格校验服务端生成的 canonical job/start 响应。 */
+export function validateJobStartResult(value: unknown): value is JobStartResult {
+  return jobStartResultValidator(value);
+}
+
+/** 兼容校验 job/start 响应，允许同主版本新增可选字段。 */
+export function validateJobStartResultCompatible(value: unknown): value is JobStartResult {
+  return jobStartResultCompatibleValidator(value);
+}
+
 /**
  * 校验 JSON-RPC 2.0 请求、通知或响应的顶层信封。
  *
@@ -147,14 +175,31 @@ export function validateJsonRpcV2Envelope(value: unknown): boolean {
 
 /** 严格校验权威 ServiceStatusV1 快照。 */
 export function validateServiceStatusV1(value: unknown): value is ServiceStatusV1 {
-  return serviceStatusValidator(value);
+  return serviceStatusValidator(value) && hasLegalServiceStatusCombination(value);
 }
 
 /** 兼容校验同一协议主版本的状态响应，忽略新增可选字段。 */
 export function validateServiceStatusV1Compatible(
   value: unknown,
 ): value is ServiceStatusV1 {
-  return serviceStatusCompatibleValidator(value);
+  return serviceStatusCompatibleValidator(value) && hasLegalServiceStatusCombination(value);
+}
+
+/** 阻止 absent/available、空摘要与完整度之间出现互相矛盾的组合。 */
+function hasLegalServiceStatusCombination(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const status = value as ServiceStatusV1;
+  if (status.availability === "absent") {
+    return status.committed === null && status.freshness === null && status.completeness === "empty";
+  }
+  if (status.committed === null || status.freshness !== "fresh") {
+    return false;
+  }
+  return status.committed.indexedFileCount === 0
+    ? status.completeness === "empty"
+    : status.completeness === "complete";
 }
 
 /** 严格校验服务发现 metadata，未知版本和字段均会被拒绝。 */

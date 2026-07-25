@@ -47,6 +47,94 @@
     },
     {
       "gateDefinition": {
+        "gateId": "graph-bootstrap-error-v1",
+        "checkId": "graph-bootstrap-error-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-error-v1.mjs", "--capability", "schema:errorV1Schema", "--test", "tests/unit/graph-bootstrap-error-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-error-v1.json", "--evidence-id", "public-capability:schema:errorV1Schema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-error-v1"
+      },
+      "gateDefinitionDigest": "2138d90ca2955e7bf8f3ff2dc140dbadc74d1a08f46620c554112082aebf0b10"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-initialize-compatible-v1",
+        "checkId": "graph-bootstrap-initialize-compatible-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-initialize-compatible-v1.mjs", "--capability", "schema:initializeResultCompatibleSchema", "--test", "tests/unit/graph-bootstrap-initialize-compatible-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-initialize-compatible-v1.json", "--evidence-id", "public-capability:schema:initializeResultCompatibleSchema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-initialize-compatible-v1"
+      },
+      "gateDefinitionDigest": "3d73f9b28de866247d59eec867ef4fe6f66c32b04e43354e895223fb6976be85"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-initialize-v1",
+        "checkId": "graph-bootstrap-initialize-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-initialize-v1.mjs", "--capability", "schema:initializeResultSchema", "--test", "tests/unit/graph-bootstrap-initialize-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-initialize-v1.json", "--evidence-id", "public-capability:schema:initializeResultSchema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-initialize-v1"
+      },
+      "gateDefinitionDigest": "e43e1d319eae0afac6a689ad86a4696335b0dce477491c6066a88bcdff4b0090"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-job-request-v1",
+        "checkId": "graph-bootstrap-job-request-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-job-request-v1.mjs", "--capability", "schema:jobStartRequestV1Schema", "--test", "tests/unit/graph-bootstrap-job-request-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-request-v1.json", "--evidence-id", "public-capability:schema:jobStartRequestV1Schema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-job-request-v1"
+      },
+      "gateDefinitionDigest": "ae695f172d007c08e4500287008df4a36b0feaf26d0750aedbbb47a9a60dfd63"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-job-result-v1",
+        "checkId": "graph-bootstrap-job-result-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-job-result-v1.mjs", "--capability", "schema:jobStartResultV1Schema", "--test", "tests/unit/graph-bootstrap-job-result-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-result-v1.json", "--evidence-id", "public-capability:schema:jobStartResultV1Schema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-job-result-v1"
+      },
+      "gateDefinitionDigest": "ae415b6cc3b8b5874e9c2030bf046ccdca08cc708cfe1ddced7972ffae05a26e"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-rpc-v1",
+        "checkId": "graph-bootstrap-rpc-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-rpc-v1.mjs", "--capability", "rpc:job/start", "--test", "tests/unit/graph-bootstrap-rpc-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-rpc-v1.json", "--evidence-id", "public-capability:rpc:job/start"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-rpc-v1"
+      },
+      "gateDefinitionDigest": "3594adfe8f65d2066e9528e0c8528b3ba4552b7340c361005554d75267a71d62"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-status-compatible-v1",
+        "checkId": "graph-bootstrap-status-compatible-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-status-compatible-v1.mjs", "--capability", "schema:serviceStatusV1CompatibleSchema", "--test", "tests/unit/graph-bootstrap-status-compatible-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-status-compatible-v1.json", "--evidence-id", "public-capability:schema:serviceStatusV1CompatibleSchema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-status-compatible-v1"
+      },
+      "gateDefinitionDigest": "8ad0f2cacbb083788281dcf7530b803632ccfd801194b4cfb830e4a214a9aeed"
+    },
+    {
+      "gateDefinition": {
+        "gateId": "graph-bootstrap-status-v1",
+        "checkId": "graph-bootstrap-status-v1",
+        "command": ["node", "scripts/contracts/verify-graph-bootstrap-status-v1.mjs", "--capability", "schema:serviceStatusV1Schema", "--test", "tests/unit/graph-bootstrap-status-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-status-v1.json", "--evidence-id", "public-capability:schema:serviceStatusV1Schema"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@c01e7c0550b9d9150df26c20cebb10aaefdf648d#graph-bootstrap-status-v1"
+      },
+      "gateDefinitionDigest": "ad2b59698dac4fc90c516ed8da092ace5d169639a6822684318ed49400cc128d"
+    },
+    {
+      "gateDefinition": {
         "gateId": "lint",
         "checkId": "lint",
         "command": ["pnpm", "lint"],

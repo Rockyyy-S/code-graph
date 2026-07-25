@@ -10,6 +10,7 @@ import {
   SafeLocalLogger,
 } from "../../apps/graph-service/src/safe-log.js";
 import { createBoundIpcEndpoint } from "../../apps/graph-service/src/server.js";
+import { createInitialServiceState } from "../../apps/graph-service/src/service-state.js";
 import {
   CLI_SCHEMA_VERSION,
   GRAPH_SCHEMA_VERSION,
@@ -19,6 +20,18 @@ import {
 import { createWorkspacePaths } from "../../packages/service-client/src/endpoint.js";
 
 const roots: string[] = [];
+
+/** 创建不触发真实 SQLite 的共享控制面 runtime。 */
+function createTestRuntime(serviceInstanceId: string, statusEpoch: string) {
+  const state = createInitialServiceState({ serviceInstanceId, statusEpoch });
+  return {
+    close: async () => undefined,
+    getStatus: state.getStatus,
+    startJob: () => {
+      throw new Error("当前测试不启动索引 Job。");
+    },
+  };
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { force: true, recursive: true })));
@@ -130,6 +143,7 @@ describe("bound IPC endpoint cleanup", () => {
       socket = await openSocket(paths.endpoint);
 
       await endpoint.openHandshake({
+        runtime: createTestRuntime("instance-test", "epoch-test"),
         serviceInstanceId: "instance-test",
         sessionToken: "session-token-test",
         shutdown: async () => undefined,
@@ -167,6 +181,7 @@ describe("bound IPC endpoint cleanup", () => {
         logger,
       });
       await endpoint.openHandshake({
+        runtime: createTestRuntime("instance-shutdown-test", "epoch-shutdown-test"),
         serviceInstanceId: "instance-shutdown-test",
         sessionToken: "session-token-shutdown-test",
         shutdown,
@@ -219,6 +234,7 @@ describe("bound IPC endpoint cleanup", () => {
         logger,
       });
       await endpoint.openHandshake({
+        runtime: createTestRuntime("instance-shutdown-fatal", "epoch-shutdown-fatal"),
         serviceInstanceId: "instance-shutdown-fatal",
         sessionToken: "session-token-shutdown-fatal",
         shutdown,
@@ -269,6 +285,7 @@ describe("bound IPC endpoint cleanup", () => {
         shutdownAttemptTimeoutMs: 10,
       });
       await endpoint.openHandshake({
+        runtime: createTestRuntime("instance-shutdown-timeout", "epoch-shutdown-timeout"),
         serviceInstanceId: "instance-shutdown-timeout",
         sessionToken: "session-token-shutdown-timeout",
         shutdown,
@@ -320,6 +337,7 @@ describe("bound IPC endpoint cleanup", () => {
     let second: net.Socket | null = null;
     try {
       await endpoint.openHandshake({
+        runtime: createTestRuntime("instance-limit", "epoch-limit"),
         serviceInstanceId: "instance-limit",
         sessionToken: "session-token-limit",
         shutdown: async () => undefined,
@@ -358,6 +376,7 @@ describe("bound IPC endpoint cleanup", () => {
     let replacement: net.Socket | null = null;
     try {
       await endpoint.openHandshake({
+        runtime: createTestRuntime("instance-release", "epoch-release"),
         serviceInstanceId: "instance-release",
         sessionToken: "session-token-release",
         shutdown: async () => undefined,

@@ -10,7 +10,7 @@
 
 | Workspace | Owner 与允许依赖 | 禁止事项 |
 | --- | --- | --- |
-| `apps/graph-service` | 唯一组合根；拥有本机 IPC 服务、握手、空状态与实例资源 | TCP fallback、全局 daemon，或提前组合索引/存储能力 |
+| `apps/graph-service` | 唯一组合根；拥有本机 IPC、握手、共享索引 Job runtime、SQLite 生命周期与实例资源 | TCP fallback、全局 daemon，或把存储/扫描职责下放给客户端 |
 | `apps/cli` | 薄客户端；允许依赖 service-client、contracts | 直接访问 store/analyzer 或复制业务逻辑 |
 | `apps/extension` | VS Code 薄客户端；允许依赖 service-client、contracts | 直接访问 adapter，或提前注册未实现的产品能力 |
 | `apps/webview` | 渲染边界；只依赖 contracts | 直接连接服务、读取文件或持有业务计算 |
@@ -18,7 +18,7 @@
 | `packages/application` | 用例与稳定端口；只依赖 domain | adapter、VS Code、SQLite、Compiler API、传输 DTO |
 | `packages/contracts` | 共享 Schema/DTO 与 Ajv 运行时校验的独立边界 | 领域行为、适配器实现、渲染库内部格式 |
 | `packages/service-client` | 工作区身份、用户缓存发现、deadline 连接、握手与客户端生命周期 | 业务查询语义、图存储、adapter、graph-service 入口定位 |
-| `packages/adapters/store-sqlite` | 存储端口实现；依赖 application/domain | 承担组合根职责或被核心反向导入 |
+| `packages/adapters/store-sqlite` | `GraphStorePort` 的 SQLite 实现；依赖 application/domain | 承担组合根职责、泄露 SQL/rowid，或被核心反向导入 |
 | `packages/adapters/analyzer-typescript` | 分析端口实现；依赖 application/domain | 向核心泄露 Compiler API 类型 |
 | `packages/adapters/git-local` | Git 端口实现；依赖 application/domain | 承担业务用例或组合逻辑 |
 
@@ -39,7 +39,9 @@ allowlist。
 
 Story 1.2 的角色级第三方 allowlist 只允许 `packages/contracts` 使用 `ajv`，只允许
 `packages/service-client` 与 `apps/graph-service` 使用 `vscode-jsonrpc`；其他角色及其他
-Schema/RPC 库继续默认拒绝。版本由各 workspace manifest 与 `pnpm-lock.yaml` 锁定。
+Schema/RPC 库继续默认拒绝。Story 1.4 仅为 `packages/adapters/store-sqlite` 增加
+`better-sqlite3@12.11.1` 与 `@types/better-sqlite3@7.6.13`，并在 `allowBuilds` 中只允许该原生包
+执行受控安装脚本。版本由各 workspace manifest 与 `pnpm-lock.yaml` 锁定。
 
 TypeScript workspace 通过 project references 表达 manifest 依赖，质量 runner 按依赖拓扑
 执行 type/build，保证 clean checkout 不依赖历史 `dist` 产物。
@@ -58,7 +60,7 @@ TypeScript workspace 通过 project references 表达 manifest 依赖，质量 r
 | `pnpm planning-trace` | 校验需求、Architecture AD、Story、DAG、相对链接、ProductValidation 引用与 sprint 屏障 |
 | `pnpm architecture-required` | 从唯一 registry 执行全部适用 blocking gate，并生成 GateEvidenceV1 |
 
-`ci/quality-gates.v1.yaml` 是九项 blocking gate 的唯一机器清单，其中包含以上质量命令与
+`ci/quality-gates.v1.yaml` 是注册表中全部 blocking gate 的唯一机器清单，其中包含以上质量命令与
 `repository-contract-preflight`。候选仓库的 `child-gate-evidence` workflow 只调用按完整 commit
 SHA 固定的 `Rockyyy-S/code-graph-gate-controller` reusable workflow，产出 child evidence 和
 GitHub attestation；它不能发布权威 `architecture-required` umbrella check。
@@ -77,14 +79,34 @@ provider 漂移或 monitor 过期均 fail closed。Story 1.3 的真实运行与�
 connect-first 发现并按需启动。Windows 使用随机 Named Pipe；macOS/Linux 使用长度受控
 且权限为 `0600` 的 UDS。公开 API 不接受 host/port，也不存在 TCP fallback。
 
+indexing root 只通过私有启动配置传入服务进程，不进入 metadata、公开状态或线协议。生成数据与
+工作区内容分离：数据库固定为 workspace-key 用户缓存目录下的 `graph.sqlite`，不会写入 indexing
+root。服务在开放握手前完成 SQLite 打开/迁移、generation 0 ignore 快照与共享 runtime 屏障；关闭时
+先停止接受新 Job 并关闭 SQLite/WAL/SHM，再清理 endpoint、metadata、token 与实例锁。
+
 每条连接的首请求必须是 `initialize`，并依次通过 token、封闭请求形状、workspace-key 和协议
 主版本校验。握手前不会返回 `service/status`；失败返回脱敏 `ErrorV1` 后关闭连接。
-成功后仅声明 `service/status` 与 `service/shutdown`，详细合同见
+成功后声明 `job/start`、`service/status` 与 `service/shutdown`；同一服务实例的全部已认证连接共享
+同一权威 Job/状态对象。`job/start` 当前只接受 `kind=rebuild`，首次无提交时实际 Job kind 为
+`initial-index`，已有合法提交时为 `rebuild`。详细合同见
 `docs/protocol/service-control-v1.md`。
 
-当前空状态是合法产品状态：`availability=absent`、`freshness=null`、
-`completeness=empty`、`committed=null`。本 Story 不创建 SQLite、节点、边、Findings、
-graphRevision、索引 Job 或成功索引时间。
+工作区不存在 `.codegraphignore` 时，服务建立 `generation=0`、`validity=valid`、
+`contentHash=null` 的 `EffectiveIgnoreSnapshotV1`，其 `effectiveRules` 固定包含完整
+`BuiltinIgnoreV1`。若同名对象存在，本切片不解析或部分应用，控制面仍可用，但首次 Job 以
+`GRAPH_IGNORE_CONFIG_UNSUPPORTED` fail closed。scanner 只消费快照并在排除后生成 TS/JS 候选，
+不跟随符号链接，也不把绝对路径或源码正文写入公开合同。
+
+SQLite migration v1 只创建 `meta`、`workspace`、`nodes`、`edges`、`evidence`、
+`facts_ownership`、`jobs` 与 `schema_migrations` 八张用户表，并回验 WAL、foreign keys、
+`synchronous=NORMAL` 与 5000 ms busy timeout。首次 hierarchy 在单个同步事务中提交；失败回滚，
+未知更高 schema 安全拒绝并保留故障副本。业务实体使用 workspace 作用域确定性 `cg://` ID，路径
+统一为 Unicode NFC 的相对 POSIX 形式，SQLite rowid 与宿主绝对路径不进入公共合同。
+
+“从未构建”仍为 `availability=absent`、`freshness=null`、`completeness=empty`、
+`committed=null`。一次可信但无受支持文件的构建会产生 terminal succeeded Job 与持久化空摘要，
+状态为 available/fresh/empty；首次失败则保持 `committed=null`，并返回稳定错误 code、`logId` 与
+`suggestedAction`。本切片不创建 Findings、impact、export 表，也不提前伪造 graphRevision。
 
 ## VS Code extension 模板来源
 

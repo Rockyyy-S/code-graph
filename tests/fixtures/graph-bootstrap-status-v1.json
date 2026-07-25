@@ -1,0 +1,31 @@
+{
+  "availability": "available",
+  "committed": {
+    "builtinRulesVersion": "builtin-ignore-v1",
+    "edgeCount": 2,
+    "excludedPathCount": 3,
+    "generatedAt": "2026-07-25T00:00:00.000Z",
+    "indexedFileCount": 1,
+    "nodeCount": 3
+  },
+  "completeness": "complete",
+  "configRevision": 1,
+  "currentIndexJob": null,
+  "freshness": "fresh",
+  "lastIndexJob": {
+    "completedAt": "2026-07-25T00:00:00.000Z",
+    "id": "job-status-v1",
+    "kind": "initial-index",
+    "requestedAt": "2026-07-24T23:59:58.000Z",
+    "startedAt": "2026-07-24T23:59:59.000Z",
+    "state": "succeeded"
+  },
+  "lifecycle": "running",
+  "serviceInstanceId": "instance-status-v1",
+  "serviceStatusRevision": 4,
+  "statusEpoch": "epoch-status-v1",
+  "statusRevision": 4,
+  "telemetry": { "effective": "off", "pending": false, "requested": "off" },
+  "version": 1,
+  "viewConfigRevision": 1
+}

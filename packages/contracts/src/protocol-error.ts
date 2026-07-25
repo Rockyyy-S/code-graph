@@ -1,5 +1,11 @@
 /** Story 1.2 稳定错误码。 */
 export const SERVICE_ERROR_CODES = [
+  "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+  "GRAPH_SCAN_FAILED",
+  "GRAPH_SCAN_LIMIT_EXCEEDED",
+  "GRAPH_STORE_OPEN_FAILED",
+  "GRAPH_WRITE_FAILED",
+  "INDEX_JOB_ALREADY_RUNNING",
   "SERVICE_AUTH_FAILED",
   "SERVICE_ENDPOINT_START_FAILED",
   "SERVICE_INITIALIZE_REQUIRED",
@@ -18,9 +24,12 @@ export type ServiceErrorCode = (typeof SERVICE_ERROR_CODES)[number];
 /** 错误类别保持英文稳定值，供客户端自动处理。 */
 export type ErrorCategory =
   | "compatibility"
+  | "configuration"
+  | "indexing"
   | "lifecycle"
   | "protocol"
   | "security"
+  | "storage"
   | "transport";
 
 /** 可序列化、可操作且不包含秘密的协议错误。 */
@@ -45,6 +54,42 @@ interface ErrorDefinition {
 export const SERVICE_ERROR_REGISTRY: Readonly<
   Record<ServiceErrorCode, ErrorDefinition>
 > = {
+  GRAPH_IGNORE_CONFIG_UNSUPPORTED: {
+    category: "configuration",
+    message: "当前版本尚不能安全应用 .codegraphignore。",
+    retryable: false,
+    suggestedAction: "暂时移除 .codegraphignore，或升级到支持该配置的版本后重试。",
+  },
+  GRAPH_SCAN_FAILED: {
+    category: "indexing",
+    message: "工作区安全扫描失败。",
+    retryable: true,
+    suggestedAction: "检查工作区读取权限与安全限制后重试。",
+  },
+  GRAPH_SCAN_LIMIT_EXCEEDED: {
+    category: "indexing",
+    message: "工作区扫描超过安全预算。",
+    retryable: false,
+    suggestedAction: "缩小 indexing root 或排除生成目录后重试。",
+  },
+  GRAPH_STORE_OPEN_FAILED: {
+    category: "storage",
+    message: "本地图谱存储无法安全打开或迁移。",
+    retryable: true,
+    suggestedAction: "检查用户缓存目录空间与权限，并保留故障副本后重试。",
+  },
+  GRAPH_WRITE_FAILED: {
+    category: "storage",
+    message: "本地图谱事务写入失败。",
+    retryable: true,
+    suggestedAction: "检查磁盘空间、占用和权限后重试首次构建。",
+  },
+  INDEX_JOB_ALREADY_RUNNING: {
+    category: "lifecycle",
+    message: "当前 indexing root 已有索引 Job 正在执行。",
+    retryable: true,
+    suggestedAction: "等待当前 Job 结束后再次请求 rebuild。",
+  },
   SERVICE_AUTH_FAILED: {
     category: "security",
     message: "服务认证失败。",
@@ -79,7 +124,7 @@ export const SERVICE_ERROR_REGISTRY: Readonly<
     category: "protocol",
     message: "请求的方法未由当前服务实现。",
     retryable: false,
-    suggestedAction: "仅调用 initialize、service/status 或 service/shutdown。",
+    suggestedAction: "仅调用 initialize、job/start、service/status 或 service/shutdown。",
   },
   SERVICE_PROTOCOL_INCOMPATIBLE: {
     category: "compatibility",

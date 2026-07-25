@@ -18,12 +18,14 @@ import {
   SERVICE_METHODS,
   type CompatibleInitializeResult,
   type InitializeResult,
+  type JobStartResult,
   type ServiceCapability,
   type ServiceMetadataV1,
   type ServiceStatusV1,
   validateErrorV1,
   validateInitializeResultCompatible,
   validateJsonRpcV2Envelope,
+  validateJobStartResultCompatible,
   validateServiceStatusV1Compatible,
   validateShutdownResultCompatible,
 } from "@codegraph/contracts";
@@ -113,6 +115,28 @@ export class GraphServiceConnection {
         await this.close();
       }
       throw mapped;
+    }
+  }
+
+  /** 请求公共 rebuild 路径并返回已持久化的 queued Job。 */
+  public async startRebuild(): Promise<JobStartResult> {
+    this.#ensureOpen();
+    try {
+      this.#ensureCapability(SERVICE_METHODS.startJob);
+      const result = await sendRequestWithTimeout<unknown>(
+        this.#connection,
+        SERVICE_METHODS.startJob,
+        { kind: "rebuild" },
+        this.#requestTimeoutMs,
+      );
+      if (!validateJobStartResultCompatible(result)) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      return result;
+    } catch (error) {
+      throw this.#protocolState.violated
+        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+        : mapConnectionError(error);
     }
   }
 
@@ -260,7 +284,11 @@ async function connectToGraphServiceInternal(
       ),
     paths,
     pollIntervalMs,
-    start: (remainingMs, signal) => options.launcher.start(paths, remainingMs, signal),
+    start: (remainingMs, signal) => options.launcher.start(
+      { indexingRoot: identity.indexingRoot, paths },
+      remainingMs,
+      signal,
+    ),
     timeoutMs: remainingStartMs,
   });
 }

@@ -52,9 +52,19 @@ export type SpawnProcess = (
   },
 ) => SpawnedProcess;
 
+/** 只在受信任 launcher 与 graph-service 子进程之间传递的私有启动对象。 */
+interface GraphServiceLaunchConfig {
+  indexingRoot: string;
+  paths: WorkspacePaths;
+}
+
 /** service-client 使用的按需启动器接口。 */
 export interface GraphServiceLauncher {
-  start: (paths: WorkspacePaths, timeoutMs?: number, signal?: AbortSignal) => Promise<void>;
+  start: (
+    config: GraphServiceLaunchConfig,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ) => Promise<void>;
 }
 
 /** 启动监控的可测试依赖。 */
@@ -90,7 +100,8 @@ export function createGraphServiceProcessLauncher(
   );
   const pendingCleanups = new Map<string, Set<PendingChildCleanup>>();
   return {
-    start: async (paths, timeoutMs, signal) => {
+    start: async (config, timeoutMs, signal) => {
+      const { paths } = config;
       const boundedTimeoutMs = normalizeTimeout(timeoutMs ?? 5_000);
       const deadline = Date.now() + boundedTimeoutMs;
       const cleanupKey = paths.workspaceDirectory;
@@ -102,7 +113,7 @@ export function createGraphServiceProcessLauncher(
         detached: true,
         env: {
           ...process.env,
-          CODEGRAPH_SERVICE_CONFIG: JSON.stringify(paths),
+          CODEGRAPH_SERVICE_CONFIG: JSON.stringify(config),
         },
         shell: false,
         stdio: ["ignore", "ignore", "pipe", "ipc"],

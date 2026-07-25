@@ -33,9 +33,9 @@ async function createRuntime() {
     cacheRoot: root,
     platform: process.platform,
   });
-  const runtime = await startGraphService({ paths });
+  const runtime = await startGraphService({ indexingRoot: root, paths });
   runtimes.push(runtime);
-  return { paths, runtime };
+  return { indexingRoot: root, paths, runtime };
 }
 
 /** 创建合法 initialize 参数。 */
@@ -218,13 +218,13 @@ describe("graph-service JSON-RPC control plane", () => {
   });
 
   it("rejects a second endpoint owner without listening on a fallback", async () => {
-    const { paths } = await createRuntime();
+    const { indexingRoot, paths } = await createRuntime();
     const conflictingPaths = createWorkspacePaths(workspaceKey, {
       cacheRoot: path.dirname(path.dirname(path.dirname(paths.workspaceDirectory))),
       platform: process.platform,
     });
 
-    await expect(startGraphService({ paths: conflictingPaths })).rejects.toMatchObject({
+    await expect(startGraphService({ indexingRoot, paths: conflictingPaths })).rejects.toMatchObject({
       code: "SERVICE_INSTANCE_CONFLICT",
     });
     await expect(JsonRpcTestClient.connect(conflictingPaths.endpoint)).rejects.toBeDefined();

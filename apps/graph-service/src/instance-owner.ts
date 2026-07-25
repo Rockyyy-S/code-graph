@@ -19,6 +19,11 @@ import {
   type ServiceMetadataV1,
   validateServiceMetadataV1,
 } from "@codegraph/contracts";
+import { createInitialServiceState } from "./service-state.js";
+import {
+  GraphServiceRequestError,
+  type GraphServiceRuntime,
+} from "./index-job-runtime.js";
 
 const BOOTSTRAP_CLEANUP_RETRY_DELAYS_MS = [0, 10, 50] as const;
 
@@ -35,6 +40,7 @@ export interface ServiceInstancePaths {
 
 /** endpoint 完成 bind 后、开放握手前获得的实例上下文。 */
 export interface HandshakeOpenContext {
+  runtime: GraphServiceRuntime;
   serviceInstanceId: string;
   sessionToken: string;
   statusEpoch: string;
@@ -55,6 +61,12 @@ export interface BootstrapServiceInstanceOptions {
     endpointKind: ServiceEndpointKind,
   ) => Promise<BoundServiceEndpoint>;
   paths: ServiceInstancePaths;
+  initializeRuntime?: (
+    context: Pick<
+      HandshakeOpenContext,
+      "serviceInstanceId" | "statusEpoch" | "workspaceKey"
+    >,
+  ) => Promise<GraphServiceRuntime>;
   platform?: NodeJS.Platform;
   setMetadataPermissions?: (metadataPath: string, mode: number) => Promise<void>;
 }
@@ -105,7 +117,7 @@ export class GraphServiceFatalCleanupError extends Error {
 }
 
 /**
- * 以固定顺序启动唯一服务实例：所有权 → token → bind → 身份 → metadata → 握手。
+ * 以固定顺序启动唯一服务实例：所有权 → token → bind → metadata → runtime barrier → 握手。
  *
  * Windows 的 Node/libuv 公共 API 无法承诺 current-SID-only Pipe DACL；本实现明确依赖
  * 当前用户缓存 ACL、不可猜 endpoint、32-byte token 与 token-first 握手共同收敛风险，
@@ -118,6 +130,7 @@ export async function bootstrapServiceInstance(
   let lockHandle: FileHandle | null = null;
   let tokenHandle: FileHandle | null = null;
   let endpoint: BoundServiceEndpoint | null = null;
+  let runtime: GraphServiceRuntime | null = null;
   let tokenCreated = false;
   let metadataCreated = false;
 
@@ -164,6 +177,15 @@ export async function bootstrapServiceInstance(
       },
     );
 
+    runtime = options.initializeRuntime === undefined
+      ? createControlOnlyRuntime(serviceInstanceId, statusEpoch)
+      : await options.initializeRuntime({
+        serviceInstanceId,
+        statusEpoch,
+        workspaceKey: options.paths.workspaceKey,
+      });
+
+    let runtimeClosed = false;
     let endpointClosed = false;
     let metadataRemoved = false;
     let tokenRemoved = false;
@@ -173,6 +195,7 @@ export async function bootstrapServiceInstance(
     const closeOwnedResources = (): Promise<void> => {
       if (
         endpointClosed &&
+        runtimeClosed &&
         metadataRemoved &&
         tokenRemoved &&
         lockHandleClosed &&
@@ -185,6 +208,9 @@ export async function bootstrapServiceInstance(
       }
       closePromise = (async () => {
         const errors: unknown[] = [];
+        if (!runtimeClosed) {
+          runtimeClosed = await attemptCleanup(() => runtime?.close(), errors);
+        }
         if (!endpointClosed) {
           endpointClosed = await attemptCleanup(() => endpoint?.close(), errors);
         }
@@ -204,6 +230,7 @@ export async function bootstrapServiceInstance(
           lockHandleClosed = await attemptCleanup(() => lockHandle?.close(), errors);
         }
         if (
+          runtimeClosed &&
           endpointClosed &&
           metadataRemoved &&
           tokenRemoved &&
@@ -225,6 +252,7 @@ export async function bootstrapServiceInstance(
     };
 
     await endpoint.openHandshake({
+      runtime,
       serviceInstanceId,
       sessionToken,
       shutdown: closeOwnedResources,
@@ -235,6 +263,7 @@ export async function bootstrapServiceInstance(
     return {
       close: closeOwnedResources,
       metadata,
+      runtime,
       serviceInstanceId,
       sessionToken,
       shutdown: closeOwnedResources,
@@ -244,6 +273,7 @@ export async function bootstrapServiceInstance(
   } catch (error) {
     const cleanupErrors: unknown[] = [];
     let tokenHandleClean = tokenHandle === null;
+    let runtimeClean = runtime === null;
     let endpointClean = endpoint === null;
     let metadataClean = !metadataCreated;
     let tokenClean = !tokenCreated;
@@ -255,6 +285,9 @@ export async function bootstrapServiceInstance(
       }
       if (!tokenHandleClean) {
         tokenHandleClean = await attemptCleanup(() => tokenHandle?.close(), cleanupErrors);
+      }
+      if (!runtimeClean) {
+        runtimeClean = await attemptCleanup(() => runtime?.close(), cleanupErrors);
       }
       if (!endpointClean) {
         endpointClean = await attemptCleanup(() => endpoint?.close(), cleanupErrors);
@@ -276,6 +309,7 @@ export async function bootstrapServiceInstance(
       }
       if (
         !lockClean &&
+        runtimeClean &&
         endpointClean &&
         metadataClean &&
         tokenClean &&
@@ -288,6 +322,7 @@ export async function bootstrapServiceInstance(
       }
       if (
         tokenHandleClean &&
+        runtimeClean &&
         endpointClean &&
         metadataClean &&
         tokenClean &&
@@ -299,6 +334,7 @@ export async function bootstrapServiceInstance(
     }
     const cleanupComplete =
       tokenHandleClean &&
+      runtimeClean &&
       endpointClean &&
       metadataClean &&
       tokenClean &&
@@ -321,6 +357,23 @@ export async function bootstrapServiceInstance(
     }
     throw startupError("SERVICE_ENDPOINT_START_FAILED");
   }
+}
+
+/** 仅供未注入 runtime 的低层 bootstrap 测试使用；生产组合根始终注入真实实现。 */
+function createControlOnlyRuntime(
+  serviceInstanceId: string,
+  statusEpoch: string,
+): GraphServiceRuntime {
+  const state = createInitialServiceState({ serviceInstanceId, statusEpoch });
+  return {
+    close: async () => undefined,
+    getStatus: state.getStatus,
+    startJob: () => {
+      throw new GraphServiceRequestError(
+        createErrorV1("GRAPH_STORE_OPEN_FAILED", randomUUID()),
+      );
+    },
+  };
 }
 
 /** 未能同时确认旧实例失效时拒绝回收既有 metadata。 */

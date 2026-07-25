@@ -1,4 +1,3 @@
-/**
- * @file 在后续用户故事引入职责明确的领域能力前，此处有意不实现领域行为。
- */
-export {};
+/** @file 导出当前 hierarchy 切片的纯领域身份与事实模型。 */
+export * from "./graph-identity.js";
+export * from "./hierarchy.js";

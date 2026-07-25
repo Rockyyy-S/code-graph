@@ -30,6 +30,11 @@ const roots: string[] = [];
 const clients: GraphServiceConnection[] = [];
 let runtime: OwnedServiceInstance | null = null;
 
+interface TestLaunchConfig {
+  indexingRoot: string;
+  paths: ServiceInstancePaths;
+}
+
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()));
   await runtime?.close();
@@ -42,8 +47,8 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-client-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-client-cache-"));
     roots.push(indexingRoot, cacheRoot);
-    const start = vi.fn(async (paths: ServiceInstancePaths) => {
-      runtime = await startGraphService({ paths });
+    const start = vi.fn(async (config: TestLaunchConfig) => {
+      runtime = await startGraphService(config);
     });
     const common = {
       clientVersion: "0.0.0-test",
@@ -198,7 +203,9 @@ describe("shared service-client control API", () => {
             committed: null,
             completeness: "empty",
             configRevision: 1,
+            currentIndexJob: null,
             freshness: null,
+            lastIndexJob: null,
             lifecycle: "running",
             serviceInstanceId: "rpc-version-instance",
             serviceStatusRevision: 1,
@@ -515,7 +522,7 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-stale-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-stale-cache-"));
     roots.push(indexingRoot, cacheRoot);
-    const start = vi.fn(async (paths: ServiceInstancePaths) => {
+    const start = vi.fn(async ({ paths }: TestLaunchConfig) => {
       await mkdir(paths.workspaceDirectory, { recursive: true });
       await writeFile(paths.tokenPath, randomBytes(32), { flag: "wx", mode: 0o600 });
     });
@@ -537,8 +544,9 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-identity-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-identity-cache-"));
     roots.push(indexingRoot, cacheRoot);
-    const start = vi.fn(async (paths: ServiceInstancePaths) => {
-      runtime = await startGraphService({ paths });
+    const start = vi.fn(async (config: TestLaunchConfig) => {
+      const { paths } = config;
+      runtime = await startGraphService(config);
       const metadata = JSON.parse(
         await readFile(paths.metadataPath, "utf8"),
       ) as ServiceMetadataV1;
@@ -651,7 +659,9 @@ function createAbsentStatus(serviceInstanceId: string, statusEpoch: string) {
     committed: null,
     completeness: "empty" as const,
     configRevision: 1,
+    currentIndexJob: null,
     freshness: null,
+    lastIndexJob: null,
     lifecycle: "running" as const,
     serviceInstanceId,
     serviceStatusRevision: 1,

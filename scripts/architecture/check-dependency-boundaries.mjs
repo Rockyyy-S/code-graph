@@ -24,7 +24,7 @@ const externalDependencyAllowlistByRole = new Map([
   ["application", new Set()],
   ["contracts", new Set(["ajv"])],
   ["service-client", new Set(["vscode-jsonrpc"])],
-  ["adapter", new Set()],
+  ["adapter", new Set(["@types/better-sqlite3", "better-sqlite3"])],
   ["composition-root", new Set(["vscode-jsonrpc"])],
   ["client-app", new Set(["@types/vscode", "esbuild", "typescript"])],
   ["renderer-app", new Set()],
