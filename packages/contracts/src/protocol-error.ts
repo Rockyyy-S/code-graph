@@ -58,7 +58,7 @@ export const SERVICE_ERROR_REGISTRY: Readonly<
     category: "configuration",
     message: "当前版本尚不能安全应用 .codegraphignore。",
     retryable: false,
-    suggestedAction: "暂时移除 .codegraphignore，或升级到支持该配置的版本后重试。",
+    suggestedAction: "暂时移除 .codegraphignore 并重启服务，或升级到支持该配置的版本后重试。",
   },
   GRAPH_SCAN_FAILED: {
     category: "indexing",

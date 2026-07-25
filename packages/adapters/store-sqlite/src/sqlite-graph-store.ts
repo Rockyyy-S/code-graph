@@ -9,6 +9,7 @@ import type {
   StoredIndexSummary,
 } from "@codegraph/application";
 import {
+  assertBootstrapSchemaSupported,
   applyBootstrapMigration,
   BOOTSTRAP_TABLE_NAMES,
 } from "./migrations/001-bootstrap.js";
@@ -171,7 +172,7 @@ export class SqliteGraphStore implements GraphStorePort {
       SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id
       FROM jobs
       WHERE workspace_key = ? AND state IN ('succeeded', 'failed')
-      ORDER BY requested_at DESC, id DESC
+      ORDER BY rowid DESC
       LIMIT 1
     `).get(this.#workspaceKey) as JobRow | undefined;
     return {
@@ -240,6 +241,8 @@ export function openSqliteGraphStore(options: OpenSqliteGraphStoreOptions): Sqli
   let database: Database.Database | null = null;
   try {
     database = new Database(options.databasePath, { timeout: SQLITE_BUSY_TIMEOUT_MS });
+    /** 未知未来 Schema 必须在 WAL 等持久设置前只读拒绝。 */
+    assertBootstrapSchemaSupported(database);
     configurePragmas(database);
     applyBootstrapMigration(database);
     database.prepare(`

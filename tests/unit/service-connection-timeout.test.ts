@@ -12,10 +12,20 @@ import {
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
 } from "../../packages/contracts/src/index.js";
-import { GraphServiceConnection } from "../../packages/service-client/src/connection.js";
+import {
+  DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
+  DEFAULT_SERVICE_START_TIMEOUT_MS,
+  GraphServiceConnection,
+} from "../../packages/service-client/src/connection.js";
 import { createBoundedJsonRpcInput } from "../../packages/service-client/src/bounded-json-rpc-input.js";
+import { SQLITE_BUSY_TIMEOUT_MS } from "../../packages/adapters/store-sqlite/src/index.js";
 
 describe("GraphServiceConnection request deadlines", () => {
+  it("keeps default request and startup deadlines above the SQLite busy timeout", () => {
+    expect(DEFAULT_SERVICE_REQUEST_TIMEOUT_MS).toBeGreaterThan(SQLITE_BUSY_TIMEOUT_MS);
+    expect(DEFAULT_SERVICE_START_TIMEOUT_MS).toBeGreaterThan(SQLITE_BUSY_TIMEOUT_MS);
+  });
+
   it("times out status and closes a permanently pending connection", async () => {
     const dispose = vi.fn();
     const connection = {

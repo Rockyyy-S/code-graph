@@ -70,6 +70,7 @@ describe("trusted graph-service launcher", () => {
         child.emit("spawn");
         void mkdir(paths.workspaceDirectory, { recursive: true })
           .then(() => writeFile(paths.metadataPath, JSON.stringify({ pid: child.pid })))
+          .then(() => child.emit("message", { pid: child.pid, type: "codegraph/ready" }))
           .catch(() => undefined);
       });
       return child;
@@ -98,6 +99,29 @@ describe("trusted graph-service launcher", () => {
     );
     expect(options?.env?.CODEGRAPH_SERVICE_CONFIG).not.toMatch(/sessionToken/i);
     expect(child.unref).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps stderr and the cancellation channel until metadata and ready both arrive", async () => {
+    const child = createChild();
+    const paths = await createPaths();
+    const launcher = createGraphServiceProcessLauncher(
+      { args: ["trusted-entry.js"], command: "node" },
+      vi.fn<SpawnProcess>(() => {
+        queueMicrotask(() => child.emit("spawn"));
+        return child;
+      }),
+      { readPublishedPid: async () => child.pid },
+    );
+
+    const starting = launcher.start(createLaunchConfig(paths), 250);
+    await vi.waitFor(() => expect(child.unref).toHaveBeenCalledTimes(1));
+    expect(child.stderr.destroyed).toBe(false);
+    expect(child.disconnect).not.toHaveBeenCalled();
+
+    child.emit("message", { pid: child.pid, type: "codegraph/ready" });
+    await expect(starting).resolves.toBeUndefined();
+    expect(child.stderr.destroyed).toBe(true);
+    expect(child.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("maps an executable permission failure to stable ErrorV1", async () => {
@@ -238,6 +262,7 @@ describe("trusted graph-service launcher", () => {
         child.emit("spawn");
         if (child === secondChild) {
           publishedPid = child.pid ?? null;
+          child.emit("message", { pid: child.pid, type: "codegraph/ready" });
         }
       });
       return child;

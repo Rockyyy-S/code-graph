@@ -58,9 +58,6 @@ export async function createInitialIgnoreState(indexingRoot: string): Promise<In
   const digestInput = {
     builtinRulesVersion: "builtin-ignore-v1" as const,
     effectiveRules: BUILTIN_IGNORE_V1,
-    generation: 0 as const,
-    userRules: [] as const,
-    validity: "valid" as const,
     version: 1 as const,
   };
   const effectiveDigest = sha256CanonicalJson(digestInput);
@@ -70,7 +67,10 @@ export async function createInitialIgnoreState(indexingRoot: string): Promise<In
       ...digestInput,
       contentHash: null,
       effectiveDigest,
+      generation: 0,
       lastValidDigest: effectiveDigest,
+      userRules: [] as const,
+      validity: "valid",
     }),
   });
 }

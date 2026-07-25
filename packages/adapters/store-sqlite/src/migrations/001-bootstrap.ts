@@ -16,25 +16,36 @@ export const BOOTSTRAP_TABLE_NAMES = Object.freeze([
 ] as const);
 
 /**
+ * 在任何持久 PRAGMA 前只读检查现有 Schema，拒绝未来版本或未知表集合。
+ */
+export function assertBootstrapSchemaSupported(database: Database.Database): void {
+  const tableNames = readUserTableNames(database);
+  const hasMigrationTable = tableNames.includes("schema_migrations");
+  if (!hasMigrationTable) {
+    if (tableNames.length > 0) {
+      throw new Error("SQLite Schema 缺少受支持的 migration 元数据。");
+    }
+    return;
+  }
+  const row = database.prepare(`
+    SELECT MAX(version) AS version
+    FROM schema_migrations
+  `).get() as { version: number | null };
+  if (row.version !== BOOTSTRAP_SCHEMA_VERSION) {
+    throw new Error("SQLite Schema 版本未知或未完整迁移。");
+  }
+  assertExactTableSet(database);
+}
+
+/**
  * 在同步事务中应用幂等 migration v1，并拒绝未知更高版本或额外表。
  *
  * 所有 SQL 均封装在 SQLite 适配器内，调用方不能传入表名或语句。
  */
 export function applyBootstrapMigration(database: Database.Database): void {
-  const hasMigrationTable = database.prepare(`
-    SELECT 1 AS present
-    FROM sqlite_master
-    WHERE type = 'table' AND name = 'schema_migrations'
-  `).get() !== undefined;
+  assertBootstrapSchemaSupported(database);
+  const hasMigrationTable = readUserTableNames(database).includes("schema_migrations");
   if (hasMigrationTable) {
-    const row = database.prepare(`
-      SELECT MAX(version) AS version
-      FROM schema_migrations
-    `).get() as { version: number | null };
-    if (row.version !== BOOTSTRAP_SCHEMA_VERSION) {
-      throw new Error("SQLite Schema 版本未知或未完整迁移。");
-    }
-    assertExactTableSet(database);
     return;
   }
 
@@ -121,14 +132,19 @@ export function applyBootstrapMigration(database: Database.Database): void {
 
 /** 通过 sqlite_master 锁定当前切片精确八表，拒绝未来表被提前创建。 */
 function assertExactTableSet(database: Database.Database): void {
+  const actual = readUserTableNames(database);
+  if (JSON.stringify(actual) !== JSON.stringify(BOOTSTRAP_TABLE_NAMES)) {
+    throw new Error("SQLite 用户表集合不符合 Story 1.4 migration v1 合同。");
+  }
+}
+
+/** 只读返回排序后的用户表名，供预检与迁移后断言共享。 */
+function readUserTableNames(database: Database.Database): string[] {
   const rows = database.prepare(`
     SELECT name
     FROM sqlite_master
     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
     ORDER BY name
   `).all() as { name: string }[];
-  const actual = rows.map((row) => row.name);
-  if (JSON.stringify(actual) !== JSON.stringify(BOOTSTRAP_TABLE_NAMES)) {
-    throw new Error("SQLite 用户表集合不符合 Story 1.4 migration v1 合同。");
-  }
+  return rows.map((row) => row.name);
 }

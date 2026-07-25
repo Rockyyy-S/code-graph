@@ -18,7 +18,7 @@ const requireFromStorePackage = createRequire(
 interface RawSqliteDatabase {
   close: () => void;
   exec: (source: string) => RawSqliteDatabase;
-  pragma: (source: string) => unknown;
+  pragma: (source: string, options?: { simple?: boolean }) => unknown;
   prepare: (source: string) => { get: () => unknown };
 }
 
@@ -149,6 +149,7 @@ describe("sqlite graph store", () => {
       INSERT INTO schema_migrations(version, applied_at)
       VALUES (2, '2026-07-25T00:00:00.000Z');
     `);
+    expect(String(rawDatabase.pragma("journal_mode", { simple: true })).toLowerCase()).toBe("delete");
     rawDatabase.close();
 
     expect(() => openSqliteGraphStore({
@@ -161,11 +162,43 @@ describe("sqlite graph store", () => {
       .toHaveLength(1);
     const preservedDatabase = new RawSqlite(databasePath);
     try {
+      expect(String(preservedDatabase.pragma("journal_mode", { simple: true })).toLowerCase())
+        .toBe("delete");
       expect(preservedDatabase.prepare(
         "SELECT MAX(version) AS version FROM schema_migrations",
       ).get()).toEqual({ version: 2 });
     } finally {
       preservedDatabase.close();
+    }
+  });
+
+  it("restores the last terminal Job by insertion order when timestamps collide", async () => {
+    const store = openSqliteGraphStore({
+      databasePath: await createDatabasePath(),
+      workspaceKey: "b".repeat(64),
+    });
+    const requestedAt = "2026-07-25T00:00:00.000Z";
+    try {
+      store.createJob({ id: "z-old", kind: "initial-index", requestedAt });
+      store.markJobRunning("z-old", "2026-07-25T00:00:01.000Z");
+      store.markJobFailed(
+        "z-old",
+        "2026-07-25T00:00:02.000Z",
+        "GRAPH_SCAN_FAILED",
+        "log-old",
+      );
+      store.createJob({ id: "a-new", kind: "initial-index", requestedAt });
+      store.markJobRunning("a-new", "2026-07-25T00:00:01.000Z");
+      store.markJobFailed(
+        "a-new",
+        "2026-07-25T00:00:02.000Z",
+        "GRAPH_SCAN_FAILED",
+        "log-new",
+      );
+
+      expect(store.readBootstrapState().lastJob).toMatchObject({ id: "a-new" });
+    } finally {
+      store.close();
     }
   });
 

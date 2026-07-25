@@ -23,6 +23,24 @@ function createEnvironment(workspaceKey: string, endpoint: string) {
 }
 
 describe("graph-service process lifecycle", () => {
+  it("publishes ready only after the service startup barrier completes", async () => {
+    const messages: unknown[] = [];
+    const sendReady = vi.fn(async (message: unknown) => {
+      messages.push(message);
+    });
+    const runtime = { close: vi.fn(async () => undefined) } as unknown as OwnedServiceInstance;
+
+    await expect(runGraphServiceProcess(
+      createEnvironment("0".repeat(64), "\\\\.\\pipe\\codegraph-ready"),
+      {
+        sendReady,
+        signalTarget: new EventEmitter(),
+        startService: async () => runtime,
+      },
+    )).resolves.toBe(runtime);
+    expect(messages).toEqual([{ pid: process.pid, type: "codegraph/ready" }]);
+  });
+
   it("remembers a termination signal received before startup completes", async () => {
     const signals = new EventEmitter();
     const close = vi.fn(async () => undefined);

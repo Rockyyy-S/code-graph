@@ -91,7 +91,7 @@ export function validateInitializeRequest(value: unknown): value is InitializeRe
 
 /** 严格校验服务端生成的 canonical initialize 结果。 */
 export function validateInitializeResult(value: unknown): value is InitializeResult {
-  return initializeResultValidator(value);
+  return initializeResultValidator(value) && hasValidInitializeServiceStatus(value, false);
 }
 
 /**
@@ -102,7 +102,11 @@ export function validateInitializeResult(value: unknown): value is InitializeRes
 export function validateInitializeResultCompatible(
   value: unknown,
 ): value is CompatibleInitializeResult {
-  return initializeResultCompatibleValidator(value) && hasSortedCapabilities(value);
+  return (
+    initializeResultCompatibleValidator(value) &&
+    hasSortedCapabilities(value) &&
+    hasValidInitializeServiceStatus(value, true)
+  );
 }
 
 /** 严格校验无参数控制请求，拒绝所有未知字段。 */
@@ -175,14 +179,49 @@ export function validateJsonRpcV2Envelope(value: unknown): boolean {
 
 /** 严格校验权威 ServiceStatusV1 快照。 */
 export function validateServiceStatusV1(value: unknown): value is ServiceStatusV1 {
-  return serviceStatusValidator(value) && hasLegalServiceStatusCombination(value);
+  return (
+    serviceStatusValidator(value) &&
+    hasLegalServiceStatusCombination(value) &&
+    hasValidNestedJobError(value)
+  );
 }
 
 /** 兼容校验同一协议主版本的状态响应，忽略新增可选字段。 */
 export function validateServiceStatusV1Compatible(
   value: unknown,
 ): value is ServiceStatusV1 {
-  return serviceStatusCompatibleValidator(value) && hasLegalServiceStatusCombination(value);
+  return (
+    serviceStatusCompatibleValidator(value) &&
+    hasLegalServiceStatusCombination(value) &&
+    hasValidNestedJobError(value)
+  );
+}
+
+/** initialize 结果必须复用完整的嵌套 ServiceStatus 语义校验。 */
+function hasValidInitializeServiceStatus(value: unknown, compatible: boolean): boolean {
+  if (typeof value !== "object" || value === null || !("serviceStatus" in value)) {
+    return false;
+  }
+  return compatible
+    ? validateServiceStatusV1Compatible(value.serviceStatus)
+    : validateServiceStatusV1(value.serviceStatus);
+}
+
+/** 失败 Job 的 ErrorV1 不只满足形状，还必须与稳定注册表语义一致。 */
+function hasValidNestedJobError(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || !("lastIndexJob" in value)) {
+    return false;
+  }
+  const lastJob = value.lastIndexJob;
+  if (
+    typeof lastJob !== "object" ||
+    lastJob === null ||
+    !("state" in lastJob) ||
+    lastJob.state !== "failed"
+  ) {
+    return true;
+  }
+  return "error" in lastJob && validateErrorV1(lastJob.error);
 }
 
 /** 阻止 absent/available、空摘要与完整度之间出现互相矛盾的组合。 */

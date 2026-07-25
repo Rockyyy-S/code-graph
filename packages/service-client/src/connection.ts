@@ -40,6 +40,12 @@ import {
   type WorkspaceIdentityResult,
 } from "./workspace-identity.js";
 
+/** 默认 RPC 界限严格覆盖 SQLite 5 秒 busy timeout 与 IPC 传输余量。 */
+export const DEFAULT_SERVICE_REQUEST_TIMEOUT_MS = 10_000;
+
+/** 默认服务启动界限覆盖身份、发现、runtime/store 屏障与传输余量。 */
+export const DEFAULT_SERVICE_START_TIMEOUT_MS = 10_000;
+
 /** 宿主显式提供的 Workspace Trust 门禁。 */
 export interface WorkspaceTrustGate {
   isTrusted: boolean;
@@ -76,7 +82,7 @@ export class GraphServiceConnection {
     initializeResult: InitializeResult,
     identity: WorkspaceIdentityResult,
     metadata: ServiceMetadataV1,
-    requestTimeoutMs = 5_000,
+    requestTimeoutMs = DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
     protocolState: JsonRpcProtocolState = createJsonRpcProtocolState(),
   ) {
     this.#connection = connection;
@@ -219,7 +225,7 @@ export async function openServiceConnectionForTests(
   identity: WorkspaceIdentityResult,
   clientVersion: string,
   connectTimeoutMs = 1_000,
-  requestTimeoutMs = 5_000,
+  requestTimeoutMs = DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
 ): Promise<GraphServiceConnection> {
   return openServiceConnection(
     record,
@@ -243,11 +249,11 @@ async function connectToGraphServiceInternal(
     "connectTimeoutMs",
   );
   const requestTimeoutMs = normalizeTimeout(
-    options.requestTimeoutMs ?? 5_000,
+    options.requestTimeoutMs ?? DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
     "requestTimeoutMs",
   );
   const startTimeoutMs = normalizeTimeout(
-    options.startTimeoutMs ?? 5_000,
+    options.startTimeoutMs ?? DEFAULT_SERVICE_START_TIMEOUT_MS,
     "startTimeoutMs",
   );
   const pollIntervalMs = normalizeTimeout(
@@ -337,7 +343,7 @@ async function openServiceConnection(
   identity: WorkspaceIdentityResult,
   clientVersion: string,
   connectTimeoutMs = 1_000,
-  requestTimeoutMs = 5_000,
+  requestTimeoutMs = DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<GraphServiceConnection> {
   const socket = net.createConnection(record.metadata.endpoint);

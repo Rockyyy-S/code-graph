@@ -366,6 +366,7 @@ function createControlOnlyRuntime(
 ): GraphServiceRuntime {
   const state = createInitialServiceState({ serviceInstanceId, statusEpoch });
   return {
+    beginShutdown: () => undefined,
     close: async () => undefined,
     getStatus: state.getStatus,
     startJob: () => {

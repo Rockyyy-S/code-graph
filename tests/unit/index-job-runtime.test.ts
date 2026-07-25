@@ -83,14 +83,17 @@ describe("index job runtime", () => {
       workspaceKey: fixture.workspaceKey,
     });
     try {
-      runtime.startJob({ kind: "rebuild" });
-      await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob?.state).toBe("failed"));
+      expect(() => runtime.startJob({ kind: "rebuild" })).toThrow(
+        expect.objectContaining({ code: "GRAPH_IGNORE_CONFIG_UNSUPPORTED" }),
+      );
       expect(runtime.getStatus()).toMatchObject({
         availability: "absent",
         committed: null,
-        lastIndexJob: { error: { code: "GRAPH_IGNORE_CONFIG_UNSUPPORTED" } },
+        currentIndexJob: null,
+        lastIndexJob: null,
       });
       expect(store.readGraphCounts()).toEqual({ edgeCount: 0, nodeCount: 0 });
+      expect(store.readBootstrapState().lastJob).toBeNull();
     } finally {
       await runtime.close();
     }
@@ -131,5 +134,43 @@ describe("index job runtime", () => {
     } finally {
       await runtime.close();
     }
+  });
+
+  it("closes the Job gate synchronously and bounds waiting for a pending scan", async () => {
+    const fixture = await createFixture();
+    const store = openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const ignoreState = await createInitialIgnoreState(fixture.indexingRoot);
+    let resolveScan: ((result: { candidateFiles: readonly string[]; excludedPathCount: number }) => void)
+      | undefined;
+    const scan = vi.fn(async () => new Promise<{
+      candidateFiles: readonly string[];
+      excludedPathCount: number;
+    }>((resolve) => {
+      resolveScan = resolve;
+    }));
+    const runtime = createIndexJobRuntime({
+      closeTimeoutMs: 10,
+      ignoreState,
+      indexingRoot: fixture.indexingRoot,
+      scan,
+      serviceInstanceId: "instance-close-runtime",
+      statusEpoch: "epoch-close-runtime",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    runtime.startJob({ kind: "rebuild" });
+    await vi.waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
+    runtime.beginShutdown();
+    expect(() => runtime.startJob({ kind: "rebuild" })).toThrow(GraphServiceRequestError);
+    await expect(runtime.close()).rejects.toThrow(/超时/u);
+    expect(store.inspectPragmas().busyTimeoutMs).toBeGreaterThan(0);
+
+    resolveScan?.({ candidateFiles: [], excludedPathCount: 0 });
+    await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob?.state).toBe("succeeded"));
+    await expect(runtime.close()).resolves.toBeUndefined();
   });
 });

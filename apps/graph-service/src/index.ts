@@ -89,9 +89,10 @@ async function validateTrustedIndexingRoot(indexingRoot: string): Promise<string
     ) {
       throw new Error("indexing root 不是规范绝对路径。");
     }
-    const resolved = (await realpath(indexingRoot)).normalize("NFC");
+    /** 物理 root 不能做 Unicode 改写，否则 NFD 文件系统路径会被错误重定向。 */
+    const resolved = await realpath(indexingRoot);
     const status = await lstat(resolved);
-    if (!status.isDirectory() || status.isSymbolicLink() || resolved !== indexingRoot.normalize("NFC")) {
+    if (!status.isDirectory() || status.isSymbolicLink() || resolved !== indexingRoot) {
       throw new Error("indexing root 不是规范真实目录。");
     }
     return resolved;

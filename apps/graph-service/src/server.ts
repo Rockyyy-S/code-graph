@@ -327,6 +327,8 @@ function createConnectionSession(
       if (!validateServiceControlRequest(params)) {
         return invalidControlRequest();
       }
+      /** shutdown 一经接受便同步关闭共享 runtime 的新 Job 门禁。 */
+      context.runtime.beginShutdown();
       const result = { accepted: true } as const;
       if (!validateShutdownResult(result)) {
         return toResponseError(createErrorV1("SERVICE_INVALID_REQUEST", randomUUID()));

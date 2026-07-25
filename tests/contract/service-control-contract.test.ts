@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   CLI_SCHEMA_VERSION,
+  createErrorV1,
   GRAPH_SCHEMA_VERSION,
   PROTOCOL_VERSION,
   RULES_SCHEMA_VERSION,
@@ -101,6 +102,29 @@ describe("service control contract", () => {
     ).toBe(false);
   });
 
+  it("validates nested failed Job errors against the stable registry", () => {
+    const status = {
+      ...createAbsentStatus(),
+      lastIndexJob: {
+        completedAt: "2026-07-25T00:00:02.000Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-nested-error"),
+        id: "job-failed",
+        kind: "initial-index" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        startedAt: "2026-07-25T00:00:01.000Z",
+        state: "failed" as const,
+      },
+    };
+    expect(validateServiceStatusV1(status)).toBe(true);
+    expect(validateServiceStatusV1({
+      ...status,
+      lastIndexJob: {
+        ...status.lastIndexJob,
+        error: { ...status.lastIndexJob.error, category: "storage" },
+      },
+    })).toBe(false);
+  });
+
   it("uses strict canonical responses and compatible client parsing", () => {
     const result = {
       capabilities: SERVICE_CAPABILITIES,
@@ -121,6 +145,24 @@ describe("service control contract", () => {
         serviceStatus: { ...result.serviceStatus, futureNestedField: true },
       }),
     ).toBe(true);
+    expect(validateInitializeResultCompatible({
+      ...result,
+      serviceStatus: {
+        ...result.serviceStatus,
+        lastIndexJob: {
+          completedAt: "2026-07-25T00:00:02.000Z",
+          error: {
+            ...createErrorV1("GRAPH_SCAN_FAILED", "log-initialize-error"),
+            retryable: false,
+          },
+          id: "job-invalid-error",
+          kind: "initial-index",
+          requestedAt: "2026-07-25T00:00:00.000Z",
+          startedAt: "2026-07-25T00:00:01.000Z",
+          state: "failed",
+        },
+      },
+    })).toBe(false);
     expect(validateInitializeResultCompatible({ ...result, serviceVersion: undefined })).toBe(
       false,
     );

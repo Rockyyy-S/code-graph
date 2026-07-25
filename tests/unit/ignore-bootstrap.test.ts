@@ -61,9 +61,6 @@ describe("initial ignore barrier", () => {
       sha256CanonicalJson({
         builtinRulesVersion: "builtin-ignore-v1",
         effectiveRules: BUILTIN_IGNORE_V1,
-        generation: 0,
-        userRules: [],
-        validity: "valid",
         version: 1,
       }),
     );

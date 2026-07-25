@@ -15,6 +15,7 @@ import type { StartGraphServiceOptions } from "./index.js";
 const CONFIG_ENVIRONMENT_KEY = "CODEGRAPH_SERVICE_CONFIG";
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const PARENT_CANCEL_MESSAGE_TYPE = "codegraph/cancel-startup";
+const CHILD_READY_MESSAGE_TYPE = "codegraph/ready";
 const CLOSE_RETRY_DELAYS_MS = [0, 25, 100] as const;
 
 /** graph-service 进程启动与信号处理的可测试依赖。 */
@@ -25,6 +26,7 @@ export interface GraphServiceProcessDependencies {
   };
   forceTerminate?: (code: number) => void;
   setExitCode?: (code: number) => void;
+  sendReady?: (message: { pid: number; type: typeof CHILD_READY_MESSAGE_TYPE }) => Promise<void>;
   shutdownDeadlineMs?: number;
   signalTarget?: {
     off: (event: "SIGINT" | "SIGTERM", listener: () => void) => unknown;
@@ -65,6 +67,7 @@ export async function runGraphServiceProcess(
     dependencies.setExitCode ?? ((code: number): void => void (process.exitCode = code));
   const forceTerminate =
     dependencies.forceTerminate ?? ((code: number): void => process.exit(code));
+  const sendReady = dependencies.sendReady ?? sendProcessReady;
   const shutdownDeadlineMs = normalizeShutdownDeadline(
     dependencies.shutdownDeadlineMs ?? 1_000,
   );
@@ -150,15 +153,41 @@ export async function runGraphServiceProcess(
     runtime = await startService(config);
     if (shutdownRequested) {
       await closeRuntime();
+    } else {
+      await sendReady({ pid: process.pid, type: CHILD_READY_MESSAGE_TYPE });
+      if (shutdownRequested) {
+        await closeRuntime();
+      }
     }
     return runtime;
   } catch (error) {
+    if (runtime !== null && !shutdownRequested) {
+      shutdownRequested = true;
+      armHardShutdownTimeout();
+      await closeRuntime().catch(() => setExitCode(1));
+    }
     if (!shutdownRequested) {
       clearHardShutdownTimeout();
       removeLifecycleHandlers();
     }
     throw error;
   }
+}
+
+/** runtime、store 与握手屏障完成后，通过私有 IPC 向启动器确认 ready。 */
+async function sendProcessReady(
+  message: { pid: number; type: typeof CHILD_READY_MESSAGE_TYPE },
+): Promise<void> {
+  if (process.send === undefined) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    try {
+      process.send?.(message, (error) => error === null ? resolve() : reject(error));
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 /** 将进程终止宽限期收敛为可执行的正有限整数。 */

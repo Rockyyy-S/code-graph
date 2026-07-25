@@ -27,8 +27,12 @@ import {
 /** 显式 Job 预算；当前切片仍只允许一个实际 writer 并拒绝并发请求。 */
 export const MAX_PENDING_EXPLICIT_JOBS = 64;
 
+/** runtime 单次关闭等待当前扫描结束的默认硬界限。 */
+export const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 200;
+
 /** 服务端连接共享的 runtime 边界。 */
 export interface GraphServiceRuntime {
+  beginShutdown: () => void;
   close: () => Promise<void>;
   getStatus: () => ServiceStatusV1;
   startJob: (request: JobStartRequest) => JobStartResult;
@@ -36,6 +40,7 @@ export interface GraphServiceRuntime {
 
 /** runtime 初始化参数。 */
 export interface CreateIndexJobRuntimeOptions {
+  closeTimeoutMs?: number;
   createJobId?: () => string;
   ignoreState: InitialIgnoreState;
   indexingRoot: string;
@@ -94,8 +99,18 @@ export function createIndexJobRuntime(
   const now = options.now ?? (() => new Date().toISOString());
   const scan = options.scan ?? scanWorkspace;
   const schedule = options.schedule ?? ((operation: () => void) => setImmediate(operation));
+  const closeTimeoutMs = normalizeCloseTimeout(
+    options.closeTimeoutMs ?? DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS,
+  );
   let closing = false;
   let currentRun: Promise<void> | null = null;
+  let closePromise: Promise<void> | null = null;
+  let storeClosed = false;
+
+  /** 在返回 shutdown accepted 前同步关闭 Job 接收门禁。 */
+  const beginShutdown = (): void => {
+    closing = true;
+  };
 
   /** 执行已持久化的 queued Job，并保证任何失败都不发布未提交 counts。 */
   const runJob = async (jobId: string): Promise<void> => {
@@ -104,9 +119,7 @@ export function createIndexJobRuntime(
       state.publishRunningJob(jobId, startedAt);
       options.store.markJobRunning(jobId, startedAt);
       if (options.ignoreState.kind !== "ready") {
-        throw new GraphServiceRequestError(
-          createErrorV1("GRAPH_IGNORE_CONFIG_UNSUPPORTED", randomUUID()),
-        );
+        throw new Error("无有效 ignore snapshot 的 Job 不应进入运行阶段。");
       }
       const scanResult = await scan({
         ignoreSnapshot: options.ignoreState.snapshot,
@@ -142,16 +155,37 @@ export function createIndexJobRuntime(
   };
 
   return {
-    close: async () => {
-      closing = true;
-      await currentRun;
-      options.store.close();
+    beginShutdown,
+    close: () => {
+      beginShutdown();
+      if (storeClosed) {
+        return Promise.resolve();
+      }
+      if (closePromise !== null) {
+        return closePromise;
+      }
+      const activeRun = currentRun;
+      closePromise = (async () => {
+        if (activeRun !== null) {
+          await waitForRunWithinLimit(activeRun, closeTimeoutMs);
+        }
+        options.store.close();
+        storeClosed = true;
+      })().finally(() => {
+        closePromise = null;
+      });
+      return closePromise;
     },
     getStatus: state.getStatus,
     startJob: (_request) => {
       if (closing || state.getStatus().currentIndexJob !== null || currentRun !== null) {
         throw new GraphServiceRequestError(
           createErrorV1("INDEX_JOB_ALREADY_RUNNING", randomUUID()),
+        );
+      }
+      if (options.ignoreState.kind !== "ready") {
+        throw new GraphServiceRequestError(
+          createErrorV1("GRAPH_IGNORE_CONFIG_UNSUPPORTED", randomUUID()),
         );
       }
       const requestedAt = now();
@@ -176,6 +210,31 @@ export function createIndexJobRuntime(
       return { accepted: true, job };
     },
   };
+}
+
+/** 有界等待当前扫描，超时时保留仍可能被 Job 使用的 store 供后续重试关闭。 */
+async function waitForRunWithinLimit(run: Promise<void>, timeoutMs: number): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      run,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("等待当前索引 Job 结束超时。")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+/** runtime 关闭界限必须是 Node 定时器可表达的正整数。 */
+function normalizeCloseTimeout(timeoutMs: number): number {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
+    throw new RangeError("runtime close timeout 必须位于安全定时器范围内。");
+  }
+  return Math.max(1, Math.floor(timeoutMs));
 }
 
 /** 将持久化 terminal Job 恢复为公共状态，不接受不完整或未知错误码。 */

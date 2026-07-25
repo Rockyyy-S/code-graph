@@ -1,7 +1,7 @@
 import type { Dirent, Stats } from "node:fs";
 import {
   lstat as nativeLstat,
-  readdir as nativeReaddir,
+  opendir as nativeOpendir,
   realpath as nativeRealpath,
 } from "node:fs/promises";
 import path from "node:path";
@@ -16,6 +16,9 @@ import {
 
 /** 单次可信扫描允许纳入的最大源码文件数。 */
 export const MAX_CANDIDATE_SOURCE_FILES = 20_000;
+
+/** 单次可信扫描允许观察的最大目录项总数。 */
+export const MAX_SCANNED_ENTRIES = 100_000;
 
 /** 扫描失败使用的稳定内部错误，runtime 会映射为 ErrorV1。 */
 export class WorkspaceScanError extends Error {
@@ -46,7 +49,12 @@ export interface ScanWorkspaceOptions {
   indexingRoot: string;
   lstat?: (input: string) => Promise<Pick<Stats, "isDirectory" | "isFile" | "isSymbolicLink">>;
   maxCandidateFiles?: number;
-  readDirectory?: (input: string) => Promise<readonly ScannerDirectoryEntry[]>;
+  maxScannedEntries?: number;
+  platform?: NodeJS.Platform;
+  readDirectory?: (
+    input: string,
+    remainingEntryBudget: number,
+  ) => Promise<readonly ScannerDirectoryEntry[]>;
   realpath?: (input: string) => Promise<string>;
 }
 
@@ -65,31 +73,67 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
   const resolveRealpath = options.realpath ?? nativeRealpath;
   const readDirectory = options.readDirectory ?? defaultReadDirectory;
   const readStatus = options.lstat ?? nativeLstat;
+  const platform = options.platform ?? process.platform;
   const maxCandidateFiles = normalizeLimit(
     options.maxCandidateFiles ?? MAX_CANDIDATE_SOURCE_FILES,
+    MAX_CANDIDATE_SOURCE_FILES,
+    "候选文件预算",
+  );
+  const maxScannedEntries = normalizeLimit(
+    options.maxScannedEntries ?? MAX_SCANNED_ENTRIES,
+    MAX_SCANNED_ENTRIES,
+    "扫描目录项预算",
   );
 
   try {
-    const rootRealpath = await resolveRealpath(options.indexingRoot);
-    const rootStatus = await readStatus(rootRealpath);
+    const trustedRootRealpath = options.indexingRoot;
+    await assertTrustedRootUnchanged(trustedRootRealpath, resolveRealpath);
+    const rootStatus = await readStatus(trustedRootRealpath);
     if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) {
       throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "indexing root 不是规范真实目录。");
     }
 
     const candidateFiles: string[] = [];
+    const canonicalPaths = new Set<string>();
     let excludedPathCount = 0;
-    const pendingDirectories = [""];
+    let scannedEntryCount = 0;
+    const pendingDirectories = [{
+      absolutePath: trustedRootRealpath,
+      logicalPath: "",
+    }];
     while (pendingDirectories.length > 0) {
-      const directoryPath = pendingDirectories.pop()!;
-      const absoluteDirectory = directoryPath.length === 0
-        ? rootRealpath
-        : path.join(rootRealpath, ...directoryPath.split("/"));
-      const entries = [...await readDirectory(absoluteDirectory)]
+      const directory = pendingDirectories.pop()!;
+      await assertRealpathContained(
+        trustedRootRealpath,
+        directory.absolutePath,
+        resolveRealpath,
+        directory.logicalPath.length === 0,
+      );
+      const entries = [...await readDirectory(
+        directory.absolutePath,
+        maxScannedEntries - scannedEntryCount,
+      )]
         .sort((left, right) => left.name.localeCompare(right.name));
       for (const entry of entries) {
-        const relativePath = normalizeRelativeGraphPath(
-          directoryPath.length === 0 ? entry.name : `${directoryPath}/${entry.name}`,
+        scannedEntryCount += 1;
+        if (scannedEntryCount > maxScannedEntries) {
+          throw new WorkspaceScanError(
+            "GRAPH_SCAN_LIMIT_EXCEEDED",
+            "工作区目录项总数超过安全预算。",
+          );
+        }
+        const relativePath = createLogicalRelativePath(
+          directory.logicalPath,
+          entry.name,
+          platform,
         );
+        if (canonicalPaths.has(relativePath)) {
+          throw new WorkspaceScanError(
+            "GRAPH_SCAN_FAILED",
+            "工作区包含规范化后冲突的路径。",
+          );
+        }
+        canonicalPaths.add(relativePath);
         if (isBuiltinIgnoredPath(relativePath, options.ignoreSnapshot)) {
           excludedPathCount += 1;
           continue;
@@ -97,14 +141,15 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
         if (entry.isSymbolicLink()) {
           continue;
         }
-        const absolutePath = path.join(rootRealpath, ...relativePath.split("/"));
+        /** 文件系统访问始终使用 Dirent 的原始名称，公共图谱路径只用于身份。 */
+        const absolutePath = path.join(directory.absolutePath, entry.name);
         if (entry.isDirectory()) {
           const status = await readStatus(absolutePath);
           if (!status.isDirectory() || status.isSymbolicLink()) {
             continue;
           }
-          await assertRealpathContained(rootRealpath, absolutePath, resolveRealpath);
-          pendingDirectories.push(relativePath);
+          await assertRealpathContained(trustedRootRealpath, absolutePath, resolveRealpath);
+          pendingDirectories.push({ absolutePath, logicalPath: relativePath });
           continue;
         }
         if (!entry.isFile() || !isSupportedSourceFile(relativePath)) {
@@ -120,10 +165,11 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
         if (!status.isFile() || status.isSymbolicLink()) {
           continue;
         }
-        await assertRealpathContained(rootRealpath, absolutePath, resolveRealpath);
+        await assertRealpathContained(trustedRootRealpath, absolutePath, resolveRealpath);
         candidateFiles.push(relativePath);
       }
     }
+    await assertTrustedRootUnchanged(trustedRootRealpath, resolveRealpath);
     return Object.freeze({
       candidateFiles: Object.freeze(candidateFiles.sort((left, right) => left.localeCompare(right))),
       excludedPathCount,
@@ -137,8 +183,22 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
 }
 
 /** 默认目录读取只返回 Dirent 元数据，不读取源码内容。 */
-async function defaultReadDirectory(input: string): Promise<readonly Dirent[]> {
-  return nativeReaddir(input, { withFileTypes: true });
+async function defaultReadDirectory(
+  input: string,
+  remainingEntryBudget: number,
+): Promise<readonly Dirent[]> {
+  const entries: Dirent[] = [];
+  const directory = await nativeOpendir(input);
+  for await (const entry of directory) {
+    if (entries.length >= remainingEntryBudget) {
+      throw new WorkspaceScanError(
+        "GRAPH_SCAN_LIMIT_EXCEEDED",
+        "单目录读取超过剩余安全预算。",
+      );
+    }
+    entries.push(entry);
+  }
+  return entries;
 }
 
 /** 使用 path.relative 语义确认真实路径仍位于同一 indexing root。 */
@@ -146,18 +206,50 @@ async function assertRealpathContained(
   rootRealpath: string,
   candidatePath: string,
   resolveRealpath: (input: string) => Promise<string>,
+  requireRootIdentity = false,
 ): Promise<void> {
   const candidateRealpath = await resolveRealpath(candidatePath);
+  if (requireRootIdentity && candidateRealpath !== rootRealpath) {
+    throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "indexing root 已在启动后被替换。");
+  }
   const relative = path.relative(rootRealpath, candidateRealpath);
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "候选真实路径逃逸 indexing root。");
   }
 }
 
-/** 将测试注入或生产默认的文件数预算收敛为正整数。 */
-function normalizeLimit(value: number): number {
-  if (!Number.isInteger(value) || value <= 0 || value > MAX_CANDIDATE_SOURCE_FILES) {
-    throw new RangeError("候选文件预算必须位于安全上限内。");
+/** 每次扫描开始和结束都确认启动时受信任的物理 root 未被替换。 */
+async function assertTrustedRootUnchanged(
+  trustedRootRealpath: string,
+  resolveRealpath: (input: string) => Promise<string>,
+): Promise<void> {
+  const currentRealpath = await resolveRealpath(trustedRootRealpath);
+  if (currentRealpath !== trustedRootRealpath) {
+    throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "indexing root 已在启动后被替换。");
+  }
+}
+
+/** 从原始目录项生成 NFC/POSIX 公共路径，并拒绝 POSIX 反斜杠名称歧义。 */
+function createLogicalRelativePath(
+  directoryPath: string,
+  entryName: string,
+  platform: NodeJS.Platform,
+): string {
+  if (platform !== "win32" && entryName.includes("\\")) {
+    throw new WorkspaceScanError(
+      "GRAPH_SCAN_FAILED",
+      "POSIX 文件名包含无法安全映射的反斜杠。",
+    );
+  }
+  return normalizeRelativeGraphPath(
+    directoryPath.length === 0 ? entryName : `${directoryPath}/${entryName}`,
+  );
+}
+
+/** 将测试注入或生产默认预算收敛为正整数。 */
+function normalizeLimit(value: number, maximum: number, label: string): number {
+  if (!Number.isInteger(value) || value <= 0 || value > maximum) {
+    throw new RangeError(`${label}必须位于安全上限内。`);
   }
   return value;
 }

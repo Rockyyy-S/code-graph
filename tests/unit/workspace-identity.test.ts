@@ -53,6 +53,22 @@ describe("workspace identity", () => {
       uri: "file:///C:/Work/My%20Project",
       version: 1,
     });
+    expect(result.indexingRoot).toBe("c:\\Work\\My Project");
+  });
+
+  it("preserves the physical Unicode form while normalizing only identity input", async () => {
+    const physicalRoot = "/workspace/Cafe\u0301";
+    const result = await deriveWorkspaceIdentity(physicalRoot, {
+      platform: "linux",
+      realpath: async () => physicalRoot,
+    });
+
+    expect(result.indexingRoot).toBe(physicalRoot);
+    expect(result.identity).toEqual({
+      kind: "local",
+      uri: "file:///workspace/Caf%C3%A9",
+      version: 1,
+    });
   });
 
   it("normalizes a Windows UNC root as a file URI with an authority", async () => {

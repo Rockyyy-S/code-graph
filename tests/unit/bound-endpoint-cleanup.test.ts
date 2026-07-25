@@ -25,6 +25,7 @@ const roots: string[] = [];
 function createTestRuntime(serviceInstanceId: string, statusEpoch: string) {
   const state = createInitialServiceState({ serviceInstanceId, statusEpoch });
   return {
+    beginShutdown: vi.fn(),
     close: async () => undefined,
     getStatus: state.getStatus,
     startJob: () => {
@@ -174,6 +175,7 @@ describe("bound IPC endpoint cleanup", () => {
       .fn<() => Promise<void>>()
       .mockRejectedValueOnce(new Error("transient cleanup failure"))
       .mockImplementation(async () => endpoint?.close());
+    const runtime = createTestRuntime("instance-shutdown-test", "epoch-shutdown-test");
     try {
       endpoint = await createBoundIpcEndpoint({
         endpoint: paths.endpoint,
@@ -181,7 +183,7 @@ describe("bound IPC endpoint cleanup", () => {
         logger,
       });
       await endpoint.openHandshake({
-        runtime: createTestRuntime("instance-shutdown-test", "epoch-shutdown-test"),
+        runtime,
         serviceInstanceId: "instance-shutdown-test",
         sessionToken: "session-token-shutdown-test",
         shutdown,
@@ -204,6 +206,7 @@ describe("bound IPC endpoint cleanup", () => {
       await expect(sendJsonRpcRequest(socket, 2, "service/shutdown", {})).resolves.toEqual({
         accepted: true,
       });
+      expect(runtime.beginShutdown).toHaveBeenCalledTimes(1);
       await vi.waitFor(() => expect(shutdown).toHaveBeenCalledTimes(2));
     } finally {
       socket?.destroy();

@@ -178,15 +178,14 @@ describe("real graph-service process", () => {
       );
       clients.push(client);
 
-      await client.startRebuild();
-      const status = await waitForTerminalStatus(client);
-      expect(status).toMatchObject({
+      await expect(client.startRebuild()).rejects.toMatchObject({
+        code: "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+      });
+      await expect(client.status()).resolves.toMatchObject({
         availability: "absent",
         committed: null,
-        lastIndexJob: {
-          error: { code: "GRAPH_IGNORE_CONFIG_UNSUPPORTED" },
-          state: "failed",
-        },
+        currentIndexJob: null,
+        lastIndexJob: null,
       });
       const workspacePaths = createWorkspacePaths(client.identity.workspaceKey, {
         cacheRoot,

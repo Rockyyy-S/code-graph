@@ -1,11 +1,20 @@
 # Story 1.4 Provider 与门禁证据
 
-> 当前结论：Story 1.4 的 8 个变化公共能力已完成一能力一 blocking gate、本地专属
-> verification、repository preflight、基线差异验证和外部可信 provider 闭环。候选
-> `754cc52177ae3ee42dff7a2a545b6faf7ab503d2` 的 Hosted child evidence、GitHub attestation、
-> Controller App `architecture-required=success`、fresh drift monitor 与无 bypass ruleset 均已通过。
+> 当前结论：Story 1.4 的最终候选必须以 PR #8 上当前不可变 HEAD 的外部 GitHub Checks
+> 为权威；`architecture-required`、Hosted child evidence、attestation、Controller App、fresh
+> drift monitor 与无 bypass ruleset 必须绑定同一 SHA。为避免“写回运行 ID → 产生新 SHA →
+> 证据再次失效”的循环，最终运行 ID 与 artifact ID 只保存在外部检查中，不回写本提交。
 
-## 候选与可信 Registry
+## 最终 HEAD 闭环合同
+
+- 最终候选 SHA：以包含本文档的冻结 Git commit 及 PR #8 当前 HEAD 为准。
+- 本地前置：22/22 blocking gate、公共能力差异、repository preflight 与完整测试全部通过。
+- 外部完成条件：同一 SHA 的 Provider child evidence、attestation、Controller App
+  `architecture-required=success`、fresh monitor 与 active/strict/no-bypass ruleset 全部成功。
+- 证据定位：从 PR #8 当前 HEAD 的 required check 进入，不依赖仓库内缓存的 run ID。
+- 失败处理：任一外部条件失败都必须修复并冻结新 SHA，旧 SHA 的成功证据不得复用。
+
+## 历史候选与可信 Registry（已被最终 HEAD 取代）
 
 - 比较基线：`cb60d0039507da4c1629cd478e0bd43f287eb663`
 - 候选 SHA：`754cc52177ae3ee42dff7a2a545b6faf7ab503d2`
@@ -36,7 +45,7 @@
 | `schema:serviceStatusV1CompatibleSchema` | `graph-bootstrap-status-compatible-v1` | `graph-bootstrap-status-compatible-v1` | `d355ac69c6e628db69c5e6367d40d157bc1e8c26a0d66ecf0403974945d47858` | pass |
 | `schema:serviceStatusV1Schema` | `graph-bootstrap-status-v1` | `graph-bootstrap-status-v1` | `581e789825bb14d45a836bd5e94c66fd0a64089f357053149ff333a91f89da51` | pass |
 
-## Hosted artifact、attestation 与 Controller 结论
+## 历史 Hosted artifact、attestation 与 Controller 结论
 
 - child workflow：`child-gate-evidence`
 - run / attempt：`30152595619` / `2`
@@ -59,7 +68,7 @@
 - Controller 结果：`status=accepted`、`trustedSequence=18`、`failedGateIds=[]`、
   `invalidGateIds=[]`、`missingEvidenceGateIds=[]`
 
-## Drift monitor 与 ruleset
+## 历史 Drift monitor 与 ruleset
 
 - fresh monitor run：`30152715265`
 - monitor head：`bedd8e6a83b3ba263d70ee47f53c59f7389fac2f`
@@ -78,8 +87,8 @@
 - base/head 公共能力差异精确为上述 8 项；`violations=[]`
 - 8 个专属 verification entry 全部通过
 - repository contract preflight 通过
-- `pnpm unit`：45 文件 / 259 用例通过
-- `pnpm contract`：21 文件 / 173 用例通过
+- `pnpm unit`：45 文件 / 269 用例通过
+- `pnpm contract`：21 文件 / 174 用例通过
 - 本地 `architecture-required`：22/22 通过
 - SQLite：精确八表、WAL、foreign keys、NORMAL、5000 ms busy timeout、迁移幂等、未知高版本拒绝、
   故障副本、事务回滚与真实 `SQLITE_BUSY` 竞争通过
