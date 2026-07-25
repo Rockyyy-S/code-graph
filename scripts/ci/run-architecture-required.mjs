@@ -8,6 +8,7 @@ import {
 } from "./create-gate-evidence.mjs";
 import { loadQualityGateRegistry } from "./load-quality-gates.mjs";
 import { runProcessWithDeadline } from "./run-process-with-deadline.mjs";
+import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const loadedRegistry = await loadQualityGateRegistry(repositoryRoot);
@@ -182,6 +183,7 @@ export async function executeRegistryGate(_gateId, registryCommand, options = {}
     killGraceMs: options.killGraceMs,
     outputLimitBytes,
     timeoutMs: options.timeoutMs ?? defaultGateTimeoutMs,
+    windowsVerbatimArguments: resolved.windowsVerbatimArguments === true,
   });
 }
 
@@ -190,11 +192,8 @@ function resolveLocalCommand(executable, args) {
   if (executable === "node") {
     return { args, executable: process.execPath };
   }
-  if (executable === "pnpm" && process.env.npm_execpath) {
-    return {
-      args: [process.env.npm_execpath, ...args],
-      executable: process.execPath,
-    };
+  if (executable === "pnpm") {
+    return createPnpmInvocation(process.env.npm_execpath, args);
   }
   return { args, executable };
 }

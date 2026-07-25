@@ -141,7 +141,9 @@ function isNoOpCommand(command) {
     return true;
   }
   if (executable === "node") {
-    return command.slice(1).some((argument) => ["-e", "--eval", "-p", "--print"].includes(argument));
+    return command.slice(1).some((argument) =>
+      /^(?:-e|-p).*/u.test(argument) || /^--(?:eval|print)(?:=|$)/u.test(argument)
+    );
   }
   return false;
 }

@@ -156,9 +156,9 @@ rules:
 
 ### 5.7 产品验证与发布适用性合同
 
-- `ProductValidationPlanV1` 是 SM-1、SM-6、SM-7、SM-8 与 UJ-5 价值门禁的唯一任务、fixture、计时、ground truth、样本、剔除、评分和阈值来源。它至少固定 planId、planVersion、candidateRef 绑定规则、fixture/task manifest 与 digest、每个任务的 start/stop 事件和 timeout、groundTruthRef、acceptableAliases、requiredEntities、criticalDistractors、参与者资格、最小样本、仓库/团队覆盖、预声明剔除规则、评分工具、阈值、聚合规则、证据/结果 schema、owner 和复测条件。
+- ProductValidationPlanV1 是 SM-1、SM-6、SM-7、SM-8 与 UJ-5 价值门禁的唯一任务、fixture、计时、ground truth、样本、剔除、评分和阈值来源。它至少固定 planId、planVersion、candidateRef 绑定规则、fixture/task manifest 与 digest、每个任务的 start/stop 事件和 timeout、groundTruthRef、acceptableAliases、requiredEntities、criticalDistractors、参与者资格、最小样本、仓库/团队覆盖、预声明剔除规则、评分工具、阈值、聚合规则、证据/结果 schema、owner 和复测条件。
 - `CandidateRefV1` 是封闭联合：source 候选绑定 productVersion、完整 source commit OID 与 lockfile digest；release-set 候选绑定 AD-29 的 releaseSetId。`gatePhase=release` 只接受 release-set，candidateRefDigest 使用 RFC 8785 JCS UTF-8 SHA-256。
-- `ReadinessGatePolicyV1` 是仓库版本化的 release-slice/phase 适用性基线；`ReadinessGateManifestV1` 由 policy、`ci/quality-gates.v1.yaml` gate registry 和 CandidateRefV1 确定性编译，是候选适用 gate 的唯一清单。manifest 必须逐项展开 requirementRefs，并固定 releaseSlice、gatePhase、gateId、blocking、policyDigest、planRef、command、gateDefinitionDigest、evidenceRefs、owner、manifestDigest 与 candidateRef；不得在候选中重定义 gate。
+- ReadinessGatePolicyV1 是仓库版本化的 release-slice/phase 适用性基线；ReadinessGateManifestV1 由 policy、`ci/quality-gates.v1.yaml` gate registry 和 CandidateRefV1 确定性编译，是候选适用 gate 的唯一清单。manifest 必须逐项展开 requirementRefs，并固定 releaseSlice、gatePhase、gateId、blocking、policyDigest、planRef、command、gateDefinitionDigest、evidenceRefs、owner、manifestDigest 与 candidateRef；不得在候选中重定义 gate。
 - `ProductValidationEvidenceV1` 与 `ProductValidationResultV1` 是唯一证据和判定格式。Evidence 必须绑定 planRef、policyDigest、manifestDigest、candidateRefDigest、taskDigest、fixtureDigest 与 evidenceDigest；Result 必须绑定同一引用链和按 evidenceId 排序的 evidenceDigest。
 - 所有 plan、policy、manifest、evidence、result 对象均使用 JSON Schema 2020-12、`additionalProperties:false` 和稳定 ID。任务、fixture、ground truth、阈值或剔除规则变化必须提升 planVersion；任一 schema、版本、digest、candidateRef 或引用链不匹配均为 invalid，不得人工解释为通过。
 

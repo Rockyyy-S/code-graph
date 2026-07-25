@@ -87,4 +87,13 @@ describe("root toolchain contract", () => {
       );
     }
   });
+
+  it("shares the controlled pnpm SEA resolver between workspace and registry runners", async () => {
+    const workspaceRunner = await readText("scripts/quality/run-workspace-script.mjs");
+    const registryRunner = await readText("scripts/ci/run-architecture-required.mjs");
+
+    expect(workspaceRunner).toContain('from "./resolve-pnpm-invocation.mjs"');
+    expect(registryRunner).toContain('from "../quality/resolve-pnpm-invocation.mjs"');
+    expect(registryRunner).not.toContain("args: [process.env.npm_execpath, ...args]");
+  });
 });

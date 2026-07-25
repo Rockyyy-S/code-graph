@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { discoverWorkspaces } from "../workspace/discover-workspaces.mjs";
+import { createPnpmInvocation } from "./resolve-pnpm-invocation.mjs";
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -62,12 +63,27 @@ function internalDependencyNames(manifest, workspacesByName) {
 export function orderWorkspacesByDependencies(workspaces) {
   const errors = [];
   const ordered = [];
-  const stateByName = new Map();
-  const workspacesByName = new Map(
-    workspaces
-      .filter(({ manifest }) => typeof manifest?.name === "string")
-      .map((workspace) => [workspace.manifest.name, workspace]),
-  );
+  const stateByPath = new Map();
+  const workspacesGroupedByName = new Map();
+  for (const workspace of workspaces) {
+    const name = workspace.manifest?.name;
+    if (typeof name !== "string") {
+      continue;
+    }
+    const grouped = workspacesGroupedByName.get(name) ?? [];
+    grouped.push(workspace);
+    workspacesGroupedByName.set(name, grouped);
+  }
+  const workspacesByName = new Map();
+  for (const [name, grouped] of workspacesGroupedByName) {
+    if (grouped.length !== 1) {
+      errors.push(
+        `${grouped.map(({ relativePath }) => `${relativePath}/package.json`).join(", ")}：工作区包名 '${name}' 重复。修复：在执行 type/build 前为每个工作区分配唯一包名。`,
+      );
+      continue;
+    }
+    workspacesByName.set(name, grouped[0]);
+  }
 
   /**
    * 递归访问单个工作区并维护拓扑遍历状态。
@@ -76,7 +92,7 @@ export function orderWorkspacesByDependencies(workspaces) {
    */
   function visit(workspace, trail) {
     const name = workspace.manifest?.name ?? workspace.relativePath;
-    const state = stateByName.get(name);
+    const state = stateByPath.get(workspace.relativePath);
     if (state === "visited") {
       return;
     }
@@ -87,14 +103,14 @@ export function orderWorkspacesByDependencies(workspaces) {
       return;
     }
 
-    stateByName.set(name, "visiting");
+    stateByPath.set(workspace.relativePath, "visiting");
     for (const dependencyName of internalDependencyNames(
       workspace.manifest,
       workspacesByName,
     )) {
       visit(workspacesByName.get(dependencyName), [...trail, name]);
     }
-    stateByName.set(name, "visited");
+    stateByPath.set(workspace.relativePath, "visited");
     ordered.push(workspace);
   }
 
@@ -179,15 +195,7 @@ export async function validateWorkspaceScripts(root, scriptName) {
  */
 export function createWorkspacePnpmInvocation(npmExecPath, workspacePath, scriptName) {
   const nestedArgs = ["--dir", workspacePath, "run", scriptName];
-  if (path.isAbsolute(npmExecPath)) {
-    return [".cjs", ".js", ".mjs"].includes(path.extname(npmExecPath).toLowerCase())
-      ? { args: [npmExecPath, ...nestedArgs], executable: process.execPath }
-      : { args: nestedArgs, executable: npmExecPath };
-  }
-  if (npmExecPath !== "pnpm") {
-    throw new Error("package.json: pnpm 提供了非法的相对 npm_execpath。\n");
-  }
-  return { args: nestedArgs, executable: "pnpm" };
+  return createPnpmInvocation(npmExecPath, nestedArgs);
 }
 
 /**
@@ -229,7 +237,11 @@ export async function runWorkspaceScript(root, scriptName) {
     const result = spawnSync(
       invocation.executable,
       invocation.args,
-      { env: process.env, stdio: "inherit" },
+      {
+        env: process.env,
+        stdio: "inherit",
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+      },
     );
 
     if (result.status !== 0) {

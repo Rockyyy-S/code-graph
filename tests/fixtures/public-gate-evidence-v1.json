@@ -1,0 +1,11 @@
+{
+  "evaluationContextDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evidenceProducerId": "gha-oidc://1303415307/example/controller/.github/workflows/produce-gate-evidence.yml@1111111111111111111111111111111111111111#type",
+  "gateDefinitionDigest": "98bbc11084b92b2db2809675973b410954d88cbfc1e32c6834c611417e42aa2c",
+  "gateEvidenceDigest": "b679011dc25957cd8790f29c87256f08379e903c001d524fe06f5d955299521a",
+  "gateId": "type",
+  "headOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "outputDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "schemaVersion": 1,
+  "status": "pass"
+}

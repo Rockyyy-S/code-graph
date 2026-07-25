@@ -92,15 +92,15 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
   - [x] runner 可以继续执行其余 required gate 以形成完整诊断，但不得使用 workflow `continue-on-error`、`|| true` 或恒成功 wrapper；最终退出码必须真实反映 fail-closed 结论。
   - [x] `outputDigest` 固定为 `GateOutputV1` 的 JCS SHA-256。`GateOutputV1` 是封闭对象：`{schemaVersion:1,gateId,termination,stdoutDigest,stderrDigest,stdoutBytes,stderrBytes,stdoutTruncated,stderrTruncated}`；`termination` 是 `exit+code`、`signal+signalName` 或 `spawn-error+stableCode` 的封闭联合。stdout/stderr digest 对 runner 捕获的原始有界字节分别计算，不做启发式清洗、重排或日志文本再解释；原始日志是旁路诊断 artifact，不进入 GateEvidence。
   - [x] 更新 `.github/workflows/architecture-required.yml`：保持每个 PR 和 `main` push always-run、无 path filter、冻结安装、完整 40 字符 Action SHA、Node 24.18.0 与 pnpm 11.12.0；checkout 必须提供计算固定 merge-base 所需的 Git 对象。
-  - [x] Hosted child evidence 的权威执行入口必须是 `<external-controller-repository>/.github/workflows/produce-gate-evidence.yml@<trusted-40-hex-sha>` reusable workflow；本仓库 workflow 只传递 repository/head/base 等非秘密输入并调用该固定 workflow。可信 workflow 自行 checkout 精确候选 OID、加载 Controller 已批准的 registry digest、运行外部固定 GateHarnessV1、请求专用 audience 的 OIDC token并上传 evidence/attestation；候选仓库不能替换 harness、签名逻辑或 artifact provenance。
+  - [x] Hosted child evidence 的权威执行入口必须是 `<external-controller-repository>/.github/workflows/produce-gate-evidence.yml@<trusted-40-hex-sha>` reusable workflow；本仓库 workflow 只传递 repository/head/base 等非秘密输入并调用该固定 workflow。可信 workflow 自行 checkout 精确候选 OID、加载 Controller 已批准的 registry digest、运行外部固定 GateHarnessV1，并通过 GitHub/Sigstore 官方 attestation 的固定 audience 语义取得 OIDC 身份后上传 evidence/attestation；候选仓库不能替换 harness、签名逻辑或 artifact provenance。
   - [x] 仓库 workflow 最终只发布 child evidence 和独立 child check，不得继续以 GitHub Actions App `15368` 发布权威 `architecture-required` umbrella context；同名 umbrella 只能由仓库外 Controller App/service identity 发布。
   - [x] evidence artifact 必须绑定候选 `headOid`、`evaluationContextDigest`、producer identity 与 registry/definition digest；Controller 只通过 provider API 按 run ID/attempt 拉取 artifact，并验证 `GateEvidenceAttestationV1`，禁止接受用户提交的 JSON、手工上传文件、旧 workflow run 或仅凭 evidence 内字符串自证。
   - [x] 保持现有七门禁、仓库合同 preflight 与 planning trace 真实运行；不得用 mock-only、空测试、永久 skip、无断言或始终成功脚本替代。
 
 - [x] Task 6：部署仓库外 Controller、provider ruleset 与独立 drift monitor（AC: 2, 5）
   - [x] 在 `<external-controller-repository>` 或等价仓库外受控部署中实现 `ArchitectureGateController`；该组件不能从候选提交加载可执行策略，必须由独立 GitHub App/service identity 持有最小权限并成为 `architecture-required` 的唯一发布者。
-  - [x] Controller 只接受 provider-authenticated 且与 `GateDefinitionV1.evidenceProducerId` 匹配的 child evidence；producer 使用外部仓库中按完整 commit SHA 固定的 reusable workflow，并以 GitHub Actions OIDC attestation 证明身份。Controller 必须核对 OIDC issuer/audience、repository ID `1303415307`、event、run ID/attempt、候选 head SHA、`job_workflow_ref` 的外部仓库/路径/不可变 SHA、gate job ID、GitHub Actions App 来源与 artifact digest；相同 gate/context 的相同 `gateEvidenceDigest` 重放幂等，不同 digest 冲突为 invalid。
-  - [x] `evidenceProducerId` 的 V1 grammar 固定为 `gha-oidc://<repository-id>/<external-owner>/<external-repository>/.github/workflows/<workflow-file>@<40-hex-sha>#<gate-id>`；registry 中的字符串必须与受认证 claims 逐字段一致。fork PR 只能在 provider 明确批准并产生相同受信任 reusable workflow attestation 后提交 evidence，不能获得或使用 Controller secret。
+  - [x] Controller 只接受 provider-authenticated 且与 `GateDefinitionV1.evidenceProducerId` 匹配的 child evidence；producer 使用外部仓库中按完整 commit SHA 固定的 reusable workflow，并以 GitHub Actions OIDC attestation 证明身份。Controller 必须核对 OIDC issuer、GitHub/Sigstore 官方 attestation 固定 audience 语义对应的可信证书/签名链、repository ID `1303415307`、event、run ID/attempt、候选 head SHA、`job_workflow_ref` 的外部仓库/路径/不可变 SHA、gate job ID、GitHub Actions App 来源与 artifact digest；相同 gate/context 的相同 `gateEvidenceDigest` 重放幂等，不同 digest 冲突为 invalid。
+  - [x] `evidenceProducerId` 的 V1 grammar 固定为 `gha-oidc://<repository-id>/<external-owner>/<external-repository>/.github/workflows/<workflow-file>@<40-hex-sha>#<gate-id>`；registry 中的字符串必须与受认证 claims 逐字段一致。本 Story 明确不支持 fork PR，Controller 对 fork head fail closed；后续若要支持必须由独立 Story 重新设计 provider attestation 与权限边界。
   - [x] Controller 在仓库外维护单调的 `TrustedGateRegistryRecordV1`，至少绑定 repository ID、sequence、当前 `gateRegistryDigest`、来源 commit、批准证据 digest 与生效时间；普通 PR 的 registry digest 必须等于该可信根，不能由候选自证。
   - [x] registry 变更采用两阶段迁移：Controller 先把候选 registry 作为 data 解析并与可信根比较 → 外部 owner 审批新增/修改/删除及 producer/command/trigger/blocking 差异 → Controller 将批准的 proposed digest CAS 绑定到该 PR head 并允许同一 PR 的新 gate 产生证据 → 合并后再把可信根从旧 digest CAS 推进到新 digest。未批准的删除、`blocking:true→false`、trigger 收窄、command/owner/producer 改写或 digest 回退一律 invalid。
   - [x] umbrella CAS 使用最终 refinement：`{providerRepositoryId,headOid,evaluationContextDigest}`；发布前重新读取 provider 当前 base/head，任一变化立即废弃旧结论并重算，禁止复用陈旧 head 或旧 registry 结果。
@@ -121,9 +121,9 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
   - [x] 在隔离 provider 测试仓库或经批准的受控窗口演练 required check、App identity、bypass 或 ruleset 漂移；monitor 必须检测并使结论 invalid/fail，恢复后才允许重新发布 pass。
   - [x] 完整回归至少执行 `pnpm install --frozen-lockfile` 与 `pnpm architecture-required`；Story 1.2 的 graph-service 控制面、workspace-key、100 个 unit 和 99 个 contract 基线行为继续通过，但测试数量只作历史参考，不写成永久数量断言。
 
-- [ ] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
+- [x] Task 8：更新文档、交付证据与完成状态（AC: 2, 4, 5）
   - [x] 更新 `docs/repository-layout.md`，说明 Gate Registry、contracts、planning trace、child evidence、外部 Controller、ruleset 和 drift monitor 的 owner、数据流、失败语义与范围边界。
-  - [ ] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility/实际 plan、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；sequence=16 已闭合 Hosted 证据，当前仍缺实际 plan、外部调度/PR webhook SLA 与新撤销路径的真实 drift failure→App failure→恢复演练。
+  - [x] 新增 `docs/ci/story-1-3-provider-evidence.md`，记录候选完整 SHA、repository ID/visibility、ruleset ID/enforcement、required context 与 Controller App ID、无 bypass 证据、Controller/monitor 权限摘要、失败阻断 run、恢复 run、最终同 SHA 结论；当前授权下 plan API 返回 `null` 仅作信息记录，不作为 AC 阻塞。最新证据已补录 `aeb3cf9…`、陈旧 success 撤销、App-owned failure、merge blocked 与恢复 success。
   - [x] 保留 `docs/ci/story-1-1-provider-evidence.md` 与 `story-1-2-provider-evidence.md` 为历史证据，不回写旧运行冒充本 Story；本地全绿、旧候选或 shadow context 都不能替代最终候选正式 provider 结果。
   - [x] Story 交付说明逐项列出新增/变更 gate 的 `checkId`、`capabilityOwner`、`evidenceProducerId`、definition/registry digest 与验证证据。
   - [x] 只有仓库内门禁、外部 Controller、无 bypass ruleset、独立 drift monitor、真实失败阻断与最终同 SHA 通过全部成立后，才可把 Story 置为 `review`；独立代码审查完成后才可置为 `done`。
@@ -132,7 +132,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 ### Review Findings
 
 - [x] [Review][Patch] [High] 让外部 GateHarness 校验经批准的 gate 实现摘要 — CRLF/LF、pnpm 二次安装与 SEA 相对 `npm_execpath=pnpm` 已闭合；sequence=14 成功绑定 `gateImplementationDigest=c6544b7d…`，Hosted run `30059752064` 的 type/build 均通过，后续失败已收敛为独立 TMP 路径预算问题。
-- [ ] [Review][Patch] [High] 补充独立的 GitHub account/repository plan 证据 — 已选择保留严格验收要求；当前授权下 user 与 repository API 的 `plan` 均返回 `null`，不得以 ruleset 能力证明替代实际 plan。
+- [x] [Review][Patch] [High] GitHub account/repository plan 不属于原始 AC；当前授权下 API 返回 `null` 仅作信息记录，已删除其完成阻塞语义。
 - [x] [Review][Patch] [High] Provider 证据文档已刷新到 sequence=14、Hosted run `30059752064`、GateHarness `da694bce…`、producer `48a9ee8b…`、registry `ee24d8e9…` 与 implementation `c6544b7d…`；最终主仓库候选的同 SHA 全绿证据仍由独立 finding 跟踪 [docs/ci/story-1-3-provider-evidence.md]
 - [x] [Review][Patch] [High] planning trace 未解析“关键合同与 Story 双向映射”，ProductValidation/Readiness 仅做全文名称包含检查，删除或改错映射仍返回零违规 [scripts/planning/check-planning-traceability.mjs:356]
 - [x] [Review][Patch] [High] planning trace 未固定 61 个稳定 Story ID，协同修改标题、DAG、追踪表和 sprint key 可把 `5.12` 重编号为 `9.9` 并继续通过 [scripts/planning/check-planning-traceability.mjs:121]
@@ -173,8 +173,134 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [x] [Review][Patch] [High] 旧 Controller run 可在新 drift failure 后覆盖回 success，幂等 success 也会跳过 freshness；现 Controller 串行排队，发布或保留任何 success 前重新读取 monitor，60 项行为/合同测试通过 [../code-graph-gate-controller/lib/controller-check-publisher.mjs]
 - [x] [Review][Patch] [Medium] GitHub check-runs 默认只返回同名 latest，且 PR/check/workflow/job/artifact 列表缺完整分页；现使用 `filter=all`、完整分页、每页重试与部分结果保留，drift failure 在历史读取失败时仍直接追加失败 [../code-graph-gate-controller/lib/github-pagination.mjs]
 - [x] [Review][Patch] [High] sequence=16 已把 producer `78e84ade…`、registry `779bc1d3…`、cleanup ownership 与 Controller drift/replay 修复接入可信根；run `30063231289` attempt 2 九项全绿，artifact `8585366355`、attestation `36881454`、monitor `30063386894`、Controller `30063500387` 与 PR `CLEAN` 已闭合 [docs/ci/story-1-3-provider-evidence.md]
-- [ ] [Review][Patch] [High] sequence=16 新撤销路径尚缺真实 success→monitor drift failure/expiry→App-owned failure→merge blocked→恢复 success 的受控演练 [docs/ci/story-1-3-provider-evidence.md]
-- [ ] [Review][Patch] [High] 缺少具备 SLA 的外部 monitor 调度与 Provider PR opened/reopened/synchronize、child run 完成可信事件源；仓库 cron/workflow_run 无法消除 force-push/重开到旧 success SHA 的轮询竞态 [../code-graph-gate-controller/.github/workflows/controller.yml]
+- [x] [Review][Patch] [High] 已回填当前候选 success→monitor expiry→App-owned failure→merge blocked→恢复 success 的真实证据 [docs/ci/story-1-3-provider-evidence.md]
+- [x] [Review][Patch] [High] 已删除特定 SLA/webhook 的追加阻塞；平台中立 lease guardian、全局撤销与 PR 快照重验形成行为合同，GitHub workflow 仅是当前运行适配器 [../code-graph-gate-controller/.github/workflows/controller.yml]
+
+#### Re-review 2026-07-24
+
+- [x] [Review][Patch] [High] 已新增平台中立 lease guardian，每分钟重验 monitor freshness；任何失效进入全局撤销，GitHub workflow 仅作当前运行适配器 [../code-graph-gate-controller/.github/workflows/controller.yml:3]
+- [x] [Review][Patch] [High] AC4 已增加固定 base/head 的公共 CLI/RPC/extension/Schema 差异检测；新增能力若未同步新增真实 blocking gate，repository contract fail closed [scripts/contracts/validate-public-capability-gates.mjs]
+- [x] [Review][Patch] [Medium] Task 8 已移除 `actual plan` 与特定 SLA/webhook 的追加阻塞，仅保留原始 AC 的 fail-closed 行为和 Provider 证据 [_bmad-output/implementation-artifacts/1-3-强化-provider-阻断与规划双向追踪门禁.md:124]
+- [x] [Review][Patch] [Medium] 本 Story 已明确不支持 fork PR，Controller 继续对 fork head fail closed [_bmad-output/implementation-artifacts/1-3-强化-provider-阻断与规划双向追踪门禁.md:103]
+- [x] [Review][Patch] [High] 可信记录、App 配置、monitor、普通 provider API 与验证故障均进入全局撤销；无可信 sequence 时使用 untrusted fail-closed 结论 [../code-graph-gate-controller/bin/run-controller.mjs]
+- [x] [Review][Patch] [High] GitHub REST/GraphQL、artifact 下载、`gh` 与 `unzip` 已具备内部 deadline、有界输出和进程树终止 [../code-graph-gate-controller/lib/github-api.mjs]
+- [x] [Review][Patch] [High] workflow run 现先按 run ID 选择最新运行，再在同 run 内按 attempt 选择 [../code-graph-gate-controller/lib/controller-policy.mjs]
+- [x] [Review][Patch] [High] 发布前重新读取 PR head/base/state；全局撤销在 failure 前后重复采样开放 PR 直至快照稳定 [../code-graph-gate-controller/bin/run-controller.mjs]
+- [x] [Review][Patch] [High] monitor success 已绑定默认分支、可信 head、固定 workflow path 与 Controller 仓库；持有私钥的手动 workflow 入口已删除 [../code-graph-gate-controller/lib/controller-policy.mjs]
+- [x] [Review][Patch] [High] service launcher 回收测试改为注入确定性 metadata PID，不再依赖并行文件系统时序 [tests/unit/service-launcher.test.ts:216]
+- [x] [Review][Patch] [Medium] registry 与 workspace runner 已复用同一受控 pnpm SEA 解析器，相对 `npm_execpath=pnpm` 交给受控 PATH [scripts/quality/resolve-pnpm-invocation.mjs]
+- [x] [Review][Patch] [Medium] workspace 拓扑排序按路径维护状态，并在 type/build 前报告重复 package name [scripts/quality/run-workspace-script.mjs]
+- [x] [Review][Patch] [Medium] basic-security 已覆盖 `/bin/sh`、`env bash`、`/usr/bin/env -S bash`、`dash` 等远程脚本执行形状，并扫描 shell 扩展名 [scripts/security/check-basic-security.mjs]
+- [x] [Review][Patch] [Medium] planning trace 已支持反引号/波浪线 fence，并解析平衡括号、尖括号和 title 的 Markdown 链接 [scripts/planning/check-planning-traceability.mjs]
+- [x] [Review][Patch] [Medium] 公共 GateDefinition validator 已按跨平台 basename 拒绝路径限定 true/echo/Node eval [packages/contracts/src/runtime-validation.ts]
+- [x] [Review][Patch] [Medium] drift monitor 已通过公共分页 helper 完整读取 ruleset 列表 [../code-graph-gate-controller/bin/run-drift-monitor.mjs]
+- [x] [Review][Patch] [Medium] Provider 与 Controller canonical JSON 数组分支均以 descriptor 读取，拒绝 getter、Symbol、不可枚举元素和自定义原型 [packages/contracts/runtime/canonical-json.mjs]
+- [x] [Review][Patch] [Medium] Provider 证据已回填当前 HEAD `aeb3cf9…`、run `30063946450`、failure `89398429939` 与 recovery `89400277110` [docs/ci/story-1-3-provider-evidence.md]
+
+#### Full re-review 2026-07-24
+
+- [x] [Review][Patch] [High] lease guardian 吞掉全部 cycle 异常；连续撤销失败后 workflow 仍以成功退出 [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:25]
+- [x] [Review][Patch] [High] Controller workflow 每五分钟以 `cancel-in-progress:true` 取消设计为运行五十分钟的 guardian，无法形成持续 lease [../code-graph-gate-controller/.github/workflows/controller.yml:10]
+- [x] [Review][Patch] [High] guardian 的 runtime 只在 cycle 返回后检查，未约束正在执行的串行 PR/API 撤销轮次，job 可在未完成撤销时被强杀 [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:24]
+- [x] [Review][Patch] [High] Story 明确要求的 proposed registry 两阶段迁移与 PR-head CAS 未实现，`sourceCommit` 仅校验格式而未绑定候选 head [../code-graph-gate-controller/lib/harness.mjs:35]
+- [x] [Review][Patch] [High] 公共 RPC/Schema 表面依赖文件名、符号名和正则字面量，别名、嵌套/re-export 及既有 Schema 结构新增均可绕过 AC4 [scripts/contracts/validate-public-capability-gates.mjs:72]
+- [x] [Review][Patch] [High] CLI 公共能力完全信任候选维护的 `codegraph.publicCommands`，未验证实际命令注册或分派实现 [scripts/contracts/validate-public-capability-gates.mjs:110]
+- [x] [Review][Patch] [High] 任意无关的新 blocking gate 都能为任意新增公共能力背书，缺少 capability 到真实 gate 的覆盖映射 [scripts/contracts/validate-public-capability-gates.mjs:48]
+- [x] [Review][Patch] [High] 当前 Story 的基线尚无 Gate Registry，固定 OID public-capability preflight 会在读取基线 registry 时确定性失败 [scripts/contracts/validate-public-capability-gates.mjs:84]
+- [x] [Review][Patch] [High] Controller 发布 success 前只复验 PR head/base，没有复验所选 workflow run ID/attempt 仍为最新 [../code-graph-gate-controller/bin/run-controller.mjs:239]
+- [x] [Review][Patch] [Medium] 同时新增有效 blocking gate 与诊断性 non-blocking gate 会被错误判为“未新增真实 blocking gate” [scripts/contracts/validate-public-capability-gates.mjs:51]
+- [x] [Review][Patch] [Medium] ProductValidation 引用及两张人工追踪表直接读取原始 Markdown，HTML 注释或 fenced code 可伪造真实语义 [scripts/planning/check-planning-traceability.mjs:395]
+- [x] [Review][Patch] [Medium] 相对链接检查未遮蔽 inline/缩进代码且外部 URI scheme 大小写敏感，合法文档会被错误阻断 [scripts/planning/check-planning-traceability.mjs:576]
+- [x] [Review][Patch] [Medium] basic-security 已声明 PowerShell 动态执行规则却不扫描 `.ps1/.psm1/.psd1`，典型 PowerShell 脚本可绕过检查 [scripts/security/check-basic-security.mjs:37]
+- [x] [Review][Patch] [Medium] drift monitor freshness 接受未来 `updated_at`，负年龄可把十五分钟 lease 延长到未来时间之后 [../code-graph-gate-controller/lib/controller-policy.mjs:149]
+- [x] [Review][Patch] [Medium] Windows 正常退出后的同步进程树清理可与原 absolute deadline 竞态，把已退出主进程误报为 `ETIMEDOUT` [scripts/ci/run-process-with-deadline.mjs:68]
+
+#### Full re-review rerun 2026-07-24
+
+- [ ] [Review][Patch] [High] 外部 producer 固定的 GateHarness 与新增参数合同不兼容；已决定采用两阶段不可变提交：先形成兼容新参数的 Harness commit，再由后续 producer commit 固定该 SHA，并同步 producer identity、registry 与批准链 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
+- [x] [Review][Patch] [High] capability→gate 字符串映射仍不能证明新增 gate 真实覆盖能力；已决定采用严格能力专属合同：映射必须同时绑定专属测试/fixture、独立 gate 入口与 evidence，机器验证这些资产随能力同 PR 新增或更新，并拒绝重复无关命令、空 handler 与不可证明的覆盖关系 [scripts/contracts/validate-public-capability-gates.mjs:48]
+- [x] [Review][Patch] [High] success 发布前的 workflow-run 复验仍存在最终 TOCTOU 窗口；已决定采用无需新增托管的有界闭环：POST success 后再次复验最新 run/attempt、PR 快照与 monitor，任一变化立即发布 failure/in-progress 并重新计算 [../code-graph-gate-controller/bin/run-controller.mjs:411]
+- [x] [Review][Patch] [High] 相同 registry digest 的 implementation proposal 被 currentRecord 提前返回，受保护 gate 实现无法通过 proposed 流程获批 [../code-graph-gate-controller/lib/registry.mjs:313]
+- [x] [Review][Patch] [High] Controller cycle 超时后撤销仍复用已 aborted 的 runtime，旧 success 无法立即 fail closed [../code-graph-gate-controller/bin/run-controller.mjs:84]
+- [x] [Review][Patch] [High] 进程 cleanup 失败/超时仍可返回 pass，且 exit 后等待 close 与 Windows 同步 taskkill 均可能永久挂起 [scripts/ci/run-process-with-deadline.mjs:54]
+- [x] [Review][Patch] [High] 公共能力 AST 解析未正确绑定 namespace/default import 与跨模块对象上下文，可漏报 Schema/RPC/CLI 或直接崩溃 [scripts/contracts/validate-public-capability-gates.mjs:509]
+- [x] [Review][Patch] [High] PUBLIC_COMMANDS 声明后的属性赋值、Object.assign 或别名 mutation 不进入静态能力表面 [scripts/contracts/validate-public-capability-gates.mjs:266]
+- [x] [Review][Patch] [High] 公共 Schema 发现依赖候选可控的导出别名 `Schema` 后缀，改名为非 Schema 后缀即可绕过 AC4 [scripts/contracts/validate-public-capability-gates.mjs:381]
+- [x] [Review][Patch] [Medium] Controller 会忽略未知且格式错误的额外 evidence 并返回 success，证据集合未封闭 [../code-graph-gate-controller/lib/controller-policy.mjs:64]
+- [x] [Review][Patch] [Medium] baseBindings 未参与判定，未变化能力的 capability→gate 映射可被静默删除 [scripts/contracts/validate-public-capability-gates.mjs:58]
+- [x] [Review][Patch] [Medium] Proposed registry 未要求 `now >= effectiveAt`，未来生效记录可被提前选用 [../code-graph-gate-controller/lib/registry.mjs:215]
+- [x] [Review][Patch] [Medium] Markdown 链接遮蔽/解析不符合 CommonMark 的转义、嵌套 label 与列表容器语义，可漏报真实失效链接 [scripts/planning/check-planning-traceability.mjs:895]
+- [x] [Review][Patch] [Medium] basic-security 按扩展名过滤，带 shebang 的无扩展名脚本可绕过凭据与危险命令扫描 [scripts/security/check-basic-security.mjs:75]
+- [x] [Review][Patch] [Medium] 远程内容管道正则遗漏 sudo/command/exec 与 env 变量赋值等常见 shell wrapper [scripts/security/check-basic-security.mjs:136]
+- [x] [Review][Patch] [Medium] Windows 绝对 `pnpm.cmd`/`.bat` launcher 被当作原生 executable 以 shell:false 启动并产生 EINVAL [scripts/quality/resolve-pnpm-invocation.mjs:13]
+
+#### Final adversarial re-review 2026-07-24
+
+- [ ] [Review][Patch] [High] GateHarness V2 的封闭参数合同尚未接入真实 immutable producer；阶段 A 已就绪，阶段 B 必须先形成真实 Harness commit H，再由后续 producer commit 固定 H 并同步 producer identity、registry、批准链与 Hosted 同 SHA 证据，禁止猜测 SHA [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
+- [x] [Review][Patch] [High] lease guardian deadline 触发后，若被取消的 cycle 忽略 abort 并正常 resolve，会把超时误判为成功；等待只应用于确认紧急撤销收敛，最终必须传播原 deadline 错误 [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:118]
+- [x] [Review][Patch] [High] proposed registry 只在 cycle 开始时验证有效期，长时间验证可在 `expiresAt` 之后发布 success；发布前及 POST-success 闭环必须重新选择并验证同一 proposal [../code-graph-gate-controller/lib/registry.mjs:340]
+- [x] [Review][Patch] [High] 同一 head commit 被多个开放 PR 复用时，PR 专属 proposal 和 workflow run 会折叠为 commit 级结论；开放 PR 必须拒绝重复 head，run 选择与复验必须绑定 `run.pull_requests` 中的 PR number [../code-graph-gate-controller/bin/run-controller.mjs:264]
+- [x] [Review][Patch] [High] POST success 后发现 run、PR 或 monitor 已变化时未先立即撤销绿色；必须先发布 pending/failure，发布失败进入全局撤销，再从新快照重算 [../code-graph-gate-controller/bin/run-controller.mjs:430]
+- [x] [Review][Patch] [High] 公共 Schema 嵌套回调参数按局部 index 指纹化，外层与内层同槽位发生碰撞，可漏报闭包语义变化 [scripts/contracts/validate-public-capability-gates.mjs:1153]
+- [x] [Review][Patch] [High] 公共 Schema 可通过 `Object.freeze({...})` 或 `export * as namespace` 绕过表面发现；必须归一化批准的 freeze 包装并递归展开 namespace export [scripts/contracts/validate-public-capability-gates.mjs:701]
+- [x] [Review][Patch] [High] repository preflight 只批准单参数 Node gate，与严格 capability verification 的封闭 argv 合同冲突；必须精确识别该合同且不得泛化放宽 [scripts/contracts/validate-repository-contract.mjs:309]
+- [x] [Review][Patch] [High] capability verification 目前只证明 entry/test/fixture 文件发生变化，no-op 资产也能通过；入口必须消费全部封闭参数、执行真实测试/fixture，并产生与 `evidenceId` 闭合的结果 [scripts/contracts/validate-public-capability-gates.mjs:299]
+- [x] [Review][Patch] [High] CLI 门禁只核对 manifest 与 `PUBLIC_COMMANDS` 注册表，未证明公开 bin 的真实分派路径唯一消费该冻结注册表，独立解析或注册路径仍可绕过 [scripts/contracts/validate-public-capability-gates.mjs:483]
+- [x] [Review][Patch] [Medium] 公共 CLI handler 的 block 只要包含任意非 return 语句即视为有效，`{ "noop"; }` 可绕过空实现检查 [scripts/contracts/validate-public-capability-gates.mjs:1259]
+- [x] [Review][Patch] [High] HTML 注释先于 fenced-code 全局遮蔽，未闭合注释可跨 fence 边界吞掉真实规划引用；应以 block state 单遍解析并在 fence 边界隔离注释状态 [scripts/planning/check-planning-traceability.mjs:886]
+- [x] [Review][Patch] [High] blockquote/list 容器内 fenced code 未按 CommonMark 容器前缀识别，伪造的 ProductValidation 引用可进入语义扫描 [scripts/planning/check-planning-traceability.mjs:992]
+- [x] [Review][Patch] [High] basic-security 的远程管道规则仍遗漏 `sudo -u root sh`、`exec -a shell sh` 与直接 `FOO=1 sh`；需要受限 shell tokenizer/状态机解析 wrapper 链 [scripts/security/check-basic-security.mjs:153]
+
+#### Cumulative adversarial re-review 2026-07-24
+
+- [ ] [Review][Patch] [High] Hosted producer 仍固定 GateHarness V1 `da694bce…`，没有传入 V2 必需的 `--pull-number` 与 `--proposed-record-directory`，旧 Harness 也未把可信 base/head 注入候选 gate；当前累计实现尚无最终候选同 SHA 的 Hosted 证据 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
+- [x] [Review][Patch] [High] 能力专属测试只按字符串与断言词法标记验收；不读取 fixture、不验证 capability、仅对路径/evidence 字符串做恒真断言的测试仍可让 AC4 差异检查返回零违规 [scripts/contracts/validate-public-capability-gates.mjs:476]
+- [ ] [Review][Patch] [High] `architecture-required` 是 commit 级 check，但现有 Controller 仅按 schedule/monitor 完成事件运行；关闭后新建或重开 PR 可即时复用旧绿色，CAS/replay 也未绑定 PR/run/attestation，必须由现有 Controller 在 PR 生命周期变化时先覆盖 pending（无需新增托管） [../code-graph-gate-controller/.github/workflows/controller.yml:3]
+- [x] [Review][Patch] [High] 相同开放 head 的唯一性只在 cycle 起点检查；检查后新开 PR 或 force-push 到共享 head，可在发布前及 POST-success 后形成两个 PR 共用 commit 绿色的 TOCTOU 窗口 [../code-graph-gate-controller/bin/run-controller.mjs:90]
+- [x] [Review][Patch] [High] 旧 Controller SHA 的 guardian 可继续接受绑定旧 SHA 的 fresh monitor success，并忽略默认分支新 SHA 上的最新 failure；发布前必须确认 Controller 默认分支仍指向本次部署 SHA [../code-graph-gate-controller/lib/controller-policy.mjs:170]
+- [x] [Review][Patch] [High] guardian 在 cycle 忽略 abort 且紧急撤销等待超时后仍进入下一轮，可产生重叠 cycle 并并发撤销/发布同一 commit check，破坏串行 CAS [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:34]
+- [x] [Review][Patch] [High] 公共 Schema 与 `SERVICE_METHODS` 的声明后 mutation 不进入能力表面；`Object.assign`/属性赋值可在运行时新增 Schema 约束或 RPC 方法而不触发 AC4 [scripts/contracts/validate-public-capability-gates.mjs:1043]
+- [x] [Review][Patch] [High] 公共 Schema 指纹忽略 async/generator、optional call/chain、默认值与 rest 等运行时语义；例如普通箭头与 async 箭头、普通调用与 optional 调用会产生相同指纹 [scripts/contracts/validate-public-capability-gates.mjs:1558]
+- [x] [Review][Patch] [High] 合法 JSON Schema 仅使用 `allOf`，或仅使用 `$ref`/`$defs` 且导出名不以 `Schema` 结尾时不会被识别，整个公共 Schema 能力可完全漏报 [scripts/contracts/validate-public-capability-gates.mjs:1158]
+- [x] [Review][Patch] [High] `StoryDependencyDagV1` 从原始 Markdown 取首次正则匹配；把唯一 DAG 放入 HTML 注释或追加第二个冲突 DAG block 均可继续零违规，无法保证唯一权威 DAG [scripts/planning/check-planning-traceability.mjs:270]
+- [x] [Review][Patch] [High] Architecture `Binds` 仅验证格式和编号存在，不与双向追踪权威集合比对；删除合法绑定（如把 `FR-1 至 FR-5` 改为 `FR-2 至 FR-5`）仍通过 [scripts/planning/check-planning-traceability.mjs:221]
+- [x] [Review][Patch] [High] ProductValidation/Readiness 只要求任意散文出现合同名，且未统一遮蔽 inline/缩进代码；HTML 注释跨 fence、行内代码、列表续行代码或 glossary marker 都可伪造真实名称/映射 [scripts/planning/check-planning-traceability.mjs:653]
+- [x] [Review][Patch] [High] basic-security 按单行 tokenize 远程管道，遗漏分号、跨行/反斜杠 continuation、subshell 与 brace group；真实 `curl|sh` 远程执行可绕过 blocking security gate [scripts/security/check-basic-security.mjs:215]
+- [x] [Review][Patch] [Medium] `samePullIdentity()` 只绑定 PR number/base/head，未绑定 provider `merge_commit_sha`；合成 merge ref 已变化时仍被视为同一快照 [../code-graph-gate-controller/bin/run-controller.mjs:596]
+- [x] [Review][Patch] [Medium] proposed 目录中的任一过期记录会在候选选择前使全部加载失败；历史过期 proposal 可阻断使用当前可信 registry 的所有候选 [../code-graph-gate-controller/lib/registry.mjs:241]
+- [x] [Review][Patch] [Medium] GateHarness 的 `pkill`/`pgrep` 使用无 timeout 的 `execFileAsync`；身份清理工具挂起时可越过 Harness 的绝对 deadline [../code-graph-gate-controller/lib/harness.mjs:301]
+- [x] [Review][Patch] [Medium] CLI dispatcher 验证会把不可达分支中的 handler 调用视为真实分派，`if (false) { handler(); }` 仍可通过 [scripts/contracts/validate-public-capability-gates.mjs:841]
+- [x] [Review][Patch] [Medium] CLI dispatcher 未要求 `Object.hasOwn(commands, commandId)` 或 null-prototype registry；普通对象原型上的 `toString`/`constructor` 可成为未注册命令 [scripts/contracts/validate-public-capability-gates.mjs:841]
+- [x] [Review][Patch] [Medium] basic-security 完全跳过无扩展名且无 shebang 的普通文本脚本，即使其由 `sh path/to/install` 显式执行，凭据和危险命令也不会被扫描 [scripts/security/check-basic-security.mjs:75]
+- [x] [Review][Patch] [Medium] Windows command shim 把 `%` 替换为 `%%` 仍会触发 `cmd.exe` 环境变量展开，包含 `%NAME%` 的路径或参数会被静默篡改 [scripts/quality/resolve-pnpm-invocation.mjs:43]
+- [x] [Review][Patch] [Medium] Markdown destination 对任意反斜杠后字符都执行反转义；不存在的 `do\cs/...` 可被误解析成存在的 `docs/...` 并通过相对链接门禁 [scripts/planning/check-planning-traceability.mjs:1221]
+- [x] [Review][Patch] [Medium] Story File List 与累计变更不一致：实际 106 个唯一文件，仅列出 59 个，缺 47 个且 `scripts/ci/run-process-with-deadline.mjs` 重复两次 [_bmad-output/implementation-artifacts/1-3-强化-provider-阻断与规划双向追踪门禁.md:536]
+
+#### Re-review 2026-07-25
+
+- [x] [Review][Patch] [High] 按复审决策不新增托管或独立 OIDC 服务：Task 5/6 应改为接受 GitHub/Sigstore 官方 attestation 的固定 audience 语义，同时继续严格校验 issuer、signer、repository、run、source 与 artifact，删除无法由当前官方 provenance 链请求和核验的“专用 audience”要求 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:298, ../code-graph-gate-controller/lib/attestation-policy.mjs:38]
+- [x] [Review][Patch] [High] umbrella CAS 把 `gateImplementationDigest` 与 trusted sequence 纳入 key，导致同一规范三元 CAS 在可信实现/序列迁移后绕过 replay conflict 检测 [../code-graph-gate-controller/lib/controller-policy.mjs:123]
+- [x] [Review][Patch] [High] AC4 公共表面只读取 extension manifest 与 `SERVICE_METHODS`，未纳入真实 `registerCommand` 和 graph-service RPC handler 注册路径，隐藏公共入口可绕过能力门禁 [scripts/contracts/validate-public-capability-gates.mjs:869]
+- [x] [Review][Patch] [High] baseline 无 gate registry 时完全跳过严格 capability verification，当前同一 Story 新增的公共 Gate Schema 因 bootstrap 豁免而无需能力专属 gate/test/fixture/evidence [scripts/contracts/validate-public-capability-gates.mjs:148]
+- [x] [Review][Patch] [High] 能力专属测试 proof 不绑定真实 Vitest/node:assert 导入及被测入口结果，本地伪 `expect`/`assert`、恒真断言和 `doesNotThrow` 均可伪造正负向证据 [scripts/contracts/validate-public-capability-gates.mjs:590]
+- [x] [Review][Patch] [High] CLI dispatcher 仅按 AST 文本顺序和“表达式曾引用 argv”判定，未证明真实数据流及 own-property 检查对 handler 调用的控制流支配 [scripts/contracts/validate-public-capability-gates.mjs:1031]
+- [x] [Review][Patch] [High] 公共 Schema 指纹把任意局部 `Number.MAX_SAFE_INTEGER` 直接规范化为内建常量，局部 shadow 可改变运行时约束而保持能力指纹不变 [scripts/contracts/validate-public-capability-gates.mjs:1832]
+- [x] [Review][Patch] [High] Schema/RPC 稳定性检查只识别直接写入与少数标准 mutator，绑定传给自定义函数后可在指纹计算外修改运行时公共表面 [scripts/contracts/validate-public-capability-gates.mjs:2142]
+- [x] [Review][Patch] [High] Markdown block state 在未闭合 HTML comment 中遇到 fence 会清除 comment 状态，注释内隐藏的规划合同可在 fence 后被当作权威语义 [scripts/planning/check-planning-traceability.mjs:1081]
+- [x] [Review][Patch] [High] basic-security 只把五种 POSIX shell 视为远程管道终点，`busybox sh`、`pwsh -Command -`、`node` 等 stdin 解释器仍可执行远程内容而不触发阻断 [scripts/security/check-basic-security.mjs:227]
+- [x] [Review][Patch] [High] no-op 拒绝在主仓只匹配分离的 Node `-e/-p` 参数，外部 Controller/Harness 更未拒绝恒成功 executable 或 `pnpm` 根脚本，blocking gate 可在批准迁移后稳定伪绿 [scripts/ci/load-quality-gates.mjs:137, ../code-graph-gate-controller/lib/registry.mjs:431]
+- [x] [Review][Patch] [High] 等待 child evidence 时 guardian 每分钟以空 CAS/replay 追加新 pending check，并每轮完整分页历史；长时间等待会持续膨胀 check-runs、API 配额与 cycle 成本 [../code-graph-gate-controller/bin/run-controller.mjs:282]
+- [x] [Review][Patch] [Low] workspace 重名失败诊断仍为英文，违反 Story Testing Standards 的新增诊断中文约束 [scripts/quality/run-workspace-script.mjs:81]
+- [x] [Review][Patch] [Low] Provider 证据文档仍记录 Controller `69/69`，与当前 Story 已验证的 `93/93` 不一致 [docs/ci/story-1-3-provider-evidence.md:214]
+
+#### Final production review 2026-07-25
+
+- [x] [Review][Patch] [High] PR lifecycle caller 不得从候选仓库读取 Controller App private key；凭据已迁移到外部 Controller 仓库 `controller-production` Environment，候选仓库 Secrets 已清空 [.github/workflows/architecture-pr-lifecycle.yml:14]
+- [x] [Review][Patch] [High] PR 修改 base 时相同 head 的旧绿色不可复用；`edited` 现同时触发 App-owned pending 与 child evidence 重算 [.github/workflows/architecture-pr-lifecycle.yml:4, .github/workflows/architecture-required.yml:3]
+- [x] [Review][Patch] [Medium] proposed record 的 `effectiveAt` 未进入 owner approval digest；现 approval 与 record 精确绑定同一生效时刻 [../code-graph-gate-controller/lib/registry.mjs:197]
+- [x] [Review][Patch] [Medium] 默认分支推进后旧 lease guardian 会继续占用串行队列；现完成 fail-closed 撤销后立即让新可信 revision 接管 [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:45]
+- [x] [Review][Patch] [High] 能力专属测试可对 fixture 做无关断言；现 binding 声明 `assertionTarget`，正负回调必须断言该真实导出的调用结果，且 Contracts 源码整体进入 Harness 实现摘要 [scripts/contracts/validate-public-capability-gates.mjs:474]
+- [ ] [Review][Patch] [High] 最终 producer `c01e7c05…`、十四项 registry、精确候选 HEAD 与可信 sequence 尚需完成 Controller proposal/迁移及 Hosted 同 SHA 验证 [.github/workflows/architecture-required.yml:23]
 
 ## Dev Notes
 
@@ -415,6 +541,11 @@ GPT-5 Codex
 - 最终完整回归：`pnpm install --frozen-lockfile` 成功；已知顺序测试的 CI 并行目录同步预算由 500ms 调整为 2s，25ms deadline 负向语义保持；`pnpm architecture-required` 九项全部通过，外部 Controller tests 23/23 通过。
 - Review 修复：planning trace、GateOutput/Evidence、no-op/checkId、glob/UTF-8 与绝对 deadline 的 9 项仓库内 finding 已闭合；完整 `type`、`lint`、160 unit、113 contract 与九项 `architecture-required` 通过。
 - Review 外部迁移：sequence=16 已绑定 `b853937…`、producer `78e84ade…`、registry `779bc1d3…` 与 implementation `c6544b7d…`；run `30063231289` attempt 2 九项全绿，artifact `8585366355`、attestation `36881454`、monitor `30063386894`、Controller `30063500387` 与 PR `CLEAN` 已闭合。
+- Re-review 修复：18 项 Patch 已全部落盘；Controller 69/69 tests 通过，主仓库 `type`、`lint` 通过，连续两轮 `pnpm architecture-required` 九项全部通过；新增 Controller/Harness 变更尚未推进新的可信 sequence 与 Hosted 同 SHA 证据，因此 Story 保持 `in-progress`。
+- Full re-review 修复：15 项 Patch 已全部落盘；Controller 75/75 tests、主仓库 `type`、`lint`、181 unit、126 contract 与九项 `architecture-required` 全部通过。新增 trusted registry/guardian/runtime 与公共能力合同仍需新的可信 sequence 和 Hosted 同 SHA 证据，因此 Story 保持 `in-progress`。
+- Final adversarial re-review：14 项 finding 中 13 项 Patch 已闭合；Controller 88/88 tests，主仓库 `type`、`lint`、201 unit、138 contract 与九项 `architecture-required` 全绿。首次并行 unit 曾因 Windows 临时目录被占用出现一次 `EBUSY`，顺序完整复跑 201/201 通过；GateHarness V2 阶段 B 仍需真实不可变 commit H、后续 producer pin、可信批准链与 Hosted 同 SHA 证据，因此 Story 保持 `in-progress`。
+- Cumulative adversarial re-review：22 项 Patch 中 20 项本地可修项已闭合；Controller 93/93 tests，主仓库 `type`、`lint`、220 unit、144 contract 与九项 `architecture-required` 全绿。GateHarness V2 的真实 immutable producer 链与 PR 生命周期 pending 覆盖需要提交/推送、Provider 凭据或外部配置授权，未执行外部状态变更，Story 保持 `in-progress`。
+- Re-review 2026-07-25 全量修复：14/14 Patch 已闭合；Controller 98/98 tests，主仓库 `type`、`lint`、230 unit、157 contract 与十四项 `architecture-required` 全绿。五个新增 Gate Schema 均由独立 blocking gate、入口、真实 Vitest 正负测试、fixture 与 challenge evidence 闭合；未提交、推送或修改 Provider 外部状态，Story 保持 `in-progress`。
 
 ### Completion Notes List
 
@@ -424,13 +555,41 @@ GPT-5 Codex
 - Task 3：交付固定 Git OID evaluator、确定性 merge-base、NUL name-status parser、受限 POSIX glob 与明确不可生成 Hosted evidence 的 local-fixture 模式。
 - Task 4：交付固定八文件 source set、Planning Reference Grammar、定义/Story/AD/DAG/反向表/链接/ProductValidation/sprint 屏障检查及稳定相对诊断。
 - Task 5：交付全量继续执行但最终 fail-closed 的 registry runner、GateOutput/GateEvidence、旁路原始日志、外部固定 child workflow 与 provider API/attestation Controller policy。
-- Task 6：已交付独立 App 身份、immutable producer、sequence=16 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset、独立只读 drift monitor、cleanup ownership 与 Controller drift/replay 修复；外部调度/PR webhook SLA 保持阻塞。
+- Task 6：已交付独立 App 身份、immutable producer、sequence=16 可信 registry、provider attestation/CAS、active/strict/无 bypass ruleset、独立只读 drift monitor、cleanup ownership、平台中立 lease guardian 与 Controller 全局撤销/快照重验。
 - Task 7：已交付合同/Git/规划/provider 全量负向测试、真实 umbrella 失败阻断、最终恢复和 App identity 漂移演练。
-- Task 8：已更新 sequence=16 生产证据与九项 gate owner/producer/digest 交付表；实际 plan、外部调度/PR webhook SLA 与 sequence=16 受控 drift 撤销/恢复证据仍阻塞完成。
+- Task 8：已更新 sequence=16 与当前 `aeb3cf9…` Provider 证据、九项 gate owner/producer/digest 交付表及真实撤销/恢复记录；plan API `null` 与特定厂商 SLA/webhook 不再作为额外阻塞。
+- Full re-review：闭合 guardian 错误传播与 runtime、proposed registry PR-head CAS、workflow run 身份复验、AST 公共能力表面与 capability→gate 映射、规划语义遮蔽、PowerShell 扫描、future monitor 时间及 Windows cleanup deadline 共 15 项 finding。
+- Final adversarial re-review：闭合 guardian deadline 洗白、proposal 过期、重复 head/PR-run 绑定、POST-success 即时撤销、Schema 词法指纹与 namespace/freeze、能力验证 runtime、CLI 唯一分派、CommonMark block state 与远程 shell tokenizer 共 13 项；仅保留需要真实 SHA 的 Harness 两阶段接入。
+- Cumulative adversarial re-review：闭合开放 PR duplicate-head 发布前/发布后复验、Controller 默认分支可信 SHA、guardian 非重叠轮次、公共能力 runtime 证据、Schema/RPC mutation 与语义指纹、权威 DAG/AD Binds/ProductValidation 段落、安全扫描跨行和无扩展名脚本、Windows `%` 与 CommonMark destination 共 20 项；File List 已按两个仓库基线重建为 108 个 Story 范围文件。
+- Re-review 2026-07-25：闭合官方 attestation audience 需求口径、严格三元 CAS、extension/RPC 真实注册面、bootstrap 专属验证、真实断言与 CLI 控制流、Schema shadow/逃逸、HTML comment/fence、stdin 解释器、Node/no-op 根脚本及 pending 幂等共 14 项；File List 更新为 124 个 Story 范围文件。
 
 ### File List
 
+- _bmad-output/implementation-artifacts/1-3-强化-provider-阻断与规划双向追踪门禁.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
+- _bmad-output/planning-artifacts/architecture/architecture-bmad-2026-07-13/ARCHITECTURE-SPINE.md
+- _bmad-output/planning-artifacts/epics.md
+- _bmad-output/planning-artifacts/prds/prd-bmad-2026-07-09/addendum.md
+- _bmad-output/planning-artifacts/prds/prd-bmad-2026-07-09/prd.md
+- .github/workflows/architecture-required.yml
+- .gitignore
+- apps/cli/package.json
+- apps/cli/src/index.ts
+- apps/cli/src/public-command-registry.ts
+- apps/cli/tsconfig.build.json
+- apps/extension/tsconfig.json
 - apps/graph-service/src/instance-owner.ts
+- apps/graph-service/tsconfig.build.json
+- apps/webview/tsconfig.build.json
+- ci/public-capability-gates.v1.json
+- ci/quality-gates.v1.yaml
+- docs/ci/story-1-3-provider-evidence.md
+- docs/repository-layout.md
+- package.json
+- packages/adapters/analyzer-typescript/tsconfig.build.json
+- packages/adapters/git-local/tsconfig.build.json
+- packages/adapters/store-sqlite/tsconfig.build.json
+- packages/application/tsconfig.build.json
 - packages/contracts/runtime/canonical-json.d.mts
 - packages/contracts/runtime/canonical-json.mjs
 - packages/contracts/src/canonical-json.ts
@@ -438,38 +597,98 @@ GPT-5 Codex
 - packages/contracts/src/quality-gate-schema.ts
 - packages/contracts/src/quality-gate.ts
 - packages/contracts/src/runtime-validation.ts
+- packages/contracts/tsconfig.build.json
+- packages/domain/tsconfig.build.json
 - packages/service-client/src/workspace-identity.ts
-- tests/unit/canonical-json.test.ts
-- tests/unit/quality-gate-registry.test.ts
-- ci/quality-gates.v1.yaml
-- package.json
+- packages/service-client/tsconfig.build.json
+- scripts/ci/create-gate-evidence.mjs
+- scripts/ci/evaluate-gate-applicability.mjs
 - scripts/ci/load-quality-gates.mjs
 - scripts/ci/run-architecture-required.mjs
 - scripts/ci/run-process-with-deadline.mjs
+- scripts/contracts/run-public-capability-verification.mjs
+- scripts/contracts/verify-public-gate-definition-v1.mjs
+- scripts/contracts/verify-public-gate-evaluation-context-v1.mjs
+- scripts/contracts/verify-public-gate-evidence-v1.mjs
+- scripts/contracts/verify-public-gate-output-v1.mjs
+- scripts/contracts/verify-public-gate-registry-v1.mjs
+- scripts/contracts/validate-public-capability-gates.mjs
 - scripts/contracts/validate-repository-contract.mjs
 - scripts/planning/check-planning-traceability.mjs
+- scripts/quality/resolve-pnpm-invocation.mjs
+- scripts/quality/run-workspace-script.mjs
 - scripts/security/check-basic-security.mjs
 - tests/contract/basic-security-coverage.test.ts
+- tests/contract/ci-workflow.test.ts
+- tests/contract/failure-propagation.test.ts
+- tests/contract/planning-traceability.test.ts
 - tests/contract/quality-command-contract.test.ts
 - tests/contract/quality-gates-manifest.test.ts
 - tests/contract/repository-contract-negative.test.ts
-- scripts/ci/evaluate-gate-applicability.mjs
-- tests/unit/gate-applicability.test.ts
-- _bmad-output/planning-artifacts/architecture/architecture-bmad-2026-07-13/ARCHITECTURE-SPINE.md
-- _bmad-output/planning-artifacts/epics.md
-- tests/contract/planning-traceability.test.ts
-- tests/unit/planning-traceability.test.ts
-- .github/workflows/architecture-required.yml
-- .gitignore
-- scripts/ci/create-gate-evidence.mjs
-- tests/contract/ci-workflow.test.ts
-- tests/contract/failure-propagation.test.ts
-- tests/unit/gate-evidence.test.ts
-- docs/repository-layout.md
-- docs/ci/story-1-3-provider-evidence.md
-- _bmad-output/implementation-artifacts/sprint-status.yaml
 - tests/contract/repository-documentation.test.ts
+- tests/contract/root-toolchain.test.ts
+- tests/fixtures/public-gate-definition-v1.json
+- tests/fixtures/public-gate-evaluation-context-v1.json
+- tests/fixtures/public-gate-evidence-v1.json
+- tests/fixtures/public-gate-output-v1.json
+- tests/fixtures/public-gate-registry-v1.json
+- tests/unit/canonical-json.test.ts
 - tests/unit/connect-first-discovery.test.ts
+- tests/unit/gate-applicability.test.ts
+- tests/unit/gate-evidence.test.ts
+- tests/unit/planning-traceability.test.ts
+- tests/unit/process-deadline.test.ts
+- tests/unit/public-capability-gate.test.ts
+- tests/unit/public-capability-verification-runtime.test.ts
+- tests/unit/public-gate-definition-v1-capability.test.ts
+- tests/unit/public-gate-evaluation-context-v1-capability.test.ts
+- tests/unit/public-gate-evidence-v1-capability.test.ts
+- tests/unit/public-gate-output-v1-capability.test.ts
+- tests/unit/public-gate-registry-v1-capability.test.ts
+- tests/unit/quality-gate-registry.test.ts
+- tests/unit/service-launcher.test.ts
+- tests/unit/workspace-order.test.ts
+- ../code-graph-gate-controller/.github/workflows/controller.yml
+- ../code-graph-gate-controller/.github/workflows/drift-monitor.yml
+- ../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml
+- ../code-graph-gate-controller/bin/produce-gate-evidence.mjs
+- ../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs
+- ../code-graph-gate-controller/bin/run-controller.mjs
+- ../code-graph-gate-controller/bin/run-drift-monitor.mjs
+- ../code-graph-gate-controller/lib/applicability.mjs
+- ../code-graph-gate-controller/lib/best-effort.mjs
+- ../code-graph-gate-controller/lib/canonical-json.mjs
+- ../code-graph-gate-controller/lib/check-replay-policy.mjs
+- ../code-graph-gate-controller/lib/controller-check-publisher.mjs
+- ../code-graph-gate-controller/lib/controller-policy.mjs
+- ../code-graph-gate-controller/lib/gate-implementation-policy.mjs
+- ../code-graph-gate-controller/lib/gate-command-policy.mjs
+- ../code-graph-gate-controller/lib/git-context.mjs
+- ../code-graph-gate-controller/lib/github-api.mjs
+- ../code-graph-gate-controller/lib/github-pagination.mjs
+- ../code-graph-gate-controller/lib/harness.mjs
+- ../code-graph-gate-controller/lib/registry.mjs
+- ../code-graph-gate-controller/lib/run-process-with-deadline.mjs
+- ../code-graph-gate-controller/pnpm-lock.yaml
+- ../code-graph-gate-controller/tests/best-effort.test.mjs
+- ../code-graph-gate-controller/tests/canonical-json.test.mjs
+- ../code-graph-gate-controller/tests/check-replay-policy.test.mjs
+- ../code-graph-gate-controller/tests/controller-check-publisher.test.mjs
+- ../code-graph-gate-controller/tests/controller-cycle.test.mjs
+- ../code-graph-gate-controller/tests/controller-lease-guardian.test.mjs
+- ../code-graph-gate-controller/tests/controller-policy.test.mjs
+- ../code-graph-gate-controller/tests/gate-implementation-policy.test.mjs
+- ../code-graph-gate-controller/tests/github-api.test.mjs
+- ../code-graph-gate-controller/tests/github-pagination.test.mjs
+- ../code-graph-gate-controller/tests/harness-cli.test.mjs
+- ../code-graph-gate-controller/tests/harness.test.mjs
+- ../code-graph-gate-controller/tests/process-deadline.test.mjs
+- ../code-graph-gate-controller/tests/registry.test.mjs
+- ../code-graph-gate-controller/tests/workflow-contract.test.mjs
+- ../code-graph-gate-controller/trusted/previous-registry-approval.json
+- ../code-graph-gate-controller/trusted/previous-registry.json
+- ../code-graph-gate-controller/trusted/registry-approval.json
+- ../code-graph-gate-controller/trusted/registry.json
 
 ### Change Log
 
@@ -479,3 +698,8 @@ GPT-5 Codex
 - 2026-07-24：sequence=14 的 run `30059752064` 已使 type/build 等七项通过，并暴露 Harness TMP 路径叠加完整 gateId 导致 Unix socket fixture 超限；已交付短 base36 槽位与 `/g` 临时根，准备 sequence=15，Story 保持 `in-progress`。
 - 2026-07-24：sequence=15 的 run `30061084230` attempt 2 已九项全绿并闭合 artifact/attestation/Controller/monitor/ruleset 证据；审查继续发现 cleanup ownership、drift failure 撤销、check history 分页与 Controller 竞态，已准备 producer `78e84ade…` 与 registry `779bc1d3…` 推进 sequence=16。实际 plan 和可靠外部事件调度仍未解决，Story 保持 `in-progress`。
 - 2026-07-24：sequence=16 已在候选 `b853937…` 完成九项全绿、artifact/attestation、fresh monitor、Controller App success、active/strict/无 bypass ruleset 与 PR `CLEAN` 复验。实际 plan、可靠外部调度/PR webhook 与新撤销路径的真实 drift 演练仍未解决，Story 保持 `in-progress`。
+- 2026-07-24：复审 18 项 Patch 全部修复并完成两轮完整门禁；删除 plan/特定 SLA/webhook 的追加阻塞，明确 fork PR 不支持，新增公共能力差异 gate、平台中立 lease guardian、全局撤销、deadline、可信 monitor 绑定与 PR 快照重验。等待新的可信 sequence/Hosted 同 SHA 证据，Story 保持 `in-progress`。
+- 2026-07-24：Full re-review 的 15 项 Patch 全部修复；Controller 75/75 与主仓九项 `architecture-required` 全绿。因新实现尚未推进可信 sequence/Hosted 同 SHA 证据，Story 与 sprint 保持 `in-progress`。
+- 2026-07-24：Final adversarial re-review 的 13 项可修复 finding 全部闭合；Controller 88/88、主仓 201 unit/138 contract 及九项 `architecture-required` 全绿。Harness V2 阶段 B 必须依赖未来真实 commit H 与 producer pin，未执行提交、推送、部署或 Provider 切换，Story 与 sprint 保持 `in-progress`。
+- 2026-07-25：Cumulative adversarial re-review 的 22 项 Patch 中 20 项本地可修项已闭合；Controller 93/93、主仓 220 unit/144 contract、`type`、`lint` 与九项 `architecture-required` 全绿，File List 重建为 108 个 Story 范围文件。Hosted producer 的不可变 Harness V2 两提交链与 PR 生命周期 pending 覆盖仍需外部授权/状态变更，Story 与 sprint 保持 `in-progress`。
+- 2026-07-25：本轮 Re-review 的 14 项 Patch 已全部本地闭合；Controller 98/98、主仓 230 unit/157 contract、`type`、`lint` 与十四项 `architecture-required` 全绿，File List 更新为 124 个 Story 范围文件。Hosted Harness V2 不可变 producer 链与 PR 生命周期 pending 覆盖仍需提交/推送及 Provider 外部状态变更，未获本轮授权，Story 与 sprint 保持 `in-progress`。

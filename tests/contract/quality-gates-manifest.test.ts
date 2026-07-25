@@ -8,7 +8,7 @@ import {
 } from "../../scripts/ci/load-quality-gates.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
-const workflowSha = "78e84adecc7ef1b73a881dbd4bb6224ce7a7a769";
+const workflowSha = "c01e7c0550b9d9150df26c20cebb10aaefdf648d";
 const temporaryRoots: string[] = [];
 
 const expectedGates = [
@@ -18,6 +18,31 @@ const expectedGates = [
   ["dependency-boundary", ["pnpm", "dependency-boundary"], "architecture"],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
   ["planning-traceability", ["pnpm", "planning-trace"], "architecture-po"],
+  [
+    "public-gate-definition-v1",
+    ["node", "scripts/contracts/verify-public-gate-definition-v1.mjs", "--capability", "schema:gateDefinitionV1Schema", "--test", "tests/unit/public-gate-definition-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-definition-v1.json", "--evidence-id", "public-capability:schema:gateDefinitionV1Schema"],
+    "qa",
+  ],
+  [
+    "public-gate-evaluation-context-v1",
+    ["node", "scripts/contracts/verify-public-gate-evaluation-context-v1.mjs", "--capability", "schema:gateEvaluationContextV1Schema", "--test", "tests/unit/public-gate-evaluation-context-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-evaluation-context-v1.json", "--evidence-id", "public-capability:schema:gateEvaluationContextV1Schema"],
+    "qa",
+  ],
+  [
+    "public-gate-evidence-v1",
+    ["node", "scripts/contracts/verify-public-gate-evidence-v1.mjs", "--capability", "schema:gateEvidenceV1Schema", "--test", "tests/unit/public-gate-evidence-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-evidence-v1.json", "--evidence-id", "public-capability:schema:gateEvidenceV1Schema"],
+    "qa",
+  ],
+  [
+    "public-gate-output-v1",
+    ["node", "scripts/contracts/verify-public-gate-output-v1.mjs", "--capability", "schema:gateOutputV1Schema", "--test", "tests/unit/public-gate-output-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-output-v1.json", "--evidence-id", "public-capability:schema:gateOutputV1Schema"],
+    "qa",
+  ],
+  [
+    "public-gate-registry-v1",
+    ["node", "scripts/contracts/verify-public-gate-registry-v1.mjs", "--capability", "schema:gateRegistryV1Schema", "--test", "tests/unit/public-gate-registry-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-registry-v1.json", "--evidence-id", "public-capability:schema:gateRegistryV1Schema"],
+    "qa",
+  ],
   [
     "repository-contract-preflight",
     ["node", "scripts/contracts/validate-repository-contract.mjs"],
@@ -34,7 +59,7 @@ afterEach(async () => {
 });
 
 describe("quality-gates.v1 registry", () => {
-  it("登记唯一、升序、always-applicable 的九项 blocking gate", async () => {
+  it("登记唯一、升序、always-applicable 的十四项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);
@@ -73,6 +98,16 @@ describe("quality-gates.v1 registry", () => {
           gates: Array<{ gateDefinition: { command: string[] } }>;
         };
         copy.gates[0]!.gateDefinition.command = ["true"];
+        return copy;
+      },
+    ],
+    [
+      "attached node inline command",
+      (registry: Record<string, unknown>) => {
+        const copy = structuredClone(registry) as {
+          gates: Array<{ gateDefinition: { command: string[] } }>;
+        };
+        copy.gates[0]!.gateDefinition.command = ["node", "--eval=process.exit(0)"];
         return copy;
       },
     ],

@@ -5,6 +5,10 @@ import path from "node:path";
 import { parse } from "yaml";
 import { loadQualityGateRegistry } from "../ci/load-quality-gates.mjs";
 import { discoverWorkspaces } from "../workspace/discover-workspaces.mjs";
+import {
+  collectPublicCapabilityVerificationCommands,
+  validatePublicCapabilityGateDiff,
+} from "./validate-public-capability-gates.mjs";
 
 const requiredWorkspaceRoots = ["apps/*", "packages/*", "packages/adapters/*"];
 const ignoredDirectoryNames = new Set([
@@ -89,7 +93,7 @@ async function collectProductManifests(root, relativeDirectory) {
   return manifests;
 }
 
-export async function validateRepositoryContract(root) {
+export async function validateRepositoryContract(root, options = {}) {
   const violations = [];
   let gateRegistry = null;
   try {
@@ -113,6 +117,25 @@ export async function validateRepositoryContract(root) {
     "apps/extension/package.json",
     violations,
   );
+  let capabilityVerificationCommands = new Set();
+  try {
+    const bindingsSource = await readFile(
+      path.join(root, "ci/public-capability-gates.v1.json"),
+      "utf8",
+    );
+    capabilityVerificationCommands = collectPublicCapabilityVerificationCommands(bindingsSource);
+  } catch (error) {
+    if (!(error && typeof error === "object" && error.code === "ENOENT")) {
+      violations.push(
+        violation(
+          "ci/public-capability-gates.v1.json",
+          "public-capability-gate",
+          error instanceof Error ? error.message : "公共能力 bindings 无法验证。",
+          "恢复封闭、升序且命令可派生的公共能力 bindings",
+        ),
+      );
+    }
+  }
 
   if (rootManifest) {
     if (rootManifest.scripts?.["architecture-required"] !== "node scripts/ci/run-architecture-required.mjs") {
@@ -126,7 +149,13 @@ export async function validateRepositoryContract(root) {
       );
     }
     for (const entry of gateRegistry?.registry.gates ?? []) {
-      validateGateCommandContract(root, rootManifest, entry.gateDefinition, violations);
+      validateGateCommandContract(
+        root,
+        rootManifest,
+        entry.gateDefinition,
+        violations,
+        capabilityVerificationCommands,
+      );
     }
     if (rootManifest.packageManager !== "pnpm@11.12.0") {
       violations.push(
@@ -263,6 +292,23 @@ export async function validateRepositoryContract(root) {
     }
   }
 
+  const baseOid = options.baseOid ?? process.env.CODEGRAPH_BASE_OID;
+  const headOid = options.headOid ?? process.env.CODEGRAPH_HEAD_OID;
+  if (baseOid !== undefined || headOid !== undefined) {
+    try {
+      violations.push(...await validatePublicCapabilityGateDiff(root, baseOid, headOid));
+    } catch (error) {
+      violations.push(
+        violation(
+          "ci/quality-gates.v1.yaml",
+          "public-capability-gate",
+          error instanceof Error ? error.message : "公共能力门禁差异无法验证。",
+          "恢复完整 provider base/head OID，并为新增公共能力加入新的 blocking gate",
+        ),
+      );
+    }
+  }
+
   return violations.sort((left, right) =>
     `${left.relativePath}:${left.rule}`.localeCompare(
       `${right.relativePath}:${right.rule}`,
@@ -271,7 +317,13 @@ export async function validateRepositoryContract(root) {
 }
 
 /** 从唯一 Gate Registry 派生并验证根脚本或 checked-in Node 入口。 */
-function validateGateCommandContract(root, rootManifest, definition, violations) {
+function validateGateCommandContract(
+  root,
+  rootManifest,
+  definition,
+  violations,
+  capabilityVerificationCommands,
+) {
   const [executable, ...args] = definition.command;
   if (executable === "pnpm" && args.length === 1) {
     const scriptName = args[0];
@@ -288,7 +340,14 @@ function validateGateCommandContract(root, rootManifest, definition, violations)
     }
     return;
   }
-  if (executable === "node" && args.length === 1 && isSafeScriptPath(args[0])) {
+  const approvedCapabilityCommand = capabilityVerificationCommands.has(
+    JSON.stringify(definition.command),
+  );
+  if (
+    executable === "node" &&
+    isSafeScriptPath(args[0]) &&
+    (args.length === 1 || approvedCapabilityCommand)
+  ) {
     const absolutePath = path.join(root, ...args[0].split("/"));
     try {
       accessSync(absolutePath);
@@ -309,7 +368,7 @@ function validateGateCommandContract(root, rootManifest, definition, violations)
       "ci/quality-gates.v1.yaml",
       "gate-command-contract",
       `registry gate '${definition.gateId}' 使用未批准的命令形状。`,
-      "使用 ['pnpm','<root-script>'] 或 ['node','<checked-in-relative-path>']",
+      "使用 ['pnpm','<root-script>']、单入口 Node 命令或 bindings 精确派生的能力验证 argv",
     ),
   );
 }

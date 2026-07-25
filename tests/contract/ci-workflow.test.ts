@@ -7,7 +7,11 @@ const workflowPath = path.join(
   repositoryRoot,
   ".github/workflows/architecture-required.yml",
 );
-const producerSha = "78e84adecc7ef1b73a881dbd4bb6224ce7a7a769";
+const lifecycleWorkflowPath = path.join(
+  repositoryRoot,
+  ".github/workflows/architecture-pr-lifecycle.yml",
+);
+const producerSha = "c01e7c0550b9d9150df26c20cebb10aaefdf648d";
 
 describe("child gate evidence workflow", () => {
   it("runs on every pull request and protected default-branch push", async () => {
@@ -43,5 +47,28 @@ describe("child gate evidence workflow", () => {
     expect(workflow).not.toMatch(/continue-on-error|\|\|\s*true/u);
     expect(workflow).not.toMatch(/^\s+run:/mu);
     expect(workflow.match(/uses:\s+[^\s]+@[0-9a-f]{40}/gu)).toHaveLength(1);
+  });
+});
+
+describe("architecture PR lifecycle workflow", () => {
+  it("由受信任 pull_request_target 事件发布 Controller App pending", async () => {
+    const workflow = await readFile(lifecycleWorkflowPath, "utf8");
+
+    expect(workflow).toContain("pull_request_target:");
+    for (const action of [
+      "edited",
+      "opened",
+      "ready_for_review",
+      "reopened",
+      "synchronize",
+    ]) {
+      expect(workflow).toContain(`- ${action}`);
+    }
+    expect(workflow).toContain(
+      `uses: Rockyyy-S/code-graph-gate-controller/.github/workflows/publish-pr-pending.yml@${producerSha}`,
+    );
+    expect(workflow).toContain(`controller_workflow_sha: ${producerSha}`);
+    expect(workflow).not.toMatch(/secrets:/u);
+    expect(workflow).not.toMatch(/checkout|github\.event\.pull_request\.head\.repo/u);
   });
 });

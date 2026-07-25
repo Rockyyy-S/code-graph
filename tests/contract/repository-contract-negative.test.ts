@@ -129,6 +129,76 @@ describe("repository contract negative paths", () => {
     expectPortableViolation(violations, "root-script-contract");
   });
 
+  it("accepts only the exact capability verification Node argv declared by bindings", async () => {
+    const root = await createValidContractFixture();
+    const capabilityId = "rpc:graph/query";
+    const evidenceId = `public-capability:${capabilityId}`;
+    const entryPath = "scripts/contracts/verify-graph-query.mjs";
+    const testPath = "tests/contract/graph-query.contract.test.ts";
+    const fixturePath = "tests/fixtures/graph-query.request.json";
+    const assertionTarget = {
+      exportName: "validateGraphQuery",
+      modulePath: "packages/application/src/graph-query.ts",
+    };
+    const command = [
+      "node",
+      entryPath,
+      "--capability",
+      capabilityId,
+      "--test",
+      testPath,
+      "--fixture",
+      fixturePath,
+      "--evidence-id",
+      evidenceId,
+    ];
+    await writeJson(root, "ci/public-capability-gates.v1.json", {
+      bindings: [{
+        capabilityId,
+        gateId: "graph-query-contract",
+        verification: { assertionTarget, entryPath, evidenceId, fixturePath, testPath },
+      }],
+      schemaVersion: 1,
+    });
+    const absoluteEntry = path.join(root, ...entryPath.split("/"));
+    await mkdir(path.dirname(absoluteEntry), { recursive: true });
+    await writeFile(absoluteEntry, "// fixture entry\n", "utf8");
+    const registryPath = path.join(root, "ci/quality-gates.v1.yaml");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
+      gates: Array<Record<string, unknown>>;
+      schemaVersion: number;
+    };
+    const gateDefinition = {
+      blocking: true,
+      capabilityOwner: "qa",
+      checkId: "graph-query-contract",
+      command,
+      evidenceProducerId: `gha-oidc://1303415307/example/controller/.github/workflows/produce-gate-evidence.yml@${"1".repeat(40)}#graph-query-contract`,
+      gateId: "graph-query-contract",
+    };
+    registry.gates.push({
+      gateDefinition,
+      gateDefinitionDigest: sha256CanonicalJson(gateDefinition),
+    });
+    registry.gates.sort((left, right) => {
+      const leftId = (left.gateDefinition as { gateId: string }).gateId;
+      const rightId = (right.gateDefinition as { gateId: string }).gateId;
+      return leftId.localeCompare(rightId);
+    });
+    await writeJson(root, "ci/quality-gates.v1.yaml", registry as Record<string, unknown>);
+
+    const accepted = await validateRepositoryContract(root);
+    expect(accepted.filter(({ rule }) => rule === "gate-command-contract")).toEqual([]);
+
+    gateDefinition.command = [...command, "--extra"];
+    const gate = registry.gates.find((entry) =>
+      (entry.gateDefinition as { gateId: string }).gateId === "graph-query-contract"
+    ) as { gateDefinition: typeof gateDefinition; gateDefinitionDigest: string };
+    gate.gateDefinitionDigest = sha256CanonicalJson(gateDefinition);
+    await writeJson(root, "ci/quality-gates.v1.yaml", registry as Record<string, unknown>);
+    expectPortableViolation(await validateRepositoryContract(root), "gate-command-contract");
+  });
+
   it("rejects toolchain version drift", async () => {
     const root = await createValidContractFixture();
     const manifest = await readRootManifest(root);

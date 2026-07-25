@@ -296,12 +296,18 @@ function isCanonicalTriggerGlob(value: string): boolean {
 
 /** 公共 GateDefinition validator 与运行时 registry loader 共享 no-op 语义。 */
 function isNoOpGateCommand(command: readonly string[]): boolean {
-  const executable = command[0]!.toLowerCase().replace(/\.exe$/u, "");
+  const executable = command[0]!
+    .split(/[\\/]/u)
+    .at(-1)!
+    .toLowerCase()
+    .replace(/\.exe$/u, "");
   if (["echo", "printf", "true"].includes(executable)) {
     return true;
   }
   return (
     executable === "node" &&
-    command.slice(1).some((argument) => ["-e", "--eval", "-p", "--print"].includes(argument))
+    command.slice(1).some(
+      (argument) => /^(?:-e|-p).*/u.test(argument) || /^--(?:eval|print)(?:=|$)/u.test(argument),
+    )
   );
 }

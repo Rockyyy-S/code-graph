@@ -1,12 +1,12 @@
 # Story 1.3 Provider 证据
 
 > 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset 与真实失败阻断均已激活；
-> sequence=16 已绑定候选 `b853937a…`。Hosted run `30063231289` attempt 2 的九项 gate 全部
-> 通过，final artifact、attestation、fresh monitor、Controller App success 与 PR `CLEAN` 已闭合；
-> `/g` cleanup ownership、drift failure 撤销、历史 check 全分页及 Controller 并发竞态均已接入
-> 生产可信链。实际 GitHub
-> account/repository plan、具备 SLA 的外部调度和 PR opened/reopened/synchronize 可信事件源仍缺
-> 独立证据，因此 Story 保持 `in-progress`。
+> 当前候选 HEAD 为 `aeb3cf996dfd2dbcc17a1d39f9e70729eb092768`，Hosted child run
+> `30063946450` 已完成。受控观测证明旧 success 曾在 monitor 过期后保留约 48 分钟，随后
+> App-owned failure `89398429939` 撤销绿色结论；恢复 monitor `30067144344` 与 Controller
+> `30067151956` 后，新 success `89400277110` 使 PR #5 恢复 `CLEAN`。复审修复新增平台中立
+> lease guardian、全局故障撤销和 PR 快照重验；当前 Story 保持 `in-progress`，等待这些本地修复
+> 进入新的可信 Controller/Hosted 证据链。
 
 ## Provider 与控制面身份
 
@@ -15,7 +15,7 @@
 - repository ID：`1303415307`
 - visibility：`public`
 - default branch：`main`
-- billing plan API 字段：当前授权令牌返回 `null`；不以 ruleset 能力替代实际 plan 证据，此项仍阻塞验收
+- billing plan API 字段：当前授权令牌返回 `null`；仅作信息记录，不把未暴露的 plan 字段追加为原始 AC 阻塞
 - 外部控制面仓库：`Rockyyy-S/code-graph-gate-controller`
 - 当前生产可信记录：sequence `16`，source commit `b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf`
 - 当前生产 reusable producer：`78e84adecc7ef1b73a881dbd4bb6224ce7a7a769`
@@ -42,9 +42,12 @@
 - `/g` cleanup ownership：仅当当前 job 成功创建 `/g` 并写入环境标记后才执行递归清理；预存
   `/g` 会在创建前 fail closed，且不会被 `always()` cleanup 误删
 - Controller drift 撤销：运行串行排队且不取消活跃批次；任何发布或保留的 success 都在动作前
-  重新读取 fresh monitor；开放 PR、workflow runs、jobs、artifacts 与 `filter=all` check history 完整
-  分页，分页瞬态失败重试，drift failure 在历史读取失败时仍直接追加 App-owned failure，并对所有
-  已读取 PR best-effort 撤销后汇总错误
+  重新读取 fresh monitor；开放 PR、workflow runs、jobs 与 artifacts 完整分页，check history 只读取
+  同一 head/name 的最近 100 项并以稳定 CAS/replay 做幂等；drift failure 在历史读取失败时仍直接追加
+  App-owned failure，并对所有已读取 PR best-effort 撤销后汇总错误
+- 复审 lease 约束：Controller 新增每分钟重验的常驻 guardian；任何可信记录、App 配置、monitor、
+  Provider API 或验证故障都进入全局撤销，并在撤销前后重复采样开放 PR，直至 number/base/head
+  集合稳定。实现不绑定 Cloudflare、AWS 或特定 webhook，GitHub workflow 仅作为当前运行适配器
 - workspace pnpm 启动：相对 `npm_execpath=pnpm` 只允许从受控 PATH 解析；绝对 JS launcher 由
   当前 Node 执行，绝对 native launcher 直接执行，其他相对值 fail closed
 - TypeScript 增量状态：11 个 composite 配置均把 `tsconfig*.tsbuildinfo` 固定到已授权 `dist`，
@@ -148,6 +151,9 @@
 | child run `30063231289` attempt 2 | `b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf` | sequence=16 生效后九项 gate 全部 `pass`，`evidenceCount=9, passed=true`，raw/final artifact 与 attestation 全部成功 |
 | Controller run `30063500387` | 同上 | App `4372284` 发布 check `89389784122` 为 `architecture-required=success`；结果 `accepted`，trusted sequence `16` |
 | PR #5 | 同上 | `mergeStateStatus=CLEAN`；required check 仅由 Controller App `4372284` 满足 |
+| child run `30063946450` | `aeb3cf996dfd2dbcc17a1d39f9e70729eb092768` | 当前候选 Hosted child 完成，作为本次复审前生产候选基线 |
+| Controller failure check `89398429939` | 同上 | monitor 已过期后撤销旧 success，App-owned `architecture-required=failure` 使 PR fail closed |
+| Controller success check `89400277110` | 同上 | 恢复 monitor 与 Controller 后重新发布 success，PR #5 恢复 `CLEAN` |
 
 sequence=15 最终恢复 artifact：
 
@@ -188,22 +194,27 @@ sequence=16 最终恢复 artifact：
 | Controller `30061381372` | sequence=15 可信根验证通过并发布 App-owned success |
 | monitor `30063386894` | sequence=16 Controller commit `6bf1bde…` 上返回 `{"issues":[],"status":"valid"}` |
 | Controller `30063500387` | sequence=16 验证 producer/registry/artifact/attestation 后发布 check `89389784122` success |
+| monitor `30063807174` | `03:16:32Z` 完成；按 15 分钟 freshness 于 `03:31:32Z` 过期 |
+| stale success `89391309580` | monitor 过期后仍保留至 `04:19:44Z`，形成约 48 分钟陈旧绿色窗口 |
+| failure check `89398429939` | Controller 对当前候选发布 App-owned failure，撤销旧绿色并阻断合并 |
+| monitor `30067144344` | provider/ruleset 恢复后重新取得 fresh monitor success |
+| Controller `30067151956` | 重新验证当前候选与可信根后完成恢复聚合 |
+| success check `89400277110` | App `4372284` 重新发布 `architecture-required=success`，PR #5 恢复 `CLEAN` |
 
-Drift Monitor 使用 REST 验证 ruleset 内容，并使用同一只读 App 的 GraphQL
+Drift Monitor 使用完整分页 REST 验证 ruleset 内容，并使用同一只读 App 的 GraphQL
 `bypassActors.totalCount` 验证 bypass 空集合，避免因 REST 对只读 token 隐藏 `bypass_actors`
-而降低权限。monitor 保留五分钟 schedule；Controller 改为在 monitor 完成时直接触发，并在两分钟后
-保留错开的 schedule 兜底。失败、缺失或超过 15 分钟的新鲜度仍使 Controller fail closed；
-GitHub cron 不提供调度 SLA，线上 schedule 也曾出现约 55–90 分钟延迟，因此外部可靠触发证据仍是
-Story 完成阻塞项。Controller 仓库也无法直接监听目标仓库 PR 的 opened/reopened/synchronize 或 child
-workflow 完成事件；在缺少 Controller App webhook、可信跨仓库 dispatch 或等价外部服务时，轮询快照
-无法消除 PR 在撤销循环后 force-push/重开到旧 success SHA 的竞态。
+而降低权限。复审实现保留 monitor 完成事件与错开 schedule 作为触发，同时由常驻 lease guardian
+在单个受信任运行内每分钟重验 freshness；失败、缺失或超过 15 分钟即进入全局撤销。撤销路径在发布
+failure 前后重复采样开放 PR，发布正常结论前也重新读取当前 base/head，关闭 force-push/reopen 到旧
+快照的本地竞态。该行为合同不要求特定云平台或 webhook；运行适配器能否持续存活属于部署验证，
+不再把某一厂商 SLA 或事件类型追加为原始 AC。
 
 ## 最终验证
 
-- 外部 Controller 审查修复分支 tests：60/60 通过
+- 外部 Controller 当前复审修复分支 tests：98/98 通过
 - `pnpm install --frozen-lockfile`：通过
-- `pnpm architecture-required`：九项全部通过
+- `pnpm architecture-required`：本地十四项全部通过；新增五项为 Gate Schema 能力专属 verification
 - sequence=15 候选 child evidence、artifact、attestation、Controller umbrella、ruleset 与 fresh monitor：全部通过
-- sequence=16 候选已完成可信记录、同 SHA Hosted 九项、artifact/attestation、fresh monitor、Controller App success 与 PR `CLEAN` 复验
-- 真实 success→drift failure→App failure→恢复演练尚未针对 sequence=16 新撤销路径执行；外部可靠调度/PR webhook 与实际 plan 仍阻塞 Story 完成
+- 当前候选 `aeb3cf9…` 的 child run `30063946450`、failure `89398429939`、恢复 monitor/Controller 与 success `89400277110` 已回填
+- 复审新增 lease guardian、全局错误撤销、deadline、可信 monitor ref/path/head 绑定和 PR 快照重验；新的 Hosted 同 SHA 证据需在部署后刷新
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果

@@ -64,6 +64,18 @@ describe("planning traceability", () => {
     );
   });
 
+  it("检测 AD Binds 合法编号集合相对权威基线的静默收窄", () => {
+    expectRule(
+      mutateSource("architecture", (source) =>
+        source.replace(
+          "- **Binds:** FR-1 至 FR-5, FR-20 至 FR-22, NFR-9 至 NFR-11, NFR-27",
+          "- **Binds:** FR-2 至 FR-5, FR-20 至 FR-22, NFR-9 至 NFR-11, NFR-27",
+        ),
+      ),
+      "ad-binds",
+    );
+  });
+
   it("检测 Story 关联需求中的未知、越界和裸数字", () => {
     expectRule(
       mutateSource("epics", (source) =>
@@ -101,6 +113,43 @@ describe("planning traceability", () => {
     expectRule(mutateSource("epics", mutate), rule);
   });
 
+  it("拒绝 HTML 注释中的唯一 DAG 或追加的第二个冲突 DAG block", () => {
+    expectRule(
+      mutateSource("epics", (source) =>
+        source.replace(
+          /(### StoryDependencyDagV1[\s\S]*?```yaml[\s\S]*?```)/u,
+          "<!-- $1 -->",
+        ),
+      ),
+      "dag-parse",
+    );
+    expectRule(
+      mutateSource("epics", (source) => {
+        const block = /(### StoryDependencyDagV1[^\r\n]*[\s\S]*?```yaml\s*[\s\S]*?```)/u.exec(source)?.[1];
+        return block === undefined ? source : `${source}\n${block}\n`;
+      }),
+      "dag-parse",
+    );
+  });
+
+  it("未闭合 HTML 注释中的 fence 不得恢复隐藏规划语义", () => {
+    expectRule(
+      mutateSource("epics", (source) =>
+        source.replace(
+          /(### StoryDependencyDagV1[\s\S]*?```yaml[\s\S]*?```)/u,
+          "<!--\n```\n```\n$1\n-->",
+        ),
+      ),
+      "dag-parse",
+    );
+    expectRule(
+      mutateSource("prd", (source) =>
+        source.replace("#### FR-1：", "<!--\n```\n```\n#### FR-1：\n-->"),
+      ),
+      "definition-fr",
+    );
+  });
+
   it("检测仓库内相对 Markdown 链接失效", () => {
     expectRule(
       mutateSource("uxDesign", (source) => `${source}\n[broken](../missing-design.md)\n`),
@@ -115,6 +164,85 @@ describe("planning traceability", () => {
       ),
       "product-validation-reference",
     );
+  });
+
+  it("拒绝用 HTML 注释或 fenced code 伪造 ProductValidation 合同引用", () => {
+    expectRule(
+      mutateSource("prdAddendum", (source) =>
+        source.replaceAll(
+          "ProductValidationPlanV1",
+          "<!-- ProductValidationPlanV1 -->",
+        ),
+      ),
+      "product-validation-reference",
+    );
+    expectRule(
+      mutateSource("prdAddendum", (source) =>
+        source.replaceAll(
+          "ReadinessGatePolicyV1",
+          "```text\nReadinessGatePolicyV1\n```",
+        ),
+      ),
+      "product-validation-reference",
+    );
+    for (const fencedReference of [
+      "> ```text\n> ProductValidationPlanV1\n> ```",
+      "- ```text\n  ProductValidationPlanV1\n  ```",
+    ]) {
+      expectRule(
+        mutateSource("prdAddendum", (source) =>
+          source.replaceAll("ProductValidationPlanV1", fencedReference),
+        ),
+        "product-validation-reference",
+      );
+    }
+  });
+
+  it("拒绝 inline/缩进代码或文末 glossary 伪造 ProductValidation 权威映射", () => {
+    expectRule(
+      mutateSource("implementationGuide", (source) =>
+        source.replaceAll("ProductValidationPlanV1", "`ProductValidationPlanV1`"),
+      ),
+      "product-validation-reference",
+    );
+    expectRule(
+      mutateSource("implementationGuide", (source) =>
+        source
+          .replaceAll("ProductValidationPlanV1", "ProductValidationPlanV2")
+          .replace(
+            "### 版本化产品验证与发布适用性",
+            "### 版本化产品验证与发布适用性\n\n    ProductValidationPlanV1",
+          ),
+      ),
+      "product-validation-reference",
+    );
+    expectRule(
+      mutateSource(
+        "prdAddendum",
+        (source) =>
+          `${source.replaceAll("ReadinessGatePolicyV1", "ReadinessGatePolicyV2")}\n` +
+          "Glossary: ReadinessGatePolicyV1\n",
+      ),
+      "product-validation-reference",
+    );
+  });
+
+  it("HTML 注释状态必须跨 fence 文本保持到显式关闭", () => {
+    const sources = mutateSource("prdAddendum", (source) =>
+      source.replaceAll("ProductValidationPlanV1", "ProductValidationPlanV2").replace(
+        "### 5.7 产品验证与发布适用性合同",
+        `### 5.7 产品验证与发布适用性合同
+<!--
+\`\`\`text
+comment boundary
+\`\`\`
+ProductValidationPlanV1
+-->
+`,
+      ),
+    );
+
+    expectRule(sources, "product-validation-reference");
   });
 
   it("检测关键合同与 Story 映射漂移或整段缺失", () => {
@@ -211,6 +339,27 @@ describe("planning traceability", () => {
     );
   });
 
+  it("拒绝 fenced code 或 HTML 注释伪造两张人工追踪表", () => {
+    expectRule(
+      mutateSource("epics", (source) =>
+        source.replace(
+          /(### 本次调整的需求追踪[\s\S]*?)(### 关键合同与 Story 双向映射)/u,
+          "```md\n$1\n```\n$2",
+        ),
+      ),
+      "reverse-trace",
+    );
+    expectRule(
+      mutateSource("epics", (source) =>
+        source.replace(
+          /(### 关键合同与 Story 双向映射[\s\S]*)$/u,
+          "<!-- $1 -->",
+        ),
+      ),
+      "contract-story-map",
+    );
+  });
+
   it("允许指向仓库内其他现有文件的相对链接", () => {
     const sources = mutateSource(
       "epics",
@@ -284,5 +433,87 @@ describe("planning traceability", () => {
       mutateSource("uxDesign", (source) => `${source}\n[broken-ref]: ../missing-design.md\n`),
       "relative-link",
     );
+  });
+
+  it("遮蔽波浪线 fence，并接受平衡括号、尖括号与 title 的合法 Markdown 链接", () => {
+    expectRule(
+      mutateSource("epics", (source) =>
+        source.replace(
+          "**关联需求：** FR-7、FR-10、NFR-4、NFR-6、NFR-17、UX-DR10、UX-DR23、UX-DR25、UX-DR27、UX-DR32、UX-DR33",
+          "~~~md\n**关联需求：** FR-7、FR-10、NFR-4、NFR-6、NFR-17、UX-DR10、UX-DR23、UX-DR25、UX-DR27、UX-DR32、UX-DR33\n~~~",
+        ),
+      ),
+      "story-requirement",
+    );
+
+    const sources = mutateSource(
+      "epics",
+      (source) =>
+        `${source}\n[布局](../../docs/(arch)/../repository-layout.md "标题")\n` +
+        `[尖括号](<../../docs/repository-layout.md> '标题')\n`,
+    );
+    expect(
+      checkPlanningTraceabilitySources(sources, {
+        existingRelativePaths: new Set([
+          ...Object.values(PLANNING_TRACE_SOURCE_SET_V1),
+          "docs/repository-layout.md",
+        ]),
+      }),
+    ).toEqual([]);
+  });
+
+  it("忽略 inline/缩进代码中的示例链接，并接受大写或扩展 URI scheme", () => {
+    const sources = mutateSource(
+      "epics",
+      (source) =>
+        `${source}\n\`[示例](../missing-inline.md)\`\n` +
+        `    [示例](../missing-indented.md)\n` +
+        `[网页](HTTPS://example.invalid/path)\n` +
+        `[邮件](MAILTO:owner@example.invalid)\n` +
+        `[仓库](GIT+SSH://example.invalid/repository)\n`,
+    );
+
+    expect(checkPlanningTraceabilitySources(sources)).toEqual([]);
+  });
+
+  it("按 CommonMark 转义、嵌套 label 与列表容器语义识别相对链接", () => {
+    expectRule(
+      mutateSource(
+        "epics",
+        (source) => `${source}\n\\\`[真实链接](../missing-escaped-code.md)\\\`\n`,
+      ),
+      "relative-link",
+    );
+    expectRule(
+      mutateSource(
+        "epics",
+        (source) => `${source}\n[outer [inner]](../missing-nested-label.md)\n`,
+      ),
+      "relative-link",
+    );
+    expectRule(
+      mutateSource(
+        "epics",
+        (source) => `${source}\n- 条目\n    [列表链接](../missing-list-link.md)\n`,
+      ),
+      "relative-link",
+    );
+
+    const ignoredSources = mutateSource(
+      "epics",
+      (source) =>
+        `${source}\n\\[不是链接](../missing-escaped-bracket.md)\n` +
+        `    [缩进代码](../missing-indented-code.md)\n`,
+    );
+    expect(checkPlanningTraceabilitySources(ignoredSources)).toEqual([]);
+  });
+
+  it("只反转义 CommonMark ASCII 标点，不把普通字母前反斜杠折叠成现有路径", () => {
+    const sources = mutateSource(
+      "architecture",
+      (source) => `${source}\n[伪路径](IMPLEMEN\\TATION-GUIDE.md)\n`,
+    );
+
+    expectRule(sources, "relative-link");
   });
 });

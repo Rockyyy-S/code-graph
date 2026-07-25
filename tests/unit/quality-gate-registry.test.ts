@@ -60,7 +60,14 @@ describe("quality gate contract", () => {
 
   it("公共 validator 拒绝 no-op、缺字段、非法 owner 和 argv", () => {
     expect(validateGateDefinitionV1(createDefinition({ command: ["true"] }))).toBe(false);
+    expect(validateGateDefinitionV1(createDefinition({ command: ["/usr/bin/true"] }))).toBe(false);
+    expect(validateGateDefinitionV1(createDefinition({ command: ["/bin/echo", "ok"] }))).toBe(false);
     expect(validateGateDefinitionV1(createDefinition({ command: ["node", "--eval", "0"] }))).toBe(false);
+    expect(validateGateDefinitionV1(createDefinition({ command: ["node", "--eval=0"] }))).toBe(false);
+    expect(validateGateDefinitionV1(createDefinition({ command: ["node", "-eprocess.exit(0)"] }))).toBe(false);
+    expect(
+      validateGateDefinitionV1(createDefinition({ command: ["/usr/bin/node", "--eval", "0"] })),
+    ).toBe(false);
     expect(validateGateDefinitionV1({ ...createDefinition(), capabilityOwner: "unknown" })).toBe(false);
     expect(validateGateDefinitionV1({ ...createDefinition(), command: ["pnpm", "\0"] })).toBe(false);
     const missingCommand = { ...createDefinition() } as Partial<GateDefinitionV1>;

@@ -46,6 +46,19 @@ describe("workspace dependency order", () => {
 
     expect(result.errors.join("\n")).toContain("workspace dependency cycle");
   });
+
+  it("fails closed before ordering duplicate workspace package names", () => {
+    const left = workspace("packages/left", "@codegraph/shared");
+    const right = workspace("packages/right", "@codegraph/shared");
+
+    const result = orderWorkspacesByDependencies([right, left]);
+
+    expect(result.errors.join("\n")).toContain("工作区包名");
+    expect(result.workspaces.map(({ relativePath }) => relativePath)).toEqual([
+      "packages/left",
+      "packages/right",
+    ]);
+  });
 });
 
 describe("workspace pnpm invocation", () => {
@@ -68,6 +81,37 @@ describe("workspace pnpm invocation", () => {
       args: ["--dir", "/workspace/contracts", "run", "type"],
       executable: nativeLauncher,
     });
+  });
+
+  it("runs an absolute Windows pnpm.cmd shim through bounded cmd.exe argv", () => {
+    const launcher = "C:\\Program Files\\pnpm\\pnpm.cmd";
+
+    expect(createWorkspacePnpmInvocation(launcher, "C:\\repo root\\contracts", "type"))
+      .toEqual({
+        args: [
+          "/d",
+          "/s",
+          "/c",
+          '""C:\\Program Files\\pnpm\\pnpm.cmd" "--dir" "C:\\repo root\\contracts" "run" "type""',
+        ],
+        executable: process.env.ComSpec ?? "cmd.exe",
+        windowsVerbatimArguments: true,
+      });
+  });
+
+  it("rejects untrusted Windows command shims and unsafe cmd expansion characters", () => {
+    expect(() =>
+      createWorkspacePnpmInvocation("C:\\tools\\other.cmd", "C:\\repo", "type"),
+    ).toThrow(/受控 pnpm launcher/u);
+    expect(() =>
+      createWorkspacePnpmInvocation("C:\\tools\\pnpm.cmd", "C:\\repo!unsafe", "type"),
+    ).toThrow(/不安全字符/u);
+    expect(() =>
+      createWorkspacePnpmInvocation("C:\\tools\\pnpm.cmd", "C:\\repo\\%TEMP%", "type"),
+    ).toThrow(/不安全字符/u);
+    expect(() =>
+      createWorkspacePnpmInvocation("C:\\tools\\pnpm.cmd", "C:\\repo", "%PATH%"),
+    ).toThrow(/不安全字符/u);
   });
 
   it("rejects untrusted relative npm_execpath values", () => {

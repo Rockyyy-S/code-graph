@@ -41,4 +41,27 @@ describe("canonical JSON", () => {
       '{"emoji":"😀","negativeZero":0}',
     );
   });
+
+  it("拒绝数组访问器、Symbol、不可枚举元素和自定义原型且不执行 getter", () => {
+    let getterCalls = 0;
+    const accessor = [1];
+    Object.defineProperty(accessor, "0", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return 1;
+      },
+    });
+    const symbolField = [1];
+    Object.defineProperty(symbolField, Symbol("hidden"), { value: 2 });
+    const hiddenElement = [1];
+    Object.defineProperty(hiddenElement, "0", { enumerable: false, value: 1 });
+    const customPrototype = [1];
+    Object.setPrototypeOf(customPrototype, Object.create(Array.prototype));
+
+    for (const value of [accessor, symbolField, hiddenElement, customPrototype]) {
+      expect(() => canonicalizeJson(value)).toThrow(/JCS/u);
+    }
+    expect(getterCalls).toBe(0);
+  });
 });

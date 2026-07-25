@@ -1,0 +1,16 @@
+{
+  "gates": [
+    {
+      "gateDefinition": {
+        "blocking": true,
+        "capabilityOwner": "dev-enablement",
+        "checkId": "type",
+        "command": ["pnpm", "type"],
+        "evidenceProducerId": "gha-oidc://1303415307/example/controller/.github/workflows/produce-gate-evidence.yml@1111111111111111111111111111111111111111#type",
+        "gateId": "type"
+      },
+      "gateDefinitionDigest": "98bbc11084b92b2db2809675973b410954d88cbfc1e32c6834c611417e42aa2c"
+    }
+  ],
+  "schemaVersion": 1
+}

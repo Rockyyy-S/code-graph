@@ -29,6 +29,38 @@ const definitionProfiles = Object.freeze({
   "UX-DR": { maximum: 37, role: "epics", rule: "definition-ux-dr" },
 });
 const symbolicAdBinds = new Set(["all", "deployment", "traceability"]);
+const authoritativeAdBindsV1 = new Map([
+  ["AD-1", "all"],
+  ["AD-2", "FR-1 至 FR-5, FR-20 至 FR-22, NFR-9 至 NFR-11, NFR-27"],
+  ["AD-3", "FR-2, FR-3, FR-5, FR-11 至 FR-15, SM-2, SM-3"],
+  ["AD-4", "FR-2, FR-5, FR-14, FR-17, FR-23"],
+  ["AD-5", "FR-1 至 FR-3, FR-11, SM-3, SM-4"],
+  ["AD-6", "FR-4, FR-5, FR-12, FR-19, FR-22, NFR-12 至 NFR-16"],
+  ["AD-7", "FR-6 至 FR-10, FR-17, FR-21, FR-23, SM-1, SM-2"],
+  ["AD-8", "FR-1, FR-3, FR-15 至 FR-18, FR-20 至 FR-22, NFR-9 至 NFR-11, NFR-27"],
+  ["AD-9", "FR-12 至 FR-15, FR-18"],
+  ["AD-10", "FR-6 至 FR-10, FR-13, FR-22, UJ-1 至 UJ-4"],
+  ["AD-11", "all, NFR-12 至 NFR-16"],
+  ["AD-12", "FR-20 至 FR-22, NFR-9 至 NFR-11, NFR-24 至 NFR-27, deployment"],
+  ["AD-13", "FR-15 至 FR-18, FR-20, FR-23, UJ-4, UJ-5"],
+  ["AD-14", "FR-4, FR-12, FR-20 至 FR-23"],
+  ["AD-15", "FR-10, NFR-17 至 NFR-20, UX-DR1 至 UX-DR37"],
+  ["AD-16", "FR-19, FR-22, SM-1 至 SM-6, NFR-12 至 NFR-16"],
+  ["AD-17", "FR-11 至 FR-18, UJ-3, UJ-4"],
+  ["AD-18", "FR-17 至 FR-19, FR-23, UJ-4, UJ-5, SM-7, SM-8"],
+  ["AD-19", "SM-1 至 SM-8, NFR-1 至 NFR-11, NFR-26, NFR-27"],
+  ["AD-20", "FR-5, FR-12, FR-20 至 FR-23, deployment"],
+  ["AD-21", "FR-2, FR-5, FR-14, SM-4"],
+  ["AD-22", "FR-3, FR-7, FR-19 至 FR-22, NFR-13, NFR-27"],
+  ["AD-23", "FR-1, FR-20 至 FR-22, deployment, NFR-9 至 NFR-11, NFR-27"],
+  ["AD-24", "FR-2, FR-5, FR-11 至 FR-14, SM-4"],
+  ["AD-25", "FR-6, FR-7, FR-11, FR-14, FR-21, SM-1, SM-2, SM-6"],
+  ["AD-26", "FR-16 至 FR-18, FR-20, UJ-4, SM-8"],
+  ["AD-27", "FR-2, FR-9, FR-23, NFR-21 至 NFR-23"],
+  ["AD-28", "all, deployment, traceability"],
+  ["AD-29", "deployment, NFR-9 至 NFR-16, NFR-27"],
+  ["AD-30", "SM-1, SM-6, SM-7, SM-8, UJ-5, FR-6, FR-7, FR-11, FR-12, FR-17, FR-18, FR-23, deployment, traceability"],
+]);
 const storyStatuses = new Set(["backlog", "done", "in-progress", "ready-for-dev", "review"]);
 const stableStoryIdsV1 = new Set([
   "1.1", "1.2", "1.3", "1.4", "1.19", "1.5", "1.6", "1.7", "1.8", "1.9",
@@ -243,9 +275,12 @@ function validateAdBinds(architectureSource, definitions, violations) {
     if (binds === undefined) {
       continue;
     }
+    const actualBindings = new Set();
+    let hasInvalidToken = false;
     const tokens = splitReferenceTokens(binds[1]);
     for (const token of tokens) {
       if (symbolicAdBinds.has(token)) {
+        actualBindings.add(`symbolic:${token}`);
         continue;
       }
       const parsed = parseReferenceList(token, {
@@ -253,6 +288,7 @@ function validateAdBinds(architectureSource, definitions, violations) {
         definitions,
       });
       if (parsed.issues.length > 0 || parsed.references.size === 0) {
+        hasInvalidToken = true;
         violations.push(
           violation(
             PLANNING_TRACE_SOURCE_SET_V1.architecture,
@@ -262,30 +298,75 @@ function validateAdBinds(architectureSource, definitions, violations) {
             lineForIndex(architectureSource, start + (binds.index ?? 0)),
           ),
         );
+      } else {
+        for (const reference of parsed.references) {
+          actualBindings.add(reference);
+        }
       }
+    }
+    const expectedSource = authoritativeAdBindsV1.get(adId);
+    const expectedBindings = expectedSource === undefined
+      ? null
+      : parseAdBindSet(expectedSource, definitions);
+    if (
+      !hasInvalidToken &&
+      (expectedBindings === null || !sameStringSet(actualBindings, expectedBindings))
+    ) {
+      violations.push(
+        violation(
+          PLANNING_TRACE_SOURCE_SET_V1.architecture,
+          "ad-binds",
+          `${adId} Binds 与版本化双向追踪权威集合不一致。`,
+          `恢复 ${adId} 的完整直接绑定；合法编号的静默删除或新增必须升级追踪合同`,
+          lineForIndex(architectureSource, start + (binds.index ?? 0)),
+        ),
+      );
     }
   }
 }
 
+/** 把版本化 AD Binds 文本展开为规范引用与 symbolic token 集合。 */
+function parseAdBindSet(source, definitions) {
+  const references = new Set();
+  for (const token of splitReferenceTokens(source)) {
+    if (symbolicAdBinds.has(token)) {
+      references.add(`symbolic:${token}`);
+      continue;
+    }
+    const parsed = parseReferenceList(token, {
+      allowedPrefixes: new Set(["FR", "NFR", "SM", "UJ", "UX-DR"]),
+      definitions,
+    });
+    if (parsed.issues.length > 0 || parsed.references.size === 0) {
+      return null;
+    }
+    for (const reference of parsed.references) {
+      references.add(reference);
+    }
+  }
+  return references;
+}
+
 /** 解析并验证覆盖全部 Story 的 StoryDependencyDagV1。 */
 function validateStoryDag(epicsSource, stories, violations) {
-  const block = /### StoryDependencyDagV1[^\r\n]*[\s\S]*?```yaml\s*([\s\S]*?)```/u.exec(
-    epicsSource,
-  );
-  if (block === null) {
+  const blocks = collectStoryDagBlocks(epicsSource);
+  if (blocks.length !== 1) {
     violations.push(
       violation(
         PLANNING_TRACE_SOURCE_SET_V1.epics,
         "dag-parse",
-        "缺少 StoryDependencyDagV1 YAML block。",
-        "恢复覆盖全部 61 个 Story 的唯一 StoryDependencyDagV1 block",
+        blocks.length === 0
+          ? "缺少可见的 StoryDependencyDagV1 YAML block。"
+          : `StoryDependencyDagV1 必须且只能包含一个可见 YAML block，实际为 ${blocks.length} 个。`,
+        "恢复覆盖全部 61 个 Story 的唯一、非注释 StoryDependencyDagV1 block",
       ),
     );
     return new Map();
   }
+  const block = blocks[0];
   let document;
   try {
-    document = parse(block[1], { maxAliasCount: 0, uniqueKeys: true });
+    document = parse(block.source, { maxAliasCount: 0, uniqueKeys: true });
   } catch {
     violations.push(
       violation(
@@ -293,7 +374,7 @@ function validateStoryDag(epicsSource, stories, violations) {
         "dag-parse",
         "StoryDependencyDagV1 YAML 无法解析或包含重复 key。",
         "修复 YAML，并确保每个 Story 只出现一次",
-        lineForIndex(epicsSource, block.index ?? 0),
+        lineForIndex(epicsSource, block.index),
       ),
     );
     return new Map();
@@ -391,10 +472,66 @@ function validateStoryDag(epicsSource, stories, violations) {
   return nodes;
 }
 
+/** 单遍提取可见 StoryDependencyDagV1 section 内的 YAML fence，并保留原始行偏移。 */
+function collectStoryDagBlocks(source) {
+  const blocks = [];
+  const lines = source.match(/.*(?:\r\n|\n|\r|$)/gu) ?? [];
+  let offset = 0;
+  let fence = null;
+  let inComment = false;
+  let inDagSection = false;
+  let capturedLines = null;
+  let capturedIndex = 0;
+  for (const line of lines) {
+    const content = line.replace(/[\r\n]+$/u, "");
+    const lineEnding = line.slice(content.length);
+    if (fence !== null) {
+      const semanticContent = stripMarkdownContainerPrefix(content);
+      const closing = /^(?: {0,3})(`{3,}|~{3,})[ \t]*$/u.exec(semanticContent);
+      if (
+        closing !== null &&
+        closing[1][0] === fence.character &&
+        closing[1].length >= fence.length
+      ) {
+        if (capturedLines !== null) {
+          blocks.push({ index: capturedIndex, source: capturedLines.join("") });
+        }
+        fence = null;
+        capturedLines = null;
+      } else if (capturedLines !== null) {
+        capturedLines.push(`${stripMarkdownContainerPrefix(content)}${lineEnding}`);
+      }
+      offset += line.length;
+      continue;
+    }
+    const masked = maskHtmlCommentsInLine(line, inComment);
+    inComment = masked.inComment;
+    const semanticContent = stripMarkdownContainerPrefix(
+      masked.line.replace(/[\r\n]+$/u, ""),
+    );
+    const heading = /^(#{1,3})\s+([^\r\n]+)$/u.exec(semanticContent);
+    if (heading !== null) {
+      inDagSection =
+        heading[1].length === 3 && /^StoryDependencyDagV1(?![A-Za-z0-9_])/u.test(heading[2]);
+    }
+    const opening = /^(?: {0,3})(`{3,}|~{3,})[ \t]*([^\s]*)[^\r\n]*$/u.exec(
+      semanticContent,
+    );
+    if (opening !== null && !inComment) {
+      fence = { character: opening[1][0], length: opening[1].length };
+      capturedLines = inDagSection && opening[2].toLowerCase() === "yaml" ? [] : null;
+      capturedIndex = offset;
+    }
+    offset += line.length;
+  }
+  return blocks;
+}
+
 /** 对“本次调整的需求追踪”人工反向表与 Story 关联需求逐列比较。 */
 function validateReverseTraceTable(epicsSource, stories, violations) {
+  const semanticSource = maskNonSemanticMarkdown(epicsSource);
   const section = /### 本次调整的需求追踪\s*([\s\S]*?)### 关键合同与 Story 双向映射/u.exec(
-    epicsSource,
+    semanticSource,
   );
   if (section === null) {
     violations.push(
@@ -495,7 +632,8 @@ function validateReverseTraceTable(epicsSource, stories, violations) {
 
 /** 验证关键合同表的完整覆盖、唯一性和稳定最终 Story。 */
 function validateKeyContractStoryMap(epicsSource, stories, violations) {
-  const section = /### 关键合同与 Story 双向映射\s*([\s\S]*?)$/u.exec(epicsSource);
+  const semanticSource = maskNonSemanticMarkdown(epicsSource);
+  const section = /### 关键合同与 Story 双向映射\s*([\s\S]*?)$/u.exec(semanticSource);
   if (section === null) {
     violations.push(
       violation(
@@ -573,10 +711,10 @@ function validateRelativeLinks(sources, violations, existingRelativePaths) {
     if (sourcePath === undefined || role === "sprintStatus") {
       continue;
     }
-    const semanticSource = maskNonSemanticMarkdown(source);
+    const semanticSource = maskMarkdownLinkCode(source);
     for (const match of collectMarkdownLinkTargets(semanticSource)) {
-      const rawTarget = match[1].trim();
-      if (/^(?:https?:|mailto:|#)/u.test(rawTarget)) {
+      const rawTarget = match.target.trim();
+      if (isExternalMarkdownTarget(rawTarget)) {
         continue;
       }
       const resolved = resolveRelativeLinkPath(sourcePath, rawTarget);
@@ -595,10 +733,10 @@ async function collectExistingRelativeLinkPaths(repositoryRoot, sources) {
     if (sourcePath === undefined || role === "sprintStatus") {
       continue;
     }
-    const semanticSource = maskNonSemanticMarkdown(source);
+    const semanticSource = maskMarkdownLinkCode(source);
     for (const match of collectMarkdownLinkTargets(semanticSource)) {
-      const rawTarget = match[1].trim();
-      if (/^(?:https?:|mailto:|#)/u.test(rawTarget)) {
+      const rawTarget = match.target.trim();
+      if (isExternalMarkdownTarget(rawTarget)) {
         continue;
       }
       const resolved = resolveRelativeLinkPath(sourcePath, rawTarget);
@@ -661,7 +799,11 @@ function validateProductValidationReferences(sources, violations) {
       "u",
     );
     for (const role of roles) {
-      if (!contractPattern.test(sources[role] ?? "")) {
+      const semanticSource = authoritativeProductValidationSource(
+        role,
+        maskMarkdownLinkCode(sources[role] ?? ""),
+      );
+      if (!contractPattern.test(semanticSource)) {
         violations.push(
           violation(
             PLANNING_TRACE_SOURCE_SET_V1[role],
@@ -673,6 +815,60 @@ function validateProductValidationReferences(sources, violations) {
       }
     }
   }
+}
+
+/**
+ * 只返回各责任文档中声明产品验证合同的权威段落，避免文末术语表补位。
+ * @param {string} role Planning Trace Source Set 中的文档角色。
+ * @param {string} source 已遮蔽非语义 Markdown 的文档文本。
+ * @returns {string} 允许承载版本化产品验证合同名的权威文本。
+ */
+function authoritativeProductValidationSource(role, source) {
+  if (role === "architecture") {
+    return extractMarkdownSection(source, /^### AD-30(?![A-Za-z0-9_])/mu, 3);
+  }
+  if (role === "implementationGuide") {
+    return extractMarkdownSection(source, /^### 版本化产品验证与发布适用性\s*$/mu, 3);
+  }
+  if (role === "epics") {
+    const ar32 = /^- AR-32:[^\r\n]*(?:\r\n|\n|\r|$)/mu.exec(source)?.[0] ?? "";
+    const contractMap = extractMarkdownSection(
+      source,
+      /^### 关键合同与 Story 双向映射\s*$/mu,
+      3,
+    );
+    return `${ar32}\n${contractMap}`;
+  }
+  if (role === "prd") {
+    return extractMarkdownSection(source, /^## 8\. 成功指标\s*$/mu, 2);
+  }
+  if (role === "prdAddendum") {
+    return extractMarkdownSection(source, /^### 5\.7 产品验证与发布适用性合同\s*$/mu, 3);
+  }
+  return "";
+}
+
+/**
+ * 从指定可见标题开始提取到下一个同级或更高标题，并保持原始文本内容。
+ * @param {string} source 已遮蔽非语义 Markdown 的文档文本。
+ * @param {RegExp} headingPattern 权威段落起始标题。
+ * @param {number} headingLevel 起始标题层级。
+ * @returns {string} 段落文本；标题缺失时返回空字符串。
+ */
+function extractMarkdownSection(source, headingPattern, headingLevel) {
+  const heading = headingPattern.exec(source);
+  if (heading === null || heading.index === undefined) {
+    return "";
+  }
+  const contentStart = heading.index + heading[0].length;
+  const following = source.slice(contentStart);
+  const nextHeading = new RegExp(`^#{1,${headingLevel}}\\s+`, "mu").exec(following);
+  return source.slice(
+    heading.index,
+    nextHeading === null || nextHeading.index === undefined
+      ? source.length
+      : contentStart + nextHeading.index,
+  );
 }
 
 /** 使用权威 DAG 验证任何离开 backlog 的 Story 都已满足直接前置。 */
@@ -880,21 +1076,345 @@ function sameStringSet(left, right) {
   return left.size === right.size && [...left].every((entry) => right.has(entry));
 }
 
-/** 用等长空白遮蔽 fenced code 与 HTML 注释，避免示例文本伪造规范语义。 */
+/** 以单遍 block state 遮蔽 fenced code 与 HTML 注释，HTML 注释状态优先于 fence。 */
 function maskNonSemanticMarkdown(source) {
-  return source
-    .replace(/```[\s\S]*?```/gu, (block) => block.replace(/[^\r\n]/gu, " "))
-    .replace(/<!--[\s\S]*?-->/gu, (comment) =>
-      comment.replace(/[^\r\n]/gu, " "),
-    );
+  const lines = source.match(/.*(?:\r\n|\n|\r|$)/gu) ?? [];
+  let fence = null;
+  let inComment = false;
+  return lines
+    .map((line) => {
+      const content = line.replace(/[\r\n]+$/u, "");
+      if (fence === null) {
+        const result = maskHtmlCommentsInLine(line, inComment);
+        inComment = result.inComment;
+        const semanticContent = stripMarkdownContainerPrefix(
+          result.line.replace(/[\r\n]+$/u, ""),
+        );
+        const opening = /^(?: {0,3})(`{3,}|~{3,})[^\r\n]*$/u.exec(semanticContent);
+        if (opening !== null && !inComment) {
+          fence = { character: opening[1][0], length: opening[1].length };
+          return line.replace(/[^\r\n]/gu, " ");
+        }
+        return result.line;
+      } else {
+        const semanticContent = stripMarkdownContainerPrefix(content);
+        const closing = /^(?: {0,3})(`{3,}|~{3,})[ \t]*$/u.exec(semanticContent);
+        const masked = line.replace(/[^\r\n]/gu, " ");
+        if (
+          closing !== null &&
+          closing[1][0] === fence.character &&
+          closing[1].length >= fence.length
+        ) {
+          fence = null;
+        }
+        return masked;
+      }
+    })
+    .join("");
+}
+
+/** 链接语义额外遮蔽 inline code span 与缩进代码块，避免示例链接触发门禁。 */
+function maskMarkdownLinkCode(source) {
+  return maskInlineCodeSpans(maskIndentedCodeBlocks(maskNonSemanticMarkdown(source)));
+}
+
+/** 遮蔽四空格或 tab 开头的 CommonMark 缩进代码行，并保持行号。 */
+function maskIndentedCodeBlocks(source) {
+  const lines = source.match(/.*(?:\r\n|\n|\r|$)/gu) ?? [];
+  let listContentIndent = null;
+  return lines
+    .map((line) => {
+      const content = line.replace(/[\r\n]+$/u, "");
+      const listMarker = /^( {0,3})(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)/u.exec(content);
+      if (listMarker !== null) {
+        listContentIndent = listMarker[1].length + listMarker[0].length - listMarker[1].length;
+        return line;
+      }
+      if (/^[ \t]*$/u.test(content)) {
+        return line;
+      }
+      const leadingSpaces = /^( *)/u.exec(content)?.[1].length ?? 0;
+      const isIndented = leadingSpaces >= 4 || content.startsWith("\t");
+      const belongsToListParagraph =
+        listContentIndent !== null &&
+        !content.startsWith("\t") &&
+        leadingSpaces >= listContentIndent &&
+        leadingSpaces < listContentIndent + 4;
+      if (isIndented && !belongsToListParagraph) {
+        return line.replace(/[^\r\n]/gu, " ");
+      }
+      if (leadingSpaces < (listContentIndent ?? 0)) {
+        listContentIndent = null;
+      }
+      return line;
+    })
+    .join("");
+}
+
+/** 遮蔽成对反引号 code span；不同长度的反引号 run 不互相闭合。 */
+function maskInlineCodeSpans(source) {
+  const characters = source.split("");
+  for (let index = 0; index < characters.length; index += 1) {
+    if (characters[index] !== "`" || isEscapedCharacter(characters, index)) {
+      continue;
+    }
+    const openingLength = countCharacterRun(characters, index, "`");
+    let closingIndex = index + openingLength;
+    while (closingIndex < characters.length) {
+      if (
+        characters[closingIndex] !== "`" ||
+        isEscapedCharacter(characters, closingIndex)
+      ) {
+        closingIndex += 1;
+        continue;
+      }
+      const closingLength = countCharacterRun(characters, closingIndex, "`");
+      if (closingLength === openingLength) {
+        for (
+          let maskIndex = index;
+          maskIndex < closingIndex + closingLength;
+          maskIndex += 1
+        ) {
+          if (characters[maskIndex] !== "\r" && characters[maskIndex] !== "\n") {
+            characters[maskIndex] = " ";
+          }
+        }
+        index = closingIndex + closingLength - 1;
+        break;
+      }
+      closingIndex += closingLength;
+    }
+  }
+  return characters.join("");
+}
+
+/** 统计指定位置连续出现的同一字符数。 */
+function countCharacterRun(characters, startIndex, character) {
+  let endIndex = startIndex;
+  while (characters[endIndex] === character) {
+    endIndex += 1;
+  }
+  return endIndex - startIndex;
+}
+
+/** CommonMark 反斜杠转义以连续反斜杠奇偶决定当前标点是否为字面量。 */
+function isEscapedCharacter(characters, index) {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && characters[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+/** URI scheme 大小写不敏感；任意合法 scheme 与文档内 anchor 均不按相对路径处理。 */
+function isExternalMarkdownTarget(rawTarget) {
+  return /^(?:[A-Za-z][A-Za-z0-9+.-]*:|#|\/\/)/u.test(rawTarget);
+}
+
+/** 移除 blockquote/list 容器前缀，只用于识别容器内 CommonMark fence。 */
+function stripMarkdownContainerPrefix(content) {
+  let remainder = content;
+  while (true) {
+    const blockquote = /^ {0,3}>[ \t]?/u.exec(remainder);
+    if (blockquote !== null) {
+      remainder = remainder.slice(blockquote[0].length);
+      continue;
+    }
+    const list = /^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/u.exec(remainder);
+    if (list !== null) {
+      remainder = remainder.slice(list[0].length);
+      continue;
+    }
+    return remainder;
+  }
+}
+
+/** 遮蔽单行 HTML comment 片段，同时把状态传给下一非 fence 行。 */
+function maskHtmlCommentsInLine(line, initialState) {
+  const characters = line.split("");
+  let inComment = initialState;
+  let cursor = 0;
+  while (cursor < line.length) {
+    if (inComment) {
+      const closing = line.indexOf("-->", cursor);
+      const end = closing < 0 ? line.length : closing + 3;
+      for (let index = cursor; index < end; index += 1) {
+        if (characters[index] !== "\r" && characters[index] !== "\n") {
+          characters[index] = " ";
+        }
+      }
+      if (closing < 0) {
+        break;
+      }
+      inComment = false;
+      cursor = end;
+      continue;
+    }
+    const opening = line.indexOf("<!--", cursor);
+    if (opening < 0) {
+      break;
+    }
+    cursor = opening;
+    inComment = true;
+  }
+  return { inComment, line: characters.join("") };
 }
 
 /** 收集 inline 与引用式 Markdown 链接定义中的目标。 */
 function collectMarkdownLinkTargets(source) {
   return [
-    ...source.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu),
-    ...source.matchAll(/^\s*\[[^\]]+\]:\s*<?([^\s>]+)>?/mgu),
-  ];
+    ...collectInlineMarkdownLinkTargets(source),
+    ...collectReferenceMarkdownLinkTargets(source),
+  ].sort((left, right) => left.index - right.index);
+}
+
+/** 解析允许平衡括号、尖括号目标和可选 title 的 inline Markdown 链接。 */
+function collectInlineMarkdownLinkTargets(source) {
+  const targets = [];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] !== "[" || isEscapedCharacter(source, index)) {
+      continue;
+    }
+    const labelEnd = findInlineLinkLabelEnd(source, index + 1);
+    if (labelEnd < 0 || source[labelEnd + 1] !== "(") {
+      continue;
+    }
+    const parsed = parseInlineLinkDestination(source, labelEnd + 2);
+    if (parsed !== null) {
+      targets.push({ index, target: parsed.target });
+      index = parsed.endIndex;
+    }
+  }
+  return targets;
+}
+
+/** 解析支持转义与嵌套方括号的 inline link label。 */
+function findInlineLinkLabelEnd(source, startIndex) {
+  let depth = 1;
+  for (let index = startIndex; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+    } else if (source[index] === "[") {
+      depth += 1;
+    } else if (source[index] === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
+/** 解析引用式链接目标；title 不属于路径。 */
+function collectReferenceMarkdownLinkTargets(source) {
+  const targets = [];
+  const pattern = /^\s*\[[^\]]+\]:\s*(?:<((?:\\.|[^>])*)>|((?:\\.|[^\s])+))/mgu;
+  for (const match of source.matchAll(pattern)) {
+    targets.push({
+      index: match.index ?? 0,
+      target: unescapeMarkdownDestination(match[1] ?? match[2] ?? ""),
+    });
+  }
+  return targets;
+}
+
+/** 解析单个 inline destination，裸目标允许转义和平衡括号。 */
+function parseInlineLinkDestination(source, startIndex) {
+  let cursor = startIndex;
+  while (cursor < source.length && /[ \t]/u.test(source[cursor])) {
+    cursor += 1;
+  }
+  if (source[cursor] === "<") {
+    const close = findUnescapedCharacter(source, cursor + 1, ">");
+    if (close < 0) {
+      return null;
+    }
+    const endIndex = findInlineLinkClose(source, close + 1);
+    return endIndex < 0
+      ? null
+      : {
+          endIndex,
+          target: unescapeMarkdownDestination(source.slice(cursor + 1, close)),
+        };
+  }
+  const targetStart = cursor;
+  let depth = 0;
+  for (; cursor < source.length; cursor += 1) {
+    const character = source[cursor];
+    if (character === "\\") {
+      cursor += 1;
+      continue;
+    }
+    if (character === "(") {
+      depth += 1;
+      continue;
+    }
+    if (character === ")") {
+      if (depth === 0) {
+        return targetStart === cursor
+          ? null
+          : {
+              endIndex: cursor,
+              target: unescapeMarkdownDestination(source.slice(targetStart, cursor)),
+            };
+      }
+      depth -= 1;
+      continue;
+    }
+    if (depth === 0 && /[ \t\r\n]/u.test(character)) {
+      const endIndex = findInlineLinkClose(source, cursor);
+      return targetStart === cursor || endIndex < 0
+        ? null
+        : {
+            endIndex,
+            target: unescapeMarkdownDestination(source.slice(targetStart, cursor)),
+          };
+    }
+  }
+  return null;
+}
+
+/** 跳过空白和合法 title，返回 inline link 的外层右括号。 */
+function findInlineLinkClose(source, startIndex) {
+  let cursor = startIndex;
+  while (cursor < source.length && /[ \t\r\n]/u.test(source[cursor])) {
+    cursor += 1;
+  }
+  if (source[cursor] === ")") {
+    return cursor;
+  }
+  const opening = source[cursor];
+  const closing = opening === '"' ? '"' : opening === "'" ? "'" : opening === "(" ? ")" : null;
+  if (closing === null) {
+    return -1;
+  }
+  const titleEnd = findUnescapedCharacter(source, cursor + 1, closing);
+  if (titleEnd < 0) {
+    return -1;
+  }
+  cursor = titleEnd + 1;
+  while (cursor < source.length && /[ \t\r\n]/u.test(source[cursor])) {
+    cursor += 1;
+  }
+  return source[cursor] === ")" ? cursor : -1;
+}
+
+/** 查找未被反斜杠转义的目标字符。 */
+function findUnescapedCharacter(source, startIndex, expected) {
+  for (let index = startIndex; index < source.length; index += 1) {
+    if (source[index] === "\\") {
+      index += 1;
+    } else if (source[index] === expected) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/** Markdown destination 只反转义 CommonMark 定义的 ASCII 标点。 */
+function unescapeMarkdownDestination(source) {
+  return source.replace(/\\([!-/:-@[-`{-~])/gu, "$1");
 }
 
 /** 使用 DFS 检测依赖边中的环。 */

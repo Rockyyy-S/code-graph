@@ -1,9 +1,9 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 /**
  * 以 shell:false 执行进程，并用绝对 deadline、升级终止和有界输出保证最终收敛。
  *
- * @param {{args:string[],cleanupProcessTreeOnExit?:boolean,cwd:string,env?:NodeJS.ProcessEnv,executable:string,killGraceMs?:number,outputLimitBytes?:number,timeoutMs:number}} options 进程执行参数。
+ * @param {{args:string[],cleanupProcessTree?:(child:import("node:child_process").ChildProcess,timeoutMs:number)=>Promise<void>,cleanupProcessTreeOnExit?:boolean,cwd:string,env?:NodeJS.ProcessEnv,executable:string,killGraceMs?:number,outputLimitBytes?:number,spawnProcess?:typeof spawn,timeoutMs:number,windowsVerbatimArguments?:boolean}} options 进程执行参数。
  */
 export function runProcessWithDeadline(options) {
   const timeoutMs = options.timeoutMs;
@@ -26,8 +26,13 @@ export function runProcessWithDeadline(options) {
     let deadline;
     let forceKill;
     let settleFallback;
+    let postExitDeadline;
     let settled = false;
     let timedOut = false;
+    let closeObserved = false;
+    let cleanupStarted = false;
+    let cleanupSucceeded = options.cleanupProcessTreeOnExit === false;
+    let exitResult = null;
     const finish = (result) => {
       if (settled) {
         return;
@@ -36,6 +41,7 @@ export function runProcessWithDeadline(options) {
       clearTimeout(deadline);
       clearTimeout(forceKill);
       clearTimeout(settleFallback);
+      clearTimeout(postExitDeadline);
       resolve({
         ...result,
         stderr: stderr.bytes(),
@@ -46,13 +52,48 @@ export function runProcessWithDeadline(options) {
         stdoutTruncated: stdout.truncated(),
       });
     };
+    const finishExitedProcess = () => {
+      if (exitResult !== null && closeObserved && cleanupSucceeded) {
+        finish(exitResult);
+      }
+    };
+    const beginExitCleanup = () => {
+      if (cleanupStarted) {
+        finishExitedProcess();
+        return;
+      }
+      cleanupStarted = true;
+      // close 依赖后代释放继承的 stdio；无论 cleanup Promise 如何结束都保留硬收敛上限。
+      postExitDeadline = setTimeout(() => {
+        finish(postExitFailure(cleanupSucceeded ? "EPIPEOPEN" : "EPROCESSCLEANUPTIMEOUT"));
+      }, killGraceMs);
+      if (cleanupSucceeded) {
+        finishExitedProcess();
+        return;
+      }
+      const cleanup = options.cleanupProcessTree ?? cleanupProcessTreeAfterExit;
+      void Promise.resolve()
+        .then(() => cleanup(child, killGraceMs))
+        .then(() => {
+          if (settled) {
+            return;
+          }
+          cleanupSucceeded = true;
+          finishExitedProcess();
+        })
+        .catch(() => {
+          finish(postExitFailure("EPROCESSCLEANUP"));
+        });
+    };
     try {
-      child = spawn(options.executable, options.args, {
+      const spawnProcess = options.spawnProcess ?? spawn;
+      child = spawnProcess(options.executable, options.args, {
         cwd: options.cwd,
         detached: process.platform !== "win32",
         env: options.env ?? process.env,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
+        windowsVerbatimArguments: options.windowsVerbatimArguments === true,
       });
     } catch (error) {
       finish(spawnError(error));
@@ -65,54 +106,110 @@ export function runProcessWithDeadline(options) {
         finish(spawnError(error));
       }
     });
-    child.once("exit", () => {
-      if (!timedOut && options.cleanupProcessTreeOnExit !== false) {
-        // 即使主进程正常退出，也必须清理仍继承执行域的后台后代。
-        cleanupProcessTreeAfterExit(child);
+    child.once("exit", (code, signal) => {
+      if (timedOut || settled) {
+        return;
       }
+      // 主进程已经退出后，原执行 deadline 不得再覆盖其真实退出结论。
+      clearTimeout(deadline);
+      exitResult = processExitResult(code, signal);
+      beginExitCleanup();
     });
     child.once("close", (code, signal) => {
       if (timedOut) {
         return;
       }
-      finish({
-        status: code === 0 ? "pass" : "fail",
-        termination:
-          signal === null
-            ? { code: code ?? 1, kind: "exit" }
-            : { kind: "signal", signalName: signal },
-      });
+      closeObserved = true;
+      if (exitResult === null) {
+        clearTimeout(deadline);
+        exitResult = processExitResult(code, signal);
+        beginExitCleanup();
+      }
+      finishExitedProcess();
     });
     deadline = setTimeout(() => {
+      if (settled || exitResult !== null) {
+        return;
+      }
       timedOut = true;
-      terminateProcessTree(child, "SIGTERM");
-      forceKill = setTimeout(() => {
-        terminateProcessTree(child, "SIGKILL");
-        settleFallback = setTimeout(() => finish(timeoutResult()), killGraceMs);
-      }, killGraceMs);
+      if (process.platform === "win32") {
+        // taskkill /T /F 已同时完成树遍历和强制终止，无需重复同步调用。
+        void terminateProcessTree(child, "SIGKILL", killGraceMs)
+          .catch(() => undefined)
+          .finally(() => finish(timeoutResult()));
+        return;
+      }
+      void terminateProcessTree(child, "SIGTERM", killGraceMs).catch(() => undefined).finally(() => {
+        forceKill = setTimeout(() => {
+          void terminateProcessTree(child, "SIGKILL", killGraceMs).catch(() => undefined).finally(() => {
+            settleFallback = setTimeout(() => finish(timeoutResult()), killGraceMs);
+          });
+        }, killGraceMs);
+      });
     }, timeoutMs);
   });
 }
 
-/** 正常退出后清理残留后代；Windows 的 taskkill /F 已包含强制终止，只调用一次。 */
-function cleanupProcessTreeAfterExit(child) {
-  terminateProcessTree(child, "SIGTERM");
+/** 正常退出后使用独立 deadline 清理残留后代，不复用已完成的执行 deadline。 */
+function cleanupProcessTreeAfterExit(child, timeoutMs) {
   if (process.platform !== "win32") {
-    terminateProcessTree(child, "SIGKILL");
+    return terminateProcessTree(child, "SIGTERM", timeoutMs).then(() =>
+      terminateProcessTree(child, "SIGKILL", timeoutMs),
+    );
   }
+  if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
+    return Promise.resolve();
+  }
+  return runWindowsTaskkill(child.pid, timeoutMs);
+}
+
+/** 使用异步 taskkill 和独立 timeout 回收 Windows 进程树，禁止阻塞事件循环。 */
+function runWindowsTaskkill(pid, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let complete = false;
+    let cleanupChild;
+    const finish = (error) => {
+      if (complete) {
+        return;
+      }
+      complete = true;
+      clearTimeout(fallback);
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    };
+    const fallback = setTimeout(() => {
+      cleanupChild?.kill();
+      finish(new Error("Windows process tree cleanup timed out."));
+    }, timeoutMs);
+    try {
+      cleanupChild = spawn(
+        "taskkill.exe",
+        ["/PID", `${pid}`, "/T", "/F"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      cleanupChild.once("error", (error) => finish(error));
+      cleanupChild.once("close", (code) => {
+        // 128 表示目标已不存在；主进程已经退出时这是安全的幂等结果。
+        finish(code === 0 || code === 128
+          ? undefined
+          : new Error(`taskkill exited with code ${code ?? "unknown"}.`));
+      });
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error("taskkill spawn failed."));
+    }
+  });
 }
 
 /** 终止完整进程树；POSIX 使用独立进程组，Windows 使用 taskkill /T。 */
-function terminateProcessTree(child, signal) {
+async function terminateProcessTree(child, signal, timeoutMs) {
   if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
     return;
   }
   if (process.platform === "win32") {
-    spawnSync(
-      "taskkill.exe",
-      ["/PID", `${child.pid}`, "/T", "/F"],
-      { stdio: "ignore", windowsHide: true },
-    );
+    await runWindowsTaskkill(child.pid, timeoutMs);
     return;
   }
   try {
@@ -122,6 +219,17 @@ function terminateProcessTree(child, signal) {
       child.kill(signal);
     }
   }
+}
+
+/** 缓存主进程的真实退出结论，供 close 与独立 cleanup 完成后统一发布。 */
+function processExitResult(code, signal) {
+  return {
+    status: code === 0 ? "pass" : "fail",
+    termination:
+      signal === null
+        ? { code: code ?? 1, kind: "exit" }
+        : { kind: "signal", signalName: signal },
+  };
 }
 
 /** 创建只保留固定上限、同时记录原始总字节数的 collector。 */
@@ -165,5 +273,13 @@ function timeoutResult() {
   return {
     status: "invalid",
     termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
+  };
+}
+
+/** cleanup 或 stdio 收敛失败统一返回稳定 invalid，不得保留原进程 pass。 */
+function postExitFailure(stableCode) {
+  return {
+    status: "invalid",
+    termination: { kind: "spawn-error", stableCode },
   };
 }

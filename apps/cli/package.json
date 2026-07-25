@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "codegraph": {
+    "publicCommands": [],
     "role": "client-app"
   },
   "exports": {

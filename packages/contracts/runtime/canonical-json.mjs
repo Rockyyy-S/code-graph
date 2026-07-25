@@ -59,16 +59,36 @@ function serializeJsonValue(value, ancestors) {
 
 /** @param {unknown[]} value @param {Set<object>} ancestors @returns {string} */
 function serializeArray(value, ancestors) {
+  if (Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new TypeError("JCS 不接受带自定义原型的数组。");
+  }
   enterContainer(value, ancestors);
   try {
-    const enumerableKeys = Object.keys(value);
+    const ownKeys = Reflect.ownKeys(value);
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
     if (
-      enumerableKeys.length !== value.length ||
-      enumerableKeys.some((key, index) => key !== String(index))
+      ownKeys.some((key) => typeof key !== "string") ||
+      lengthDescriptor === undefined ||
+      !("value" in lengthDescriptor) ||
+      lengthDescriptor.value !== value.length ||
+      ownKeys.length !== value.length + 1
     ) {
-      throw new TypeError("JCS 不接受稀疏数组或数组附加字段。");
+      throw new TypeError("JCS 不接受稀疏数组、Symbol 或数组附加字段。");
     }
-    return `[${value.map((item) => serializeJsonValue(item, ancestors)).join(",")}]`;
+    const entries = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const key = String(index);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !("value" in descriptor)
+      ) {
+        throw new TypeError("JCS 不接受稀疏数组、访问器或不可枚举数组元素。");
+      }
+      entries.push(serializeJsonValue(descriptor.value, ancestors));
+    }
+    return `[${entries.join(",")}]`;
   } finally {
     ancestors.delete(value);
   }

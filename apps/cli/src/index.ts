@@ -1,4 +1,2 @@
-/**
- * @file 本用户故事仅建立 CLI 包边界；公共命令由后续所属用户故事实现。
- */
-export {};
+/** @file 本用户故事仅建立 CLI 包边界；公共命令由后续所属用户故事实现。 */
+export { PUBLIC_COMMANDS } from "./public-command-registry.js";
