@@ -46,3 +46,16 @@ export interface ServiceStatusV1 extends IndexStatusSummaryV1 {
   version: 1;
   viewConfigRevision: number;
 }
+
+/**
+ * 同一 v1 线协议的兼容状态输入。
+ *
+ * Story 1.2 发布的 v1 尚未包含索引 Job 字段；兼容客户端必须把缺失值确定性映射为 null。
+ */
+export type CompatibleServiceStatusV1 = Omit<
+  ServiceStatusV1,
+  "currentIndexJob" | "lastIndexJob"
+> & {
+  currentIndexJob?: ServiceStatusV1["currentIndexJob"];
+  lastIndexJob?: ServiceStatusV1["lastIndexJob"];
+};

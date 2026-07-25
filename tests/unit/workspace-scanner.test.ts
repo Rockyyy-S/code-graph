@@ -82,6 +82,40 @@ describe("workspace scanner", () => {
     })).rejects.toMatchObject({ code: "GRAPH_SCAN_FAILED" });
   });
 
+  it("fails when a directory is replaced after containment validation but before traversal completes", async () => {
+    const root = "/trusted/root";
+    const state = await createInitialIgnoreState(await createRoot("codegraph-scan-race-"));
+    if (state.kind !== "ready") {
+      throw new Error("测试前置条件不成立。");
+    }
+    let childRead = false;
+
+    await expect(scanWorkspace({
+      ignoreSnapshot: state.snapshot,
+      indexingRoot: root,
+      lstat: async (input) => ({
+        isDirectory: () => input.endsWith("child") || input === root,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      }),
+      platform: "linux",
+      readDirectory: async (input) => {
+        if (input === root) {
+          return [{
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+            name: "child",
+          }];
+        }
+        childRead = true;
+        return [];
+      },
+      realpath: async (input) =>
+        input.endsWith("child") && childRead ? "/outside/replaced" : input,
+    })).rejects.toMatchObject({ code: "GRAPH_SCAN_FAILED" });
+  });
+
   it("uses raw filesystem names while publishing NFC graph paths", async () => {
     const root = await createRoot("codegraph-scan-unicode-");
     await writeFile(path.join(root, "e\u0301.ts"), "export {};\n");

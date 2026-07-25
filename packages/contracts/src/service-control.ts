@@ -1,5 +1,8 @@
 import type { JobStartRequestV1, JobStartResultV1 } from "./index-job.js";
-import type { ServiceStatusV1 } from "./service-status.js";
+import type {
+  CompatibleServiceStatusV1,
+  ServiceStatusV1,
+} from "./service-status.js";
 
 /** JSON-RPC 线协议主版本；同一主版本通过能力协商保持向后兼容。 */
 export const PROTOCOL_VERSION = 1 as const;
@@ -51,8 +54,12 @@ export interface InitializeResult {
 }
 
 /** 兼容客户端解析的 initialize 结果；未知 capability 由旧客户端忽略。 */
-export type CompatibleInitializeResult = Omit<InitializeResult, "capabilities"> & {
+export type CompatibleInitializeResult = Omit<
+  InitializeResult,
+  "capabilities" | "serviceStatus"
+> & {
   capabilities: readonly string[];
+  serviceStatus: CompatibleServiceStatusV1;
 };
 
 /** service/status 与 service/shutdown 共享的封闭空请求对象。 */

@@ -14,6 +14,26 @@
 - 证据定位：从 PR #8 当前 HEAD 的 required check 进入，不依赖仓库内缓存的 run ID。
 - 失败处理：任一外部条件失败都必须修复并冻结新 SHA，旧 SHA 的成功证据不得复用。
 
+## 二次复审修复候选
+
+- blocking gate 数：`22`
+- `gateRegistryDigest`：`b91f8793a5edb4a1f8428c2aca88ba6ecd7b89e23a4a5af1ab72217979903a4f`
+- `gateImplementationDigest`：`373c7a258c69095876b64330482ed54cb2e1bd1eb776cc4bd53a43049d58bf86`
+- 固定 producer commit：`0981130a71a3960aa374a82829d42aa9d9f15012`
+- 本地验证：`pnpm unit` 45 文件 / 279 用例、`pnpm contract` 21 文件 / 179 用例、
+  `pnpm type`、`pnpm lint`、`pnpm build`、`pnpm dependency-boundary`、
+  `pnpm basic-security`、`pnpm planning-trace` 与本地 `architecture-required` 22/22 全部通过。
+- 本轮修复：兼容旧 v1 Job 字段缺失；校验真实 UTC 日历时间与 hierarchy 摘要计数；
+  为 NFC/NFD 公共 identity 增加私有物理根隔离；扫描期间复验目录身份并支持 shutdown 取消；
+  将 ignore/queued 预运行失败记录为可查询 failed Job；SQLite close 失败可重试，故障备份异步包含
+  主文件、WAL、SHM，最多保留三组且总计不超过 64 MiB；rebuild 超时后关闭连接并清空待响应 ID。
+- 修复后复核：未协商 `job/start` 的旧服务连接保持可用；root-bound discovery 对 legacy 缓存 fail closed；
+  公共 Schema 可由标准严格 Ajv 直接编译；legacy `.bak` 纳入轮转；取消路径跳过同步失败写；
+  声明 `job/start` 时强制 Job 状态字段；时间回拨保持 Job 生命周期单调；启动时交叉校验 SQLite
+  摘要、实际 hierarchy 与 terminal Job。
+- 外部状态：候选 SHA 尚未冻结；必须在提交并推送后，对新 HEAD 完整重跑 Provider child evidence、
+  attestation、Controller App `architecture-required`、fresh drift monitor 与 ruleset 校验。
+
 ## 历史候选与可信 Registry（已被最终 HEAD 取代）
 
 - 比较基线：`cb60d0039507da4c1629cd478e0bd43f287eb663`

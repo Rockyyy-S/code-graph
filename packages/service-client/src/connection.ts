@@ -1,4 +1,5 @@
 import net from "node:net";
+import { lstat } from "node:fs/promises";
 import {
   Message,
   ResponseError,
@@ -22,6 +23,7 @@ import {
   type ServiceCapability,
   type ServiceMetadataV1,
   type ServiceStatusV1,
+  normalizeServiceStatusV1Compatible,
   validateErrorV1,
   validateInitializeResultCompatible,
   validateJsonRpcV2Envelope,
@@ -108,7 +110,17 @@ export class GraphServiceConnection {
       if (!validateServiceStatusV1Compatible(result)) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      return result;
+      if (
+        this.initializeResult.capabilities.includes(SERVICE_METHODS.startJob) &&
+        !hasExplicitJobStatusFields(result)
+      ) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      const normalized = normalizeServiceStatusV1Compatible(result);
+      if (normalized === null) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      return normalized;
     } catch (error) {
       const mapped = this.#protocolState.violated
         ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
@@ -127,8 +139,9 @@ export class GraphServiceConnection {
   /** 请求公共 rebuild 路径并返回已持久化的 queued Job。 */
   public async startRebuild(): Promise<JobStartResult> {
     this.#ensureOpen();
+    /** 未协商的可选能力不代表现有传输损坏，健康旧服务仍可继续提供 status/shutdown。 */
+    this.#ensureCapability(SERVICE_METHODS.startJob);
     try {
-      this.#ensureCapability(SERVICE_METHODS.startJob);
       const result = await sendRequestWithTimeout<unknown>(
         this.#connection,
         SERVICE_METHODS.startJob,
@@ -140,9 +153,17 @@ export class GraphServiceConnection {
       }
       return result;
     } catch (error) {
-      throw this.#protocolState.violated
+      const mapped = this.#protocolState.violated
         ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
         : mapConnectionError(error);
+      if (
+        mapped.code === "SERVICE_START_TIMEOUT" ||
+        mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
+        mapped.code === "SERVICE_METHOD_NOT_FOUND"
+      ) {
+        await this.close();
+      }
+      throw mapped;
     }
   }
 
@@ -175,6 +196,7 @@ export class GraphServiceConnection {
       return;
     }
     this.#closed = true;
+    this.#protocolState.pendingResponseIds.clear();
     this.#connection.dispose();
     if (!this.#socket.destroyed) {
       this.#socket.end();
@@ -267,13 +289,19 @@ async function connectToGraphServiceInternal(
     deadline,
   );
   let paths: ReturnType<typeof createWorkspacePaths>;
+  let legacyPaths: ReturnType<typeof createWorkspacePaths>;
   try {
     paths = createWorkspacePaths(identity.workspaceKey, {
+      ...(cacheRoot === undefined ? {} : { cacheRoot }),
+      rootBindingKey: identity.physicalRootKey,
+    });
+    legacyPaths = createWorkspacePaths(identity.workspaceKey, {
       ...(cacheRoot === undefined ? {} : { cacheRoot }),
     });
   } catch {
     throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
   }
+  await assertNoLegacyWorkspaceCacheWithinDeadline(paths, legacyPaths, deadline);
   const remainingStartMs = deadline - Date.now();
   if (remainingStartMs <= 0) {
     throw createServiceClientError("SERVICE_START_TIMEOUT");
@@ -297,6 +325,66 @@ async function connectToGraphServiceInternal(
     ),
     timeoutMs: remainingStartMs,
   });
+}
+
+/**
+ * 旧版本只按公共 workspaceKey 建目录，无法证明其缓存属于当前物理根。
+ * 任意 legacy 目录都必须 fail closed，避免升级时启动第二个 daemon 或静默遗失旧图谱。
+ */
+async function assertNoLegacyWorkspaceCache(
+  paths: ReturnType<typeof createWorkspacePaths>,
+  legacyPaths: ReturnType<typeof createWorkspacePaths>,
+): Promise<void> {
+  if (paths.workspaceDirectory === legacyPaths.workspaceDirectory) {
+    return;
+  }
+  try {
+    await lstat(legacyPaths.workspaceDirectory);
+  } catch (error) {
+    if (hasSystemErrorCode(error, "ENOENT")) {
+      return;
+    }
+    throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+  }
+  throw createServiceClientError(
+    "SERVICE_INSTANCE_CONFLICT",
+    "检测到无法安全归属到当前物理根的旧版服务缓存。",
+  );
+}
+
+/** 将旧缓存探测纳入统一启动 deadline，避免异常文件系统无限阻塞发现流程。 */
+async function assertNoLegacyWorkspaceCacheWithinDeadline(
+  paths: ReturnType<typeof createWorkspacePaths>,
+  legacyPaths: ReturnType<typeof createWorkspacePaths>,
+  deadline: number,
+): Promise<void> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw createServiceClientError("SERVICE_START_TIMEOUT");
+  }
+  let timeout: NodeJS.Timeout | undefined;
+  const outcome = assertNoLegacyWorkspaceCache(paths, legacyPaths).then(
+    () => ({ kind: "value" }) as const,
+    (error: unknown) => ({ error, kind: "error" }) as const,
+  );
+  try {
+    const result = await Promise.race([
+      outcome,
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ kind: "timeout" }), remainingMs);
+      }),
+    ]);
+    if (result.kind === "timeout") {
+      throw createServiceClientError("SERVICE_START_TIMEOUT");
+    }
+    if (result.kind === "error") {
+      throw result.error;
+    }
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 /** 将身份 realpath 纳入公共绝对 deadline，并把本地路径错误收敛为脱敏 ErrorV1。 */
@@ -587,7 +675,21 @@ async function sendRequestWithTimeout<T>(
 /** 过滤旧客户端不认识的 capability，保留强类型公共结果。 */
 function normalizeInitializeResult(result: CompatibleInitializeResult): InitializeResult {
   const capabilities = result.capabilities.filter(isKnownCapability);
-  return { ...result, capabilities };
+  const serviceStatus = normalizeServiceStatusV1Compatible(result.serviceStatus);
+  if (serviceStatus === null) {
+    throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+  }
+  return { ...result, capabilities, serviceStatus };
+}
+
+/** 协商 job/start 后，后续 status 不能省略当前与最后 Job 字段。 */
+function hasExplicitJobStatusFields(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.hasOwn(value, "currentIndexJob") &&
+    Object.hasOwn(value, "lastIndexJob")
+  );
 }
 
 /** 判断 capability 是否由当前客户端版本认识。 */

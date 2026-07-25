@@ -32,7 +32,7 @@ async function createFixture() {
 describe("index job runtime", () => {
   it("persists a real empty success distinct from never built", async () => {
     const fixture = await createFixture();
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
       workspaceKey: fixture.workspaceKey,
     });
@@ -70,7 +70,7 @@ describe("index job runtime", () => {
   it("fails closed for unsupported user ignore without hierarchy rows", async () => {
     const fixture = await createFixture();
     await writeFile(path.join(fixture.indexingRoot, ".codegraphignore"), "dist/\n", "utf8");
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
       workspaceKey: fixture.workspaceKey,
     });
@@ -90,10 +90,136 @@ describe("index job runtime", () => {
         availability: "absent",
         committed: null,
         currentIndexJob: null,
-        lastIndexJob: null,
+        lastIndexJob: {
+          error: { code: "GRAPH_IGNORE_CONFIG_UNSUPPORTED" },
+          state: "failed",
+        },
       });
       expect(store.readGraphCounts()).toEqual({ edgeCount: 0, nodeCount: 0 });
-      expect(store.readBootstrapState().lastJob).toBeNull();
+      expect(store.readBootstrapState().lastJob).toMatchObject({
+        errorCode: "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+        state: "failed",
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("publishes an in-memory failed Job when queued persistence itself fails", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const createJob = vi.fn(() => {
+      throw Object.assign(new Error("disk unavailable"), { code: "SQLITE_IOERR" });
+    });
+    const runtime = createIndexJobRuntime({
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-queued-write-failure",
+      statusEpoch: "epoch-queued-write-failure",
+      store: {
+        close: () => store.close(),
+        commitHierarchy: (input) => store.commitHierarchy(input),
+        createJob,
+        markJobFailed: (jobId, completedAt, errorCode, errorLogId) =>
+          store.markJobFailed(jobId, completedAt, errorCode, errorLogId),
+        markJobRunning: (jobId, startedAt) => store.markJobRunning(jobId, startedAt),
+        readBootstrapState: () => store.readBootstrapState(),
+      },
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      expect(() => runtime.startJob({ kind: "rebuild" })).toThrow(
+        expect.objectContaining({ code: "GRAPH_WRITE_FAILED" }),
+      );
+      expect(runtime.getStatus()).toMatchObject({
+        currentIndexJob: null,
+        lastIndexJob: {
+          error: { code: "GRAPH_WRITE_FAILED" },
+          state: "failed",
+        },
+      });
+      expect(createJob).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("aborts the active scan before closing the store during shutdown", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const scan = vi.fn(async ({ signal }: { signal?: AbortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }));
+    const markJobFailed = vi.fn(
+      (jobId: string, completedAt: string, errorCode: string, errorLogId: string) =>
+        store.markJobFailed(jobId, completedAt, errorCode, errorLogId),
+    );
+    const runtime = createIndexJobRuntime({
+      closeTimeoutMs: 100,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      scan,
+      serviceInstanceId: "instance-cancel-runtime",
+      statusEpoch: "epoch-cancel-runtime",
+      store: {
+        close: () => store.close(),
+        commitHierarchy: (input) => store.commitHierarchy(input),
+        createJob: (job) => store.createJob(job),
+        markJobFailed,
+        markJobRunning: (jobId, startedAt) => store.markJobRunning(jobId, startedAt),
+        readBootstrapState: () => store.readBootstrapState(),
+      },
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    runtime.startJob({ kind: "rebuild" });
+    await vi.waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
+    await expect(runtime.close()).resolves.toBeUndefined();
+    expect(runtime.getStatus().lastIndexJob).toMatchObject({
+      error: { code: "GRAPH_SCAN_FAILED" },
+      state: "failed",
+    });
+    expect(markJobFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps Job lifecycle timestamps monotonic across a wall-clock rollback", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const timestamps = [
+      "2026-07-25T00:00:03.000Z",
+      "2026-07-25T00:00:02.000Z",
+      "2026-07-25T00:00:01.000Z",
+    ];
+    const runtime = createIndexJobRuntime({
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      now: () => timestamps.shift() ?? "2026-07-25T00:00:00.000Z",
+      serviceInstanceId: "instance-clock-rollback",
+      statusEpoch: "epoch-clock-rollback",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob?.state).toBe("succeeded"));
+      expect(runtime.getStatus()).toMatchObject({
+        committed: { generatedAt: "2026-07-25T00:00:03.000Z" },
+        lastIndexJob: {
+          completedAt: "2026-07-25T00:00:03.000Z",
+          requestedAt: "2026-07-25T00:00:03.000Z",
+          startedAt: "2026-07-25T00:00:03.000Z",
+        },
+      });
     } finally {
       await runtime.close();
     }
@@ -103,7 +229,7 @@ describe("index job runtime", () => {
     const fixture = await createFixture();
     await mkdir(path.join(fixture.indexingRoot, "src"));
     await writeFile(path.join(fixture.indexingRoot, "src", "index.ts"), "export {};\n");
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
       faultInjector: ({ entityIndex, stage }) => {
         if (stage === "node" && entityIndex === 1) {
@@ -138,7 +264,7 @@ describe("index job runtime", () => {
 
   it("closes the Job gate synchronously and bounds waiting for a pending scan", async () => {
     const fixture = await createFixture();
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
       workspaceKey: fixture.workspaceKey,
     });
@@ -170,7 +296,10 @@ describe("index job runtime", () => {
     expect(store.inspectPragmas().busyTimeoutMs).toBeGreaterThan(0);
 
     resolveScan?.({ candidateFiles: [], excludedPathCount: 0 });
-    await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob?.state).toBe("succeeded"));
+    await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+      error: { code: "GRAPH_SCAN_FAILED" },
+      state: "failed",
+    }));
     await expect(runtime.close()).resolves.toBeUndefined();
   });
 });

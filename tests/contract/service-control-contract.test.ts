@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { Ajv2020 } from "../../packages/contracts/node_modules/ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import {
   CLI_SCHEMA_VERSION,
@@ -7,10 +8,13 @@ import {
   PROTOCOL_VERSION,
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
+  jobStartResultV1Schema,
+  serviceStatusV1Schema,
   validateErrorV1,
   validateInitializeRequest,
   validateInitializeResult,
   validateInitializeResultCompatible,
+  validateJobStartResult,
   validateServiceControlRequest,
   validateServiceStatusV1,
   validateShutdownResult,
@@ -178,6 +182,76 @@ describe("service control contract", () => {
         capabilities: [SERVICE_CAPABILITIES[0]],
       }),
     ).toBe(true);
+
+    /** Story 1.2 的合法 v1 状态尚未包含索引 Job 字段，同版本兼容解析必须补默认值而非拒绝。 */
+    const previousV1Status: Record<string, unknown> = { ...result.serviceStatus };
+    delete previousV1Status.currentIndexJob;
+    delete previousV1Status.lastIndexJob;
+    expect(validateInitializeResultCompatible({
+      ...result,
+      capabilities: SERVICE_CAPABILITIES.filter((capability) => capability !== "job/start"),
+      serviceStatus: previousV1Status,
+    })).toBe(true);
+    expect(validateInitializeResultCompatible({
+      ...result,
+      serviceStatus: previousV1Status,
+    })).toBe(false);
+  });
+
+  it("rejects impossible timestamps and hierarchy summaries", () => {
+    const status = createAbsentStatus();
+    expect(validateServiceStatusV1({
+      ...status,
+      lastIndexJob: {
+        completedAt: "2026-99-99T99:99:99Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-invalid-time"),
+        id: "job-invalid-time",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        startedAt: "2026-07-25T00:00:01.000Z",
+        state: "failed",
+      },
+    })).toBe(false);
+    expect(validateServiceStatusV1({
+      ...status,
+      availability: "available",
+      committed: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 99,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 0,
+      },
+      freshness: "fresh",
+    })).toBe(false);
+    expect(validateJobStartResult({
+      accepted: true,
+      job: {
+        id: "job-invalid-time",
+        kind: "initial-index",
+        requestedAt: "2026-02-30T00:00:00.000Z",
+        state: "queued",
+      },
+    })).toBe(false);
+    expect(validateServiceStatusV1({
+      ...status,
+      lastIndexJob: {
+        completedAt: "2026-07-25T00:00:01.000Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-reversed-time"),
+        id: "job-reversed-time",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T00:00:03.000Z",
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "failed",
+      },
+    })).toBe(false);
+  });
+
+  it("keeps exported public schemas compilable by strict standard Ajv", () => {
+    const publicAjv = new Ajv2020({ strict: true });
+    expect(() => publicAjv.compile(serviceStatusV1Schema)).not.toThrow();
+    expect(() => publicAjv.compile(jobStartResultV1Schema)).not.toThrow();
   });
 
   it("validates empty control requests and canonical shutdown results", () => {

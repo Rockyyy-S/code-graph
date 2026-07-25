@@ -106,7 +106,7 @@ describe("real graph-service process", () => {
 
       const queued = await first.startRebuild();
       expect(queued.job).toMatchObject({ kind: "initial-index", state: "queued" });
-      const status = await waitForTerminalStatus(second);
+      const status = await waitForTerminalStatus(second, queued.job.id);
       expect(status).toMatchObject({
         availability: "available",
         committed: {
@@ -124,6 +124,7 @@ describe("real graph-service process", () => {
       const workspacePaths = createWorkspacePaths(first.identity.workspaceKey, {
         cacheRoot,
         platform: process.platform,
+        rootBindingKey: first.identity.physicalRootKey,
       });
       const publicPayload = JSON.stringify({ queued, status });
       expect(publicPayload).not.toContain(indexingRoot);
@@ -138,7 +139,7 @@ describe("real graph-service process", () => {
       expect(serviceLog).not.toContain("export {}");
       await first.shutdown();
       await waitForMissing(workspacePaths.metadataPath);
-      const store = openSqliteGraphStore({
+      const store = await openSqliteGraphStore({
         databasePath: path.join(workspacePaths.workspaceDirectory, "graph.sqlite"),
         workspaceKey: first.identity.workspaceKey,
       });
@@ -185,11 +186,15 @@ describe("real graph-service process", () => {
         availability: "absent",
         committed: null,
         currentIndexJob: null,
-        lastIndexJob: null,
+        lastIndexJob: {
+          error: { code: "GRAPH_IGNORE_CONFIG_UNSUPPORTED" },
+          state: "failed",
+        },
       });
       const workspacePaths = createWorkspacePaths(client.identity.workspaceKey, {
         cacheRoot,
         platform: process.platform,
+        rootBindingKey: client.identity.physicalRootKey,
       });
       await client.shutdown();
       await waitForMissing(workspacePaths.metadataPath);
@@ -227,6 +232,7 @@ describe("real graph-service process", () => {
       const workspacePaths = createWorkspacePaths(client.identity.workspaceKey, {
         cacheRoot,
         platform: process.platform,
+        rootBindingKey: client.identity.physicalRootKey,
       });
       const competingWriter = new RawSqlite(
         path.join(workspacePaths.workspaceDirectory, "graph.sqlite"),
@@ -245,11 +251,14 @@ describe("real graph-service process", () => {
         availability: "absent",
         committed: null,
         currentIndexJob: null,
-        lastIndexJob: null,
+        lastIndexJob: {
+          error: { code: "GRAPH_WRITE_FAILED" },
+          state: "failed",
+        },
       });
 
-      await client.startRebuild();
-      const status = await waitForTerminalStatus(client);
+      const queued = await client.startRebuild();
+      const status = await waitForTerminalStatus(client, queued.job.id);
       expect(status).toMatchObject({
         availability: "available",
         committed: {
@@ -329,6 +338,7 @@ describe("real graph-service process", () => {
           const workspacePaths = createWorkspacePaths(controller.identity.workspaceKey, {
             cacheRoot,
             platform: process.platform,
+            rootBindingKey: controller.identity.physicalRootKey,
           });
           await controller.shutdown().catch(async () => controller?.close());
           await waitForMissing(workspacePaths.metadataPath).catch(() => undefined);
@@ -345,10 +355,13 @@ async function createShortTempRoot(slot: string): Promise<string> {
 }
 
 /** 轮询共享权威状态，直到当前 Job 进入 terminal。 */
-async function waitForTerminalStatus(client: GraphServiceConnection) {
+async function waitForTerminalStatus(client: GraphServiceConnection, expectedJobId: string) {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const status = await client.status();
-    if (status.lastIndexJob?.state === "succeeded" || status.lastIndexJob?.state === "failed") {
+    if (
+      status.lastIndexJob?.id === expectedJobId &&
+      (status.lastIndexJob.state === "succeeded" || status.lastIndexJob.state === "failed")
+    ) {
       return status;
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 10));

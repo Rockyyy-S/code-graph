@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { copyFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import Database from "better-sqlite3";
 import type {
@@ -16,6 +17,14 @@ import {
 
 /** SQLite 锁竞争等待的固定上限。 */
 export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
+/** 故障诊断副本最多保留三组，避免用户缓存无限增长。 */
+export const MAX_SQLITE_FAILURE_BACKUP_SETS = 3;
+
+/** 故障诊断副本总预算为 64 MiB；超限时保留原始打开错误而跳过复制。 */
+export const MAX_SQLITE_FAILURE_BACKUP_BYTES = 64 * 1024 * 1024;
+
+let failureBackupSequence = 0;
 
 /** 首次事务故障注入上下文，仅用于真实回滚测试。 */
 export interface SqliteGraphStoreFaultContext {
@@ -60,8 +69,8 @@ export class SqliteGraphStore implements GraphStorePort {
     if (this.#closed) {
       return;
     }
-    this.#closed = true;
     this.#database.close();
+    this.#closed = true;
   }
 
   /** 创建持久化 queued Job。 */
@@ -175,12 +184,17 @@ export class SqliteGraphStore implements GraphStorePort {
       ORDER BY rowid DESC
       LIMIT 1
     `).get(this.#workspaceKey) as JobRow | undefined;
-    return {
+    const state = {
       committed: workspace?.committed_at === null || workspace === undefined
         ? null
         : mapWorkspaceSummary(workspace),
       lastJob: job === undefined ? null : mapJob(job),
     };
+    validateBootstrapState(
+      state,
+      readPersistedGraphCounts(this.#database, this.#workspaceKey),
+    );
+    return state;
   }
 
   /** 测试与启动诊断使用的精确用户表名列表。 */
@@ -233,7 +247,9 @@ export class SqliteGraphStore implements GraphStorePort {
 }
 
 /** 打开、配置、迁移并回验 Story 1.4 SQLite 存储。 */
-export function openSqliteGraphStore(options: OpenSqliteGraphStoreOptions): SqliteGraphStore {
+export async function openSqliteGraphStore(
+  options: OpenSqliteGraphStoreOptions,
+): Promise<SqliteGraphStore> {
   if (!path.isAbsolute(options.databasePath) || !/^[a-f0-9]{64}$/u.test(options.workspaceKey)) {
     throw new TypeError("SQLite 路径或 workspaceKey 不合法。");
   }
@@ -254,10 +270,17 @@ export function openSqliteGraphStore(options: OpenSqliteGraphStoreOptions): Sqli
     if (JSON.stringify(readTableNames(database)) !== JSON.stringify(BOOTSTRAP_TABLE_NAMES)) {
       throw new Error("SQLite migration 未保持精确八表。");
     }
-    return new SqliteGraphStore(database, options.workspaceKey, options.faultInjector);
+    const store = new SqliteGraphStore(database, options.workspaceKey, options.faultInjector);
+    /** 启动屏障内立即拒绝损坏摘要，确保握手开放前映射为 GRAPH_STORE_OPEN_FAILED。 */
+    store.readBootstrapState();
+    return store;
   } catch (error) {
-    database?.close();
-    preserveFailureCopy(options.databasePath, existedBeforeOpen);
+    try {
+      database?.close();
+    } catch {
+      /** close 失败不能覆盖更早的打开或迁移根因，WAL/SHM 仍由备份组保留。 */
+    }
+    await preserveFailureCopy(options.databasePath, existedBeforeOpen);
     throw error;
   }
 }
@@ -304,17 +327,98 @@ function readTableNames(database: Database.Database): string[] {
   `).all() as { name: string }[]).map((row) => row.name);
 }
 
-/** migration/open 失败时保留原数据库或新建故障数据库的只读诊断副本。 */
-function preserveFailureCopy(databasePath: string, existedBeforeOpen: boolean): void {
-  if (!existsSync(databasePath)) {
-    return;
-  }
-  const suffix = existedBeforeOpen ? "existing" : "new";
-  const backupPath = `${databasePath}.failed-${suffix}-${Date.now()}.bak`;
+/** migration/open 失败时异步保留主文件与 WAL/SHM，并执行数量和总大小治理。 */
+async function preserveFailureCopy(
+  databasePath: string,
+  existedBeforeOpen: boolean,
+): Promise<void> {
+  const sources = [
+    { path: databasePath, suffix: "" },
+    { path: `${databasePath}-wal`, suffix: "-wal" },
+    { path: `${databasePath}-shm`, suffix: "-shm" },
+  ];
   try {
-    copyFileSync(databasePath, backupPath);
+    const existingSources = [];
+    let sourceBytes = 0;
+    for (const source of sources) {
+      try {
+        const sourceStat = await stat(source.path);
+        if (!sourceStat.isFile()) {
+          continue;
+        }
+        sourceBytes += sourceStat.size;
+        existingSources.push(source);
+      } catch {
+        /** WAL/SHM 可能在连接关闭后已被 checkpoint 清理，缺失 sidecar 不算备份失败。 */
+      }
+    }
+    if (
+      existingSources.length === 0 ||
+      sourceBytes > MAX_SQLITE_FAILURE_BACKUP_BYTES
+    ) {
+      return;
+    }
+
+    const kind = existedBeforeOpen ? "existing" : "new";
+    const backupId = `${Date.now()}-${failureBackupSequence++}`;
+    const backupBase = `${databasePath}.failed-${kind}-${backupId}.bak`;
+    const copiedPaths: string[] = [];
+    try {
+      for (const source of existingSources) {
+        const target = `${backupBase}${source.suffix}`;
+        await copyFile(source.path, target);
+        copiedPaths.push(target);
+      }
+      await pruneFailureBackups(databasePath);
+    } catch {
+      await Promise.all(copiedPaths.map((target) => rm(target, { force: true })));
+    }
   } catch {
     /** 备份失败不能覆盖原始 SQLite 打开/迁移错误。 */
+  }
+}
+
+/** 按备份组淘汰最旧副本，WAL/SHM 与对应主文件始终一起删除。 */
+async function pruneFailureBackups(databasePath: string): Promise<void> {
+  const directory = path.dirname(databasePath);
+  const basename = path.basename(databasePath);
+  const escapedBasename = basename.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const pattern = new RegExp(
+    `^${escapedBasename}\\.failed-(existing|new)-(\\d+)(?:-(\\d+))?\\.bak(?:-(?:wal|shm))?$`,
+    "u",
+  );
+  const groups = new Map<string, { bytes: number; paths: string[]; sequence: number; timestamp: number }>();
+  for (const entry of await readdir(directory)) {
+    const match = pattern.exec(entry);
+    if (match === null) {
+      continue;
+    }
+    const kind = match[1];
+    const timestamp = Number(match[2]);
+    /** 修复前的 legacy 备份没有 sequence；使用 -1 保证同时间戳下优先淘汰旧格式。 */
+    const sequence = match[3] === undefined ? -1 : Number(match[3]);
+    const key = `${kind}-${timestamp}-${sequence}`;
+    const entryPath = path.join(directory, entry);
+    const entryStat = await stat(entryPath);
+    const group = groups.get(key) ?? { bytes: 0, paths: [], sequence, timestamp };
+    group.bytes += entryStat.size;
+    group.paths.push(entryPath);
+    groups.set(key, group);
+  }
+  const ordered = [...groups.values()].sort(
+    (left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence,
+  );
+  let totalBytes = ordered.reduce((total, group) => total + group.bytes, 0);
+  while (
+    ordered.length > MAX_SQLITE_FAILURE_BACKUP_SETS ||
+    totalBytes > MAX_SQLITE_FAILURE_BACKUP_BYTES
+  ) {
+    const oldest = ordered.shift();
+    if (oldest === undefined) {
+      return;
+    }
+    await Promise.all(oldest.paths.map((target) => rm(target, { force: true })));
+    totalBytes -= oldest.bytes;
   }
 }
 
@@ -357,6 +461,113 @@ interface JobRow {
   requested_at: string;
   started_at: string | null;
   state: "failed" | "succeeded";
+}
+
+interface PersistedGraphCounts {
+  edgeCount: number;
+  fileCount: number;
+  nodeCount: number;
+}
+
+/** 读取 hierarchy 的实际节点、文件和边计数，供启动屏障与摘要交叉校验。 */
+function readPersistedGraphCounts(
+  database: Database.Database,
+  workspaceKey: string,
+): PersistedGraphCounts {
+  const nodes = database.prepare(`
+    SELECT COUNT(*) AS node_count,
+           COALESCE(SUM(CASE WHEN kind = 'file' THEN 1 ELSE 0 END), 0) AS file_count
+    FROM nodes
+    WHERE workspace_key = ?
+  `).get(workspaceKey) as { file_count: number; node_count: number };
+  const edges = database.prepare(`
+    SELECT COUNT(*) AS edge_count
+    FROM edges
+    WHERE workspace_key = ?
+  `).get(workspaceKey) as { edge_count: number };
+  return {
+    edgeCount: edges.edge_count,
+    fileCount: nodes.file_count,
+    nodeCount: nodes.node_count,
+  };
+}
+
+/** 拒绝持久摘要、实际 hierarchy 与 terminal Job 之间的任何不一致。 */
+function validateBootstrapState(
+  state: GraphStoreBootstrapState,
+  counts: PersistedGraphCounts,
+): void {
+  const summary = state.committed;
+  if (summary === null) {
+    if (counts.nodeCount !== 0 || counts.edgeCount !== 0 || counts.fileCount !== 0) {
+      throw new Error("无提交基线时不允许残留 hierarchy 行。");
+    }
+    if (state.lastJob?.state === "succeeded") {
+      throw new Error("成功 Job 缺少对应的持久提交摘要。");
+    }
+  } else {
+    if (
+      !isNonNegativeSafeInteger(summary.indexedFileCount) ||
+      !isNonNegativeSafeInteger(summary.nodeCount) ||
+      !isNonNegativeSafeInteger(summary.edgeCount) ||
+      !isNonNegativeSafeInteger(summary.excludedPathCount) ||
+      summary.nodeCount < summary.indexedFileCount + 1 ||
+      summary.edgeCount !== summary.nodeCount - 1 ||
+      summary.nodeCount !== counts.nodeCount ||
+      summary.edgeCount !== counts.edgeCount ||
+      summary.indexedFileCount !== counts.fileCount ||
+      !isCanonicalUtcTimestamp(summary.generatedAt)
+    ) {
+      throw new Error("持久化 workspace 摘要与实际 hierarchy 不一致。");
+    }
+    if (state.lastJob === null) {
+      throw new Error("持久提交缺少对应的 terminal Job。");
+    }
+    if (
+      state.lastJob.state === "succeeded" &&
+      state.lastJob.completedAt !== summary.generatedAt
+    ) {
+      throw new Error("成功 Job 与持久提交时间不一致。");
+    }
+  }
+  if (state.lastJob !== null) {
+    validateStoredTerminalJob(state.lastJob);
+  }
+}
+
+/** terminal Job 必须具备单调、真实的 UTC 时间及与状态一致的错误字段。 */
+function validateStoredTerminalJob(job: StoredIndexJob): void {
+  if (
+    job.startedAt === undefined ||
+    job.completedAt === undefined ||
+    !isCanonicalUtcTimestamp(job.requestedAt) ||
+    !isCanonicalUtcTimestamp(job.startedAt) ||
+    !isCanonicalUtcTimestamp(job.completedAt) ||
+    Date.parse(job.requestedAt) > Date.parse(job.startedAt) ||
+    Date.parse(job.startedAt) > Date.parse(job.completedAt) ||
+    (job.state === "failed" &&
+      (job.errorCode === undefined || job.errorLogId === undefined)) ||
+    (job.state === "succeeded" &&
+      (job.errorCode !== undefined || job.errorLogId !== undefined))
+  ) {
+    throw new Error("持久化 terminal Job 合同不完整或时间不单调。");
+  }
+}
+
+/** SQLite 数值摘要只接受非负安全整数。 */
+function isNonNegativeSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+/** 接受秒或毫秒精度的真实 UTC 时间，拒绝日期溢出。 */
+function isCanonicalUtcTimestamp(value: string): boolean {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{3})?Z$/u.exec(value);
+  if (match === null) {
+    return false;
+  }
+  const canonical = match[2] === undefined ? `${match[1]}.000Z` : value;
+  const parsed = new Date(canonical);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === canonical;
 }
 
 /** 将非空 workspace 行映射为 application 摘要。 */

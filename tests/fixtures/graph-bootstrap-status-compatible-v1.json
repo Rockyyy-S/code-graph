@@ -11,18 +11,8 @@
   },
   "completeness": "empty",
   "configRevision": 1,
-  "currentIndexJob": null,
   "freshness": "fresh",
   "futureStatusField": true,
-  "lastIndexJob": {
-    "completedAt": "2026-07-25T00:00:00.000Z",
-    "futureJobField": true,
-    "id": "job-status-compatible-v1",
-    "kind": "initial-index",
-    "requestedAt": "2026-07-24T23:59:58.000Z",
-    "startedAt": "2026-07-24T23:59:59.000Z",
-    "state": "succeeded"
-  },
   "lifecycle": "running",
   "serviceInstanceId": "instance-status-compatible-v1",
   "serviceStatusRevision": 4,

@@ -1,11 +1,12 @@
 import { createRequire } from "node:module";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildHierarchyGraph } from "../../packages/application/src/index.js";
 import {
   SQLITE_BUSY_TIMEOUT_MS,
+  SqliteGraphStore,
   openSqliteGraphStore,
 } from "../../packages/adapters/store-sqlite/src/index.js";
 
@@ -19,7 +20,7 @@ interface RawSqliteDatabase {
   close: () => void;
   exec: (source: string) => RawSqliteDatabase;
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
-  prepare: (source: string) => { get: () => unknown };
+  prepare: (source: string) => { get: () => unknown; run: (...parameters: unknown[]) => unknown };
 }
 
 /** 从 store-sqlite 自身依赖边界解析的原生 SQLite 构造器。 */
@@ -41,8 +42,21 @@ async function createDatabasePath(): Promise<string> {
 }
 
 describe("sqlite graph store", () => {
+  it("retries the native close after an initial close failure", () => {
+    const close = vi.fn()
+      .mockImplementationOnce(() => {
+        throw new Error("close failed");
+      })
+      .mockImplementationOnce(() => undefined);
+    const store = new SqliteGraphStore({ close } as never, "0".repeat(64));
+
+    expect(() => store.close()).toThrow("close failed");
+    expect(() => store.close()).not.toThrow();
+    expect(close).toHaveBeenCalledTimes(2);
+  });
+
   it("creates exactly the bootstrap tables and verifies required pragmas", async () => {
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: await createDatabasePath(),
       workspaceKey: "c".repeat(64),
     });
@@ -74,7 +88,7 @@ describe("sqlite graph store", () => {
     const databasePath = await createDatabasePath();
     const workspaceKey = "d".repeat(64);
     const graph = buildHierarchyGraph(workspaceKey, []);
-    let store = openSqliteGraphStore({ databasePath, workspaceKey });
+    let store = await openSqliteGraphStore({ databasePath, workspaceKey });
     store.createJob({ id: "job-empty", kind: "initial-index", requestedAt: "2026-07-25T00:00:00.000Z" });
     store.markJobRunning("job-empty", "2026-07-25T00:00:01.000Z");
     store.commitHierarchy({
@@ -92,7 +106,7 @@ describe("sqlite graph store", () => {
     });
     store.close();
 
-    store = openSqliteGraphStore({ databasePath, workspaceKey });
+    store = await openSqliteGraphStore({ databasePath, workspaceKey });
     try {
       expect(store.readBootstrapState()).toMatchObject({
         committed: { indexedFileCount: 0, nodeCount: 1 },
@@ -104,9 +118,47 @@ describe("sqlite graph store", () => {
     }
   });
 
+  it("rejects a persisted summary that disagrees with the actual hierarchy", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "7".repeat(64);
+    const graph = buildHierarchyGraph(workspaceKey, []);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-corrupt-summary",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("job-corrupt-summary", "2026-07-25T00:00:01.000Z");
+    store.commitHierarchy({
+      completedAt: "2026-07-25T00:00:02.000Z",
+      graph,
+      jobId: "job-corrupt-summary",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare(`
+      UPDATE workspace
+      SET node_count = 0, edge_count = 99
+      WHERE workspace_key = ?
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/摘要与实际 hierarchy 不一致/u);
+  });
+
   it("rolls back all hierarchy rows when a synchronous write fails", async () => {
     const workspaceKey = "e".repeat(64);
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: await createDatabasePath(),
       faultInjector: ({ entityIndex, stage }) => {
         if (stage === "node" && entityIndex === 1) {
@@ -152,13 +204,13 @@ describe("sqlite graph store", () => {
     expect(String(rawDatabase.pragma("journal_mode", { simple: true })).toLowerCase()).toBe("delete");
     rawDatabase.close();
 
-    expect(() => openSqliteGraphStore({
+    await expect(openSqliteGraphStore({
       databasePath,
       workspaceKey: "f".repeat(64),
-    })).toThrow(/Schema 版本未知/u);
+    })).rejects.toThrow(/Schema 版本未知/u);
 
     const entries = await readdir(path.dirname(databasePath));
-    expect(entries.filter((entry) => /^graph\.sqlite\.failed-existing-\d+\.bak$/u.test(entry)))
+    expect(entries.filter((entry) => /^graph\.sqlite\.failed-existing-\d+-\d+\.bak$/u.test(entry)))
       .toHaveLength(1);
     const preservedDatabase = new RawSqlite(databasePath);
     try {
@@ -172,8 +224,42 @@ describe("sqlite graph store", () => {
     }
   });
 
+  it("preserves WAL sidecars and bounds accumulated failure backups", async () => {
+    const databasePath = await createDatabasePath();
+    await Promise.all([1, 2, 3, 4].map((timestamp) =>
+      writeFile(`${databasePath}.failed-existing-${timestamp}.bak`, "legacy", "utf8")));
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.pragma("journal_mode = WAL");
+    rawDatabase.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      INSERT INTO schema_migrations(version, applied_at)
+      VALUES (2, '2026-07-25T00:00:00.000Z');
+    `);
+    try {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(Promise.resolve().then(() => openSqliteGraphStore({
+          databasePath,
+          workspaceKey: "9".repeat(64),
+        }))).rejects.toThrow(/Schema 版本未知/u);
+      }
+      const entries = await readdir(path.dirname(databasePath));
+      expect(entries.some((entry) => /^graph\.sqlite\.failed-existing-\d+-\d+\.bak-wal$/u.test(entry)))
+        .toBe(true);
+      expect(entries.filter((entry) =>
+        /^graph\.sqlite\.failed-(?:existing|new)-\d+(?:-\d+)?\.bak$/u.test(entry)))
+        .toHaveLength(3);
+      expect(entries.filter((entry) => /^graph\.sqlite\.failed-existing-[1-4]\.bak$/u.test(entry)))
+        .toHaveLength(0);
+    } finally {
+      rawDatabase.close();
+    }
+  });
+
   it("restores the last terminal Job by insertion order when timestamps collide", async () => {
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath: await createDatabasePath(),
       workspaceKey: "b".repeat(64),
     });
@@ -204,7 +290,7 @@ describe("sqlite graph store", () => {
 
   it("rethrows SQLITE_BUSY after the bounded timeout under a competing writer", async () => {
     const databasePath = await createDatabasePath();
-    const store = openSqliteGraphStore({
+    const store = await openSqliteGraphStore({
       databasePath,
       workspaceKey: "a".repeat(64),
     });

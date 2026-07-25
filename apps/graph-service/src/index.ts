@@ -46,9 +46,9 @@ export async function startGraphService(
         }),
       paths: options.paths,
       initializeRuntime: async ({ serviceInstanceId, statusEpoch, workspaceKey }) => {
-        let store: ReturnType<typeof openSqliteGraphStore> | null = null;
+        let store: Awaited<ReturnType<typeof openSqliteGraphStore>> | null = null;
         try {
-          store = openSqliteGraphStore({
+          store = await openSqliteGraphStore({
             databasePath: path.join(options.paths.workspaceDirectory, "graph.sqlite"),
             workspaceKey,
           });

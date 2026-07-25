@@ -106,6 +106,22 @@ export const serviceStatusV1CompatibleSchema = {
     },
     telemetry: { ...telemetryStatusV1Schema, additionalProperties: true },
   },
+  /** 旧 v1 服务没有 Job 字段；其他已发布字段仍必须存在。 */
+  required: [
+    "availability",
+    "committed",
+    "completeness",
+    "configRevision",
+    "freshness",
+    "lifecycle",
+    "serviceInstanceId",
+    "serviceStatusRevision",
+    "statusEpoch",
+    "statusRevision",
+    "telemetry",
+    "version",
+    "viewConfigRevision",
+  ],
 } as const;
 
 const supportedVersionListSchema = {

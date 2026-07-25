@@ -54,8 +54,10 @@ export interface ScanWorkspaceOptions {
   readDirectory?: (
     input: string,
     remainingEntryBudget: number,
+    signal?: AbortSignal,
   ) => Promise<readonly ScannerDirectoryEntry[]>;
   realpath?: (input: string) => Promise<string>;
+  signal?: AbortSignal;
 }
 
 /** 已过滤候选与脱敏排除计数。 */
@@ -74,6 +76,7 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
   const readDirectory = options.readDirectory ?? defaultReadDirectory;
   const readStatus = options.lstat ?? nativeLstat;
   const platform = options.platform ?? process.platform;
+  const signal = options.signal;
   const maxCandidateFiles = normalizeLimit(
     options.maxCandidateFiles ?? MAX_CANDIDATE_SOURCE_FILES,
     MAX_CANDIDATE_SOURCE_FILES,
@@ -86,9 +89,10 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
   );
 
   try {
+    throwIfAborted(signal);
     const trustedRootRealpath = options.indexingRoot;
-    await assertTrustedRootUnchanged(trustedRootRealpath, resolveRealpath);
-    const rootStatus = await readStatus(trustedRootRealpath);
+    await assertTrustedRootUnchanged(trustedRootRealpath, resolveRealpath, signal);
+    const rootStatus = await waitAbortable(readStatus(trustedRootRealpath), signal);
     if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) {
       throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "indexing root 不是规范真实目录。");
     }
@@ -99,22 +103,43 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
     let scannedEntryCount = 0;
     const pendingDirectories = [{
       absolutePath: trustedRootRealpath,
+      expectedRealpath: trustedRootRealpath,
       logicalPath: "",
     }];
     while (pendingDirectories.length > 0) {
+      throwIfAborted(signal);
       const directory = pendingDirectories.pop()!;
-      await assertRealpathContained(
+      const beforeReadRealpath = await assertRealpathContained(
         trustedRootRealpath,
         directory.absolutePath,
         resolveRealpath,
         directory.logicalPath.length === 0,
+        signal,
       );
-      const entries = [...await readDirectory(
-        directory.absolutePath,
-        maxScannedEntries - scannedEntryCount,
+      if (beforeReadRealpath !== directory.expectedRealpath) {
+        throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "扫描目录已在排队后被替换。");
+      }
+      const entries = [...await waitAbortable(
+        readDirectory(
+          directory.absolutePath,
+          maxScannedEntries - scannedEntryCount,
+          signal,
+        ),
+        signal,
       )]
         .sort((left, right) => left.name.localeCompare(right.name));
+      const afterReadRealpath = await assertRealpathContained(
+        trustedRootRealpath,
+        directory.absolutePath,
+        resolveRealpath,
+        directory.logicalPath.length === 0,
+        signal,
+      );
+      if (afterReadRealpath !== beforeReadRealpath) {
+        throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "扫描目录在读取期间被替换。");
+      }
       for (const entry of entries) {
+        throwIfAborted(signal);
         scannedEntryCount += 1;
         if (scannedEntryCount > maxScannedEntries) {
           throw new WorkspaceScanError(
@@ -144,12 +169,22 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
         /** 文件系统访问始终使用 Dirent 的原始名称，公共图谱路径只用于身份。 */
         const absolutePath = path.join(directory.absolutePath, entry.name);
         if (entry.isDirectory()) {
-          const status = await readStatus(absolutePath);
+          const status = await waitAbortable(readStatus(absolutePath), signal);
           if (!status.isDirectory() || status.isSymbolicLink()) {
             continue;
           }
-          await assertRealpathContained(trustedRootRealpath, absolutePath, resolveRealpath);
-          pendingDirectories.push({ absolutePath, logicalPath: relativePath });
+          const childRealpath = await assertRealpathContained(
+            trustedRootRealpath,
+            absolutePath,
+            resolveRealpath,
+            false,
+            signal,
+          );
+          pendingDirectories.push({
+            absolutePath,
+            expectedRealpath: childRealpath,
+            logicalPath: relativePath,
+          });
           continue;
         }
         if (!entry.isFile() || !isSupportedSourceFile(relativePath)) {
@@ -161,15 +196,21 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
             "候选源码文件数超过安全预算。",
           );
         }
-        const status = await readStatus(absolutePath);
+        const status = await waitAbortable(readStatus(absolutePath), signal);
         if (!status.isFile() || status.isSymbolicLink()) {
           continue;
         }
-        await assertRealpathContained(trustedRootRealpath, absolutePath, resolveRealpath);
+        await assertRealpathContained(
+          trustedRootRealpath,
+          absolutePath,
+          resolveRealpath,
+          false,
+          signal,
+        );
         candidateFiles.push(relativePath);
       }
     }
-    await assertTrustedRootUnchanged(trustedRootRealpath, resolveRealpath);
+    await assertTrustedRootUnchanged(trustedRootRealpath, resolveRealpath, signal);
     return Object.freeze({
       candidateFiles: Object.freeze(candidateFiles.sort((left, right) => left.localeCompare(right))),
       excludedPathCount,
@@ -186,10 +227,12 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
 async function defaultReadDirectory(
   input: string,
   remainingEntryBudget: number,
+  signal?: AbortSignal,
 ): Promise<readonly Dirent[]> {
   const entries: Dirent[] = [];
-  const directory = await nativeOpendir(input);
+  const directory = await waitAbortable(nativeOpendir(input), signal);
   for await (const entry of directory) {
+    throwIfAborted(signal);
     if (entries.length >= remainingEntryBudget) {
       throw new WorkspaceScanError(
         "GRAPH_SCAN_LIMIT_EXCEEDED",
@@ -207,8 +250,9 @@ async function assertRealpathContained(
   candidatePath: string,
   resolveRealpath: (input: string) => Promise<string>,
   requireRootIdentity = false,
-): Promise<void> {
-  const candidateRealpath = await resolveRealpath(candidatePath);
+  signal?: AbortSignal,
+): Promise<string> {
+  const candidateRealpath = await waitAbortable(resolveRealpath(candidatePath), signal);
   if (requireRootIdentity && candidateRealpath !== rootRealpath) {
     throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "indexing root 已在启动后被替换。");
   }
@@ -216,16 +260,49 @@ async function assertRealpathContained(
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "候选真实路径逃逸 indexing root。");
   }
+  return candidateRealpath;
 }
 
 /** 每次扫描开始和结束都确认启动时受信任的物理 root 未被替换。 */
 async function assertTrustedRootUnchanged(
   trustedRootRealpath: string,
   resolveRealpath: (input: string) => Promise<string>,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const currentRealpath = await resolveRealpath(trustedRootRealpath);
+  const currentRealpath = await waitAbortable(resolveRealpath(trustedRootRealpath), signal);
   if (currentRealpath !== trustedRootRealpath) {
     throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "indexing root 已在启动后被替换。");
+  }
+}
+
+/** 在每个异步文件系统边界传播 shutdown 取消，避免关闭流程等待不可控扫描。 */
+async function waitAbortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  if (signal === undefined) {
+    return operation;
+  }
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(
+          new WorkspaceScanError("GRAPH_SCAN_FAILED", "工作区扫描已被安全取消。"),
+        );
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort !== undefined) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+/** 在同步循环边界快速响应 shutdown 取消。 */
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "工作区扫描已被安全取消。");
   }
 }
 

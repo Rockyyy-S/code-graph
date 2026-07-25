@@ -106,15 +106,21 @@ export function createIndexJobRuntime(
   let currentRun: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
   let storeClosed = false;
+  let runAbortController: AbortController | null = null;
 
   /** 在返回 shutdown accepted 前同步关闭 Job 接收门禁。 */
   const beginShutdown = (): void => {
     closing = true;
+    runAbortController?.abort();
   };
 
   /** 执行已持久化的 queued Job，并保证任何失败都不发布未提交 counts。 */
-  const runJob = async (jobId: string): Promise<void> => {
-    const startedAt = now();
+  const runJob = async (
+    jobId: string,
+    requestedAt: string,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    const startedAt = timestampAtOrAfter(now(), requestedAt);
     try {
       state.publishRunningJob(jobId, startedAt);
       options.store.markJobRunning(jobId, startedAt);
@@ -124,9 +130,13 @@ export function createIndexJobRuntime(
       const scanResult = await scan({
         ignoreSnapshot: options.ignoreState.snapshot,
         indexingRoot: options.indexingRoot,
+        signal,
       });
+      if (signal.aborted) {
+        throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "工作区扫描已被安全取消。");
+      }
       const graph = buildHierarchyGraph(options.workspaceKey, scanResult.candidateFiles);
-      const completedAt = now();
+      const completedAt = timestampAtOrAfter(now(), startedAt);
       const summary: StoredIndexSummary = {
         builtinRulesVersion: "builtin-ignore-v1",
         edgeCount: graph.edges.length,
@@ -138,17 +148,21 @@ export function createIndexJobRuntime(
       options.store.commitHierarchy({ completedAt, graph, jobId, summary });
       state.publishSucceededJob(jobId, summary);
     } catch (error) {
-      const completedAt = now();
-      const protocolError = mapJobFailure(error);
-      try {
-        options.store.markJobFailed(
-          jobId,
-          completedAt,
-          protocolError.code,
-          protocolError.logId,
-        );
-      } catch {
-        /** terminal 状态仍需可诊断；原始 SQLite 错误不会被未处理 rejection 泄露。 */
+      const completedAt = timestampAtOrAfter(now(), startedAt);
+      const protocolError = signal.aborted
+        ? createErrorV1("GRAPH_SCAN_FAILED", randomUUID())
+        : mapJobFailure(error);
+      if (!signal.aborted) {
+        try {
+          options.store.markJobFailed(
+            jobId,
+            completedAt,
+            protocolError.code,
+            protocolError.logId,
+          );
+        } catch {
+          /** terminal 状态仍需可诊断；原始 SQLite 错误不会被未处理 rejection 泄露。 */
+        }
       }
       state.publishFailedJob(jobId, completedAt, protocolError);
     }
@@ -183,11 +197,6 @@ export function createIndexJobRuntime(
           createErrorV1("INDEX_JOB_ALREADY_RUNNING", randomUUID()),
         );
       }
-      if (options.ignoreState.kind !== "ready") {
-        throw new GraphServiceRequestError(
-          createErrorV1("GRAPH_IGNORE_CONFIG_UNSUPPORTED", randomUUID()),
-        );
-      }
       const requestedAt = now();
       const kind = state.getStatus().committed === null ? "initial-index" : "rebuild";
       const job = Object.freeze({
@@ -196,20 +205,48 @@ export function createIndexJobRuntime(
         requestedAt,
         state: "queued" as const,
       });
+      state.publishQueuedJob(job);
       try {
         options.store.createJob(job);
       } catch {
-        throw new GraphServiceRequestError(createErrorV1("GRAPH_WRITE_FAILED", randomUUID()));
+        const error = createErrorV1("GRAPH_WRITE_FAILED", randomUUID());
+        state.publishFailedJob(job.id, timestampAtOrAfter(now(), requestedAt), error);
+        throw new GraphServiceRequestError(error);
       }
-      state.publishQueuedJob(job);
+      if (options.ignoreState.kind !== "ready") {
+        const error = createErrorV1("GRAPH_IGNORE_CONFIG_UNSUPPORTED", randomUUID());
+        const completedAt = timestampAtOrAfter(now(), requestedAt);
+        try {
+          options.store.markJobFailed(job.id, completedAt, error.code, error.logId);
+        } catch {
+          /** 配置拒绝的内存终态仍需可查询，附加持久化失败不覆盖原始诊断。 */
+        }
+        state.publishFailedJob(job.id, completedAt, error);
+        throw new GraphServiceRequestError(error);
+      }
+      const controller = new AbortController();
+      runAbortController = controller;
       currentRun = new Promise<void>((resolve) => schedule(resolve))
-        .then(() => runJob(job.id))
+        .then(() => runJob(job.id, requestedAt, controller.signal))
         .finally(() => {
+          if (runAbortController === controller) {
+            runAbortController = null;
+          }
           currentRun = null;
         });
       return { accepted: true, job };
     },
   };
+}
+
+/** 系统时钟回拨时把生命周期时间钳制到前一阶段，保持 canonical 状态单调。 */
+function timestampAtOrAfter(candidate: string, floor: string): string {
+  const candidateTime = Date.parse(candidate);
+  const floorTime = Date.parse(floor);
+  if (Number.isFinite(candidateTime) && Number.isFinite(floorTime) && candidateTime < floorTime) {
+    return floor;
+  }
+  return candidate;
 }
 
 /** 有界等待当前扫描，超时时保留仍可能被 Job 使用的 store 供后续重试关闭。 */

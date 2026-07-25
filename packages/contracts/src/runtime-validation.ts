@@ -27,7 +27,10 @@ import {
   jobStartResultV1Schema,
 } from "./index-job-schema.js";
 import type { ServiceMetadataV1 } from "./service-metadata.js";
-import type { ServiceStatusV1 } from "./service-status.js";
+import type {
+  CompatibleServiceStatusV1,
+  ServiceStatusV1,
+} from "./service-status.js";
 import {
   gateDefinitionV1Schema,
   gateEvaluationContextV1Schema,
@@ -133,12 +136,12 @@ export function validateJobStartRequest(value: unknown): value is JobStartReques
 
 /** 严格校验服务端生成的 canonical job/start 响应。 */
 export function validateJobStartResult(value: unknown): value is JobStartResult {
-  return jobStartResultValidator(value);
+  return jobStartResultValidator(value) && hasValidJobStartTimestamp(value);
 }
 
 /** 兼容校验 job/start 响应，允许同主版本新增可选字段。 */
 export function validateJobStartResultCompatible(value: unknown): value is JobStartResult {
-  return jobStartResultCompatibleValidator(value);
+  return jobStartResultCompatibleValidator(value) && hasValidJobStartTimestamp(value);
 }
 
 /**
@@ -182,19 +185,35 @@ export function validateServiceStatusV1(value: unknown): value is ServiceStatusV
   return (
     serviceStatusValidator(value) &&
     hasLegalServiceStatusCombination(value) &&
-    hasValidNestedJobError(value)
+    hasValidNestedJobError(value) &&
+    hasValidServiceStatusTimestamps(value)
   );
 }
 
 /** 兼容校验同一协议主版本的状态响应，忽略新增可选字段。 */
 export function validateServiceStatusV1Compatible(
   value: unknown,
-): value is ServiceStatusV1 {
+): value is CompatibleServiceStatusV1 {
   return (
     serviceStatusCompatibleValidator(value) &&
     hasLegalServiceStatusCombination(value) &&
-    hasValidNestedJobError(value)
+    hasValidNestedJobError(value, true) &&
+    hasValidServiceStatusTimestamps(value)
   );
+}
+
+/** 将旧 v1 缺失的 Job 字段补为 null，向客户端暴露完整的当前 ServiceStatusV1。 */
+export function normalizeServiceStatusV1Compatible(
+  value: unknown,
+): ServiceStatusV1 | null {
+  if (!validateServiceStatusV1Compatible(value)) {
+    return null;
+  }
+  return {
+    ...value,
+    currentIndexJob: value.currentIndexJob ?? null,
+    lastIndexJob: value.lastIndexJob ?? null,
+  };
 }
 
 /** initialize 结果必须复用完整的嵌套 ServiceStatus 语义校验。 */
@@ -202,15 +221,22 @@ function hasValidInitializeServiceStatus(value: unknown, compatible: boolean): b
   if (typeof value !== "object" || value === null || !("serviceStatus" in value)) {
     return false;
   }
-  return compatible
+  const valid = compatible
     ? validateServiceStatusV1Compatible(value.serviceStatus)
     : validateServiceStatusV1(value.serviceStatus);
+  if (!valid || !compatible || !("capabilities" in value) || !Array.isArray(value.capabilities)) {
+    return valid;
+  }
+  return !value.capabilities.includes("job/start") || hasExplicitJobStatusFields(value.serviceStatus);
 }
 
 /** 失败 Job 的 ErrorV1 不只满足形状，还必须与稳定注册表语义一致。 */
-function hasValidNestedJobError(value: unknown): boolean {
-  if (typeof value !== "object" || value === null || !("lastIndexJob" in value)) {
+function hasValidNestedJobError(value: unknown, allowMissing = false): boolean {
+  if (typeof value !== "object" || value === null) {
     return false;
+  }
+  if (!("lastIndexJob" in value)) {
+    return allowMissing;
   }
   const lastJob = value.lastIndexJob;
   if (
@@ -236,9 +262,117 @@ function hasLegalServiceStatusCombination(value: unknown): boolean {
   if (status.committed === null || status.freshness !== "fresh") {
     return false;
   }
+  if (!hasLegalHierarchySummary(status.committed)) {
+    return false;
+  }
   return status.committed.indexedFileCount === 0
     ? status.completeness === "empty"
     : status.completeness === "complete";
+}
+
+/** hierarchy 是一棵含 workspace 根的树，摘要计数必须保持最小结构不变量。 */
+function hasLegalHierarchySummary(summary: ServiceStatusV1["committed"]): boolean {
+  return (
+    summary !== null &&
+    summary.nodeCount >= summary.indexedFileCount + 1 &&
+    summary.edgeCount === summary.nodeCount - 1
+  );
+}
+
+/** `job/start` 的 queued Job 必须携带真实存在的 UTC 日历时间。 */
+function hasValidJobStartTimestamp(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || !("job" in value)) {
+    return false;
+  }
+  return hasValidJobTimestamps(value.job);
+}
+
+/** 对服务状态中的提交摘要和可选 Job 执行 Schema 之外的真实日历校验。 */
+function hasValidServiceStatusTimestamps(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const status = value as {
+    committed?: { generatedAt?: unknown } | null;
+    currentIndexJob?: unknown;
+    lastIndexJob?: unknown;
+  };
+  const timestampsValid = (
+    (status.committed === null ||
+      (status.committed !== undefined &&
+        typeof status.committed.generatedAt === "string" &&
+        isCanonicalUtcTimestamp(status.committed.generatedAt))) &&
+    (status.currentIndexJob === undefined ||
+      status.currentIndexJob === null ||
+      hasValidJobTimestamps(status.currentIndexJob)) &&
+    (status.lastIndexJob === undefined ||
+      status.lastIndexJob === null ||
+      hasValidJobTimestamps(status.lastIndexJob))
+  );
+  if (!timestampsValid) {
+    return false;
+  }
+  if (
+    status.committed !== null &&
+    status.committed !== undefined &&
+    typeof status.lastIndexJob === "object" &&
+    status.lastIndexJob !== null &&
+    "state" in status.lastIndexJob &&
+    status.lastIndexJob.state === "succeeded"
+  ) {
+    return (
+      "completedAt" in status.lastIndexJob &&
+      status.lastIndexJob.completedAt === status.committed.generatedAt
+    );
+  }
+  return true;
+}
+
+/** 校验任意已通过 Job Schema 的时间字段，缺失字段由具体状态 Schema 决定是否合法。 */
+function hasValidJobTimestamps(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const job = value as Record<string, unknown>;
+  for (const field of ["requestedAt", "startedAt", "completedAt"] as const) {
+    if (
+      field in job &&
+      (typeof job[field] !== "string" || !isCanonicalUtcTimestamp(job[field]))
+    ) {
+      return false;
+    }
+  }
+  const requestedAt = typeof job.requestedAt === "string" ? Date.parse(job.requestedAt) : null;
+  const startedAt = typeof job.startedAt === "string" ? Date.parse(job.startedAt) : null;
+  const completedAt = typeof job.completedAt === "string" ? Date.parse(job.completedAt) : null;
+  if (requestedAt !== null && startedAt !== null && requestedAt > startedAt) {
+    return false;
+  }
+  if (startedAt !== null && completedAt !== null && startedAt > completedAt) {
+    return false;
+  }
+  return true;
+}
+
+/** 声明公共 job/start 的服务必须显式提供两项 Job 状态，不能套用 Story 1.2 默认值。 */
+function hasExplicitJobStatusFields(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.hasOwn(value, "currentIndexJob") &&
+    Object.hasOwn(value, "lastIndexJob")
+  );
+}
+
+/** 接受秒或毫秒精度的真实 UTC 时间，并拒绝日期溢出与本地时区形式。 */
+function isCanonicalUtcTimestamp(value: string): boolean {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{3})?Z$/u.exec(value);
+  if (match === null) {
+    return false;
+  }
+  const canonical = match[2] === undefined ? `${match[1]}.000Z` : value;
+  const parsed = new Date(canonical);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === canonical;
 }
 
 /** 严格校验服务发现 metadata，未知版本和字段均会被拒绝。 */

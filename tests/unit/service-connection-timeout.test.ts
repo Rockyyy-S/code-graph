@@ -64,6 +64,7 @@ describe("GraphServiceConnection request deadlines", () => {
       {
         identity: { kind: "local", uri: "file:///workspace", version: 1 },
         indexingRoot: "/workspace",
+        physicalRootKey: "9".repeat(64),
         workspaceKey: "9".repeat(64),
       },
       {
@@ -107,6 +108,43 @@ describe("GraphServiceConnection request deadlines", () => {
     const connection = {
       dispose,
       sendRequest: vi.fn(async () => ({ future: "invalid" })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("keeps a healthy legacy connection open when job/start was not negotiated", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn(async () => createConnectionStatus());
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, ["service/shutdown", "service/status"]);
+
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).not.toHaveBeenCalled();
+    expect(socket.destroyed).toBe(false);
+    await expect(client.status()).resolves.toMatchObject({ availability: "absent" });
+    await client.close();
+  });
+
+  it("rejects status without Job fields after job/start was negotiated", async () => {
+    const dispose = vi.fn();
+    const status = createConnectionStatus() as Record<string, unknown>;
+    delete status.currentIndexJob;
+    delete status.lastIndexJob;
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => status),
     } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
     const socket = new net.Socket();
     const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
@@ -203,6 +241,7 @@ function createConnection(
     {
       identity: { kind: "local", uri: "file:///workspace", version: 1 },
       indexingRoot: "/workspace",
+      physicalRootKey: "9".repeat(64),
       workspaceKey: "9".repeat(64),
     },
     {
@@ -218,4 +257,25 @@ function createConnection(
     },
     10,
   );
+}
+
+/** 创建旧服务仍能返回的合法空状态。 */
+function createConnectionStatus() {
+  return {
+    availability: "absent" as const,
+    committed: null,
+    completeness: "empty" as const,
+    configRevision: 1,
+    currentIndexJob: null,
+    freshness: null,
+    lastIndexJob: null,
+    lifecycle: "running" as const,
+    serviceInstanceId: "instance",
+    serviceStatusRevision: 1,
+    statusEpoch: "epoch",
+    statusRevision: 1,
+    telemetry: { effective: "off" as const, pending: false, requested: "off" as const },
+    version: 1 as const,
+    viewConfigRevision: 1,
+  };
 }

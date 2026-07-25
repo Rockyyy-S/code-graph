@@ -25,6 +25,7 @@ import {
 } from "../../packages/service-client/src/connection.js";
 import { calculateMetadataIntegrity } from "../../packages/service-client/src/discovery.js";
 import { createWorkspacePaths } from "../../packages/service-client/src/endpoint.js";
+import { deriveWorkspaceIdentity } from "../../packages/service-client/src/workspace-identity.js";
 
 const roots: string[] = [];
 const clients: GraphServiceConnection[] = [];
@@ -94,6 +95,188 @@ describe("shared service-client control API", () => {
     ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
   });
 
+  it("fails closed when an unbound legacy workspace cache still exists", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-legacy-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-legacy-cache-"));
+    roots.push(indexingRoot, cacheRoot);
+    const identity = await deriveWorkspaceIdentity(indexingRoot);
+    const legacyPaths = createWorkspacePaths(identity.workspaceKey, {
+      cacheRoot,
+      platform: process.platform,
+    });
+    await mkdir(legacyPaths.workspaceDirectory, { recursive: true });
+    await writeFile(path.join(legacyPaths.workspaceDirectory, "graph.sqlite"), "legacy", "utf8");
+    const start = vi.fn(async () => undefined);
+
+    await expect(connectToGraphServiceWithCacheRootForTests({
+      clientVersion: "0.0.0-test",
+      indexingRoot,
+      launcher: { start },
+      startTimeoutMs: 1_000,
+      trust: { isTrusted: true },
+    }, cacheRoot)).rejects.toMatchObject({ code: "SERVICE_INSTANCE_CONFLICT" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("normalizes a previous v1 initialize status with missing Job fields", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-previous-v1-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "cgpv1-"));
+    roots.push(indexingRoot, cacheRoot);
+    const workspaceKey = "4".repeat(64);
+    const paths = createWorkspacePaths(workspaceKey, {
+      cacheRoot,
+      platform: process.platform,
+    });
+    await mkdir(paths.workspaceDirectory, { recursive: true });
+    const serviceInstanceId = "previous-v1-instance";
+    const statusEpoch = "previous-v1-epoch";
+    const previousStatus = createAbsentStatus(serviceInstanceId, statusEpoch) as Record<string, unknown>;
+    delete previousStatus.currentIndexJob;
+    delete previousStatus.lastIndexJob;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      consumeJsonRpcMessages(socket, (message) => {
+        if (message.method === "initialize") {
+          socket.write(encodeJsonRpcMessage({
+            id: message.id,
+            jsonrpc: "2.0",
+            result: {
+              capabilities: SERVICE_CAPABILITIES.filter(
+                (capability) => capability !== "job/start",
+              ),
+              cliSchemaVersion: CLI_SCHEMA_VERSION,
+              graphSchemaVersion: GRAPH_SCHEMA_VERSION,
+              protocolVersion: PROTOCOL_VERSION,
+              rulesSchemaVersion: RULES_SCHEMA_VERSION,
+              serviceStatus: previousStatus,
+              serviceVersion: "0.0.0-test",
+            },
+          }));
+        }
+      });
+    });
+    await listen(server, paths.endpoint);
+    let client: GraphServiceConnection | null = null;
+    try {
+      client = await openServiceConnectionForTests(
+        {
+          metadata: {
+            createdAt: new Date().toISOString(),
+            endpoint: paths.endpoint,
+            endpointKind: paths.endpointKind,
+            integrity: "test-only",
+            pid: process.pid,
+            serviceInstanceId,
+            statusEpoch,
+            version: 1,
+            workspaceKey,
+          },
+          sessionToken: "test-session-token",
+        },
+        {
+          identity: { kind: "local", uri: "file:///previous-v1", version: 1 },
+          indexingRoot,
+          physicalRootKey: workspaceKey,
+          workspaceKey,
+        },
+        "0.0.0-test",
+      );
+      expect(client.initializeResult.serviceStatus).toMatchObject({
+        currentIndexJob: null,
+        lastIndexJob: null,
+      });
+    } finally {
+      await client?.close();
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await closeServer(server);
+    }
+  });
+
+  it("closes the connection when startRebuild times out", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-rebuild-timeout-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "cgrt-"));
+    roots.push(indexingRoot, cacheRoot);
+    const workspaceKey = "3".repeat(64);
+    const paths = createWorkspacePaths(workspaceKey, {
+      cacheRoot,
+      platform: process.platform,
+    });
+    await mkdir(paths.workspaceDirectory, { recursive: true });
+    const serviceInstanceId = "rebuild-timeout-instance";
+    const statusEpoch = "rebuild-timeout-epoch";
+    const sockets = new Set<net.Socket>();
+    let connectionClosed = false;
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => {
+        connectionClosed = true;
+        sockets.delete(socket);
+      });
+      consumeJsonRpcMessages(socket, (message) => {
+        if (message.method === "initialize") {
+          socket.write(encodeJsonRpcMessage({
+            id: message.id,
+            jsonrpc: "2.0",
+            result: {
+              capabilities: SERVICE_CAPABILITIES,
+              cliSchemaVersion: CLI_SCHEMA_VERSION,
+              graphSchemaVersion: GRAPH_SCHEMA_VERSION,
+              protocolVersion: PROTOCOL_VERSION,
+              rulesSchemaVersion: RULES_SCHEMA_VERSION,
+              serviceStatus: createAbsentStatus(serviceInstanceId, statusEpoch),
+              serviceVersion: "0.0.0-test",
+            },
+          }));
+        }
+        /** job/start 故意不响应，用于验证客户端超时后的连接回收。 */
+      });
+    });
+    await listen(server, paths.endpoint);
+    let client: GraphServiceConnection | null = null;
+    try {
+      client = await openServiceConnectionForTests(
+        {
+          metadata: {
+            createdAt: new Date().toISOString(),
+            endpoint: paths.endpoint,
+            endpointKind: paths.endpointKind,
+            integrity: "test-only",
+            pid: process.pid,
+            serviceInstanceId,
+            statusEpoch,
+            version: 1,
+            workspaceKey,
+          },
+          sessionToken: "test-session-token",
+        },
+        {
+          identity: { kind: "local", uri: "file:///rebuild-timeout", version: 1 },
+          indexingRoot,
+          physicalRootKey: workspaceKey,
+          workspaceKey,
+        },
+        "0.0.0-test",
+        1_000,
+        25,
+      );
+      await expect(client.startRebuild()).rejects.toMatchObject({
+        code: "SERVICE_START_TIMEOUT",
+      });
+      await vi.waitFor(() => expect(connectionClosed).toBe(true));
+      await expect(client.status()).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+    } finally {
+      await client?.close();
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await closeServer(server);
+    }
+  });
+
   it.each([
     ["malformed JSON", Buffer.from("Content-Length: 1\r\n\r\n{", "ascii")],
     ["oversized frame", Buffer.from("Content-Length: 1048577\r\n\r\n", "ascii")],
@@ -159,6 +342,7 @@ describe("shared service-client control API", () => {
           {
             identity: { kind: "local", uri: "file:///invalid-rpc", version: 1 },
             indexingRoot,
+            physicalRootKey: workspaceKey,
             workspaceKey,
           },
           "0.0.0-test",
@@ -240,6 +424,7 @@ describe("shared service-client control API", () => {
           {
             identity: { kind: "local", uri: "file:///rpc-version", version: 1 },
             indexingRoot,
+            physicalRootKey: workspaceKey,
             workspaceKey,
           },
           "0.0.0-test",
@@ -293,6 +478,7 @@ describe("shared service-client control API", () => {
         {
           identity: { kind: "local", uri: "file:///partial-rpc", version: 1 },
           indexingRoot,
+          physicalRootKey: workspaceKey,
           workspaceKey,
         },
         "0.0.0-test",
@@ -396,6 +582,7 @@ describe("shared service-client control API", () => {
         {
           identity: { kind: "local", uri: "file:///concurrent-status", version: 1 },
           indexingRoot,
+          physicalRootKey: workspaceKey,
           workspaceKey,
         },
         "0.0.0-test",

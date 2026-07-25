@@ -1,5 +1,5 @@
 {
-  "capabilities": ["job/start", "service/shutdown", "service/status"],
+  "capabilities": ["service/shutdown", "service/status"],
   "cliSchemaVersion": 1,
   "futureField": true,
   "graphSchemaVersion": 1,
@@ -10,10 +10,8 @@
     "committed": null,
     "completeness": "empty",
     "configRevision": 1,
-    "currentIndexJob": null,
     "freshness": null,
     "futureStatusField": true,
-    "lastIndexJob": null,
     "lifecycle": "running",
     "serviceInstanceId": "instance-initialize-compatible-v1",
     "serviceStatusRevision": 1,
