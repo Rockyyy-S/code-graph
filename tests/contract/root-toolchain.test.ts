@@ -22,8 +22,12 @@ const compositeTypeScriptConfigs = [
   "packages/service-client/tsconfig.build.json",
 ] as const;
 
+/** 将 checkout 文本换行统一为 LF，使合同不依赖本机 core.autocrlf。 */
 async function readText(relativePath: string): Promise<string> {
-  return readFile(path.join(repositoryRoot, relativePath), "utf8");
+  return (await readFile(path.join(repositoryRoot, relativePath), "utf8")).replace(
+    /\r\n/gu,
+    "\n",
+  );
 }
 
 async function readJson(relativePath: string): Promise<Record<string, unknown>> {
