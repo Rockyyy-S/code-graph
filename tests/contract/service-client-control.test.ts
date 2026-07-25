@@ -114,7 +114,11 @@ describe("shared service-client control API", () => {
       launcher: { start },
       startTimeoutMs: 1_000,
       trust: { isTrusted: true },
-    }, cacheRoot)).rejects.toMatchObject({ code: "SERVICE_INSTANCE_CONFLICT" });
+    }, cacheRoot)).rejects.toMatchObject({
+      code: "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
+      retryable: false,
+      suggestedAction: expect.stringContaining("备份旧缓存"),
+    });
     expect(start).not.toHaveBeenCalled();
   });
 

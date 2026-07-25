@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +26,17 @@ export const MAX_SQLITE_FAILURE_BACKUP_SETS = 3;
 export const MAX_SQLITE_FAILURE_BACKUP_BYTES = 64 * 1024 * 1024;
 
 let failureBackupSequence = 0;
+
+/** meta 表中用于把提交摘要强绑定到实际 succeeded Job 的私有键前缀。 */
+const COMMITTED_JOB_META_KEY_PREFIX = "bootstrap-committed-job:";
+
+/** Story 1.4 运行时允许持久化到 failed Job 的稳定错误码。 */
+const PERSISTED_INDEX_JOB_ERROR_CODES = new Set([
+  "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+  "GRAPH_SCAN_FAILED",
+  "GRAPH_SCAN_LIMIT_EXCEEDED",
+  "GRAPH_WRITE_FAILED",
+]);
 
 /** 首次事务故障注入上下文，仅用于真实回滚测试。 */
 export interface SqliteGraphStoreFaultContext {
@@ -71,6 +83,87 @@ export class SqliteGraphStore implements GraphStorePort {
     }
     this.#database.close();
     this.#closed = true;
+  }
+
+  /** 启动时把上次进程中断遗留的 queued/running Job 收敛为可查询失败终态。 */
+  public reconcileInterruptedJobs(completedAt: string): void {
+    this.#ensureOpen();
+    if (!isCanonicalUtcTimestamp(completedAt)) {
+      throw new TypeError("中断 Job 恢复时间必须是真实 UTC 时间。");
+    }
+    this.#database.transaction(() => {
+      const rows = this.#database.prepare(`
+        SELECT id, kind, state, requested_at, started_at,
+               completed_at, error_code, error_log_id
+        FROM jobs
+        WHERE workspace_key = ? AND state IN ('queued', 'running')
+        ORDER BY rowid
+      `).all(this.#workspaceKey) as ActiveJobRow[];
+      rows.forEach(validateStoredActiveJob);
+      /** 旧 schema v1 缺少绑定键时，只在全部旧状态无歧义合法后回填。 */
+      this.#backfillLegacyCommittedJobBinding();
+      this.readBootstrapState();
+      const update = this.#database.prepare(`
+        UPDATE jobs
+        SET state = 'failed', started_at = ?, completed_at = ?,
+            error_code = 'GRAPH_SCAN_FAILED', error_log_id = ?
+        WHERE id = ? AND workspace_key = ? AND state IN ('queued', 'running')
+      `);
+      const recoveries = rows.map((row) => {
+        const startedAt = row.started_at ?? row.requested_at;
+        return {
+          completedAt: timestampAtOrAfter(completedAt, startedAt),
+          errorCode: "GRAPH_SCAN_FAILED",
+          errorLogId: randomUUID(),
+          id: row.id,
+          kind: row.kind,
+          requestedAt: row.requested_at,
+          startedAt,
+          state: "failed",
+        } as const satisfies StoredIndexJob;
+      });
+      for (const recovery of recoveries) {
+        requireSingleChange(
+          update.run(
+            recovery.startedAt,
+            recovery.completedAt,
+            recovery.errorLogId,
+            recovery.id,
+            this.#workspaceKey,
+          ).changes,
+          "中断 Job 未能收敛。",
+        );
+      }
+      const readRecovered = this.#database.prepare(`
+        SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id
+        FROM jobs
+        WHERE id = ? AND workspace_key = ? AND state = 'failed'
+      `);
+      for (const recovery of recoveries) {
+        const recovered = readRecovered.get(
+          recovery.id,
+          this.#workspaceKey,
+        ) as JobRow | undefined;
+        if (recovered === undefined) {
+          throw new Error("中断 Job 未能收敛。");
+        }
+        const recoveredJob = mapJob(recovered);
+        validateStoredTerminalJob(recoveredJob);
+        if (!matchesRecoveredJob(recoveredJob, recovery)) {
+          throw new Error("中断 Job 未能收敛。");
+        }
+      }
+      const remainingActive = this.#database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM jobs
+        WHERE workspace_key = ? AND state IN ('queued', 'running')
+      `).get(this.#workspaceKey) as { count: number };
+      if (remainingActive.count !== 0) {
+        throw new Error("中断 Job 未能收敛。");
+      }
+      /** 回验与更新共享事务；任何不变量失败都会回滚并保留原始损坏行。 */
+      this.readBootstrapState();
+    })();
   }
 
   /** 创建持久化 queued Job。 */
@@ -165,6 +258,11 @@ export class SqliteGraphStore implements GraphStorePort {
         WHERE id = ? AND workspace_key = ? AND state = 'running'
       `).run(input.completedAt, input.jobId, this.#workspaceKey);
       requireSingleChange(jobResult.changes, "Job 无法进入 succeeded。");
+      this.#database.prepare(`
+        INSERT INTO meta(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(committedJobMetaKey(this.#workspaceKey), input.jobId);
     })();
   }
 
@@ -177,22 +275,33 @@ export class SqliteGraphStore implements GraphStorePort {
       FROM workspace
       WHERE workspace_key = ?
     `).get(this.#workspaceKey) as WorkspaceRow | undefined;
-    const job = this.#database.prepare(`
-      SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id
-      FROM jobs
-      WHERE workspace_key = ? AND state IN ('succeeded', 'failed')
-      ORDER BY rowid DESC
-      LIMIT 1
-    `).get(this.#workspaceKey) as JobRow | undefined;
+    const terminalJobs = readStoredTerminalJobs(this.#database, this.#workspaceKey);
+    const lastJob = terminalJobs.at(-1) ?? null;
+    const latestSucceededJob = terminalJobs.findLast((job) => job.state === "succeeded") ?? null;
+    const committedJobMeta = this.#database.prepare(`
+      SELECT value
+      FROM meta
+      WHERE key = ?
+    `).get(committedJobMetaKey(this.#workspaceKey)) as { value: string } | undefined;
+    const committedJob = committedJobMeta === undefined
+      ? undefined
+      : this.#database.prepare(`
+        SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id
+        FROM jobs
+        WHERE workspace_key = ? AND id = ? AND state = 'succeeded'
+      `).get(this.#workspaceKey, committedJobMeta.value) as JobRow | undefined;
     const state = {
       committed: workspace?.committed_at === null || workspace === undefined
         ? null
         : mapWorkspaceSummary(workspace),
-      lastJob: job === undefined ? null : mapJob(job),
+      lastJob,
     };
     validateBootstrapState(
       state,
       readPersistedGraphCounts(this.#database, this.#workspaceKey),
+      committedJob === undefined ? null : mapJob(committedJob),
+      committedJobMeta?.value ?? null,
+      latestSucceededJob,
     );
     return state;
   }
@@ -238,6 +347,52 @@ export class SqliteGraphStore implements GraphStorePort {
     return rows.map((row) => row.relative_path);
   }
 
+  /** 为修复前已提交的合法 schema v1 数据回填私有 committed Job 绑定。 */
+  #backfillLegacyCommittedJobBinding(): void {
+    const metaKey = committedJobMetaKey(this.#workspaceKey);
+    const existingBinding = this.#database.prepare(`
+      SELECT value FROM meta WHERE key = ?
+    `).get(metaKey) as { value: string } | undefined;
+    if (existingBinding !== undefined) {
+      return;
+    }
+    const workspace = this.#database.prepare(`
+      SELECT committed_at, indexed_file_count, node_count, edge_count,
+             excluded_path_count, builtin_rules_version
+      FROM workspace
+      WHERE workspace_key = ?
+    `).get(this.#workspaceKey) as WorkspaceRow | undefined;
+    if (workspace === undefined || workspace.committed_at === null) {
+      return;
+    }
+    const terminalJobs = readStoredTerminalJobs(this.#database, this.#workspaceKey);
+    const latestSucceededJob = terminalJobs.findLast((job) => job.state === "succeeded") ?? null;
+    const bindingCandidates = terminalJobs.filter(
+      (job) => job.state === "succeeded" && job.completedAt === workspace.committed_at,
+    );
+    if (
+      latestSucceededJob === null ||
+      bindingCandidates.length !== 1 ||
+      bindingCandidates[0]?.id !== latestSucceededJob.id
+    ) {
+      throw new Error("旧版持久提交的 succeeded Job 绑定无法唯一恢复。");
+    }
+    const state = {
+      committed: mapWorkspaceSummary(workspace),
+      lastJob: terminalJobs.at(-1) ?? null,
+    };
+    validateBootstrapState(
+      state,
+      readPersistedGraphCounts(this.#database, this.#workspaceKey),
+      latestSucceededJob,
+      latestSucceededJob.id,
+      latestSucceededJob,
+    );
+    this.#database.prepare(`
+      INSERT INTO meta(key, value) VALUES (?, ?)
+    `).run(metaKey, latestSucceededJob.id);
+  }
+
   /** 防止关闭后的 SQLite 句柄继续被调用。 */
   #ensureOpen(): void {
     if (this.#closed) {
@@ -271,8 +426,8 @@ export async function openSqliteGraphStore(
       throw new Error("SQLite migration 未保持精确八表。");
     }
     const store = new SqliteGraphStore(database, options.workspaceKey, options.faultInjector);
-    /** 启动屏障内立即拒绝损坏摘要，确保握手开放前映射为 GRAPH_STORE_OPEN_FAILED。 */
-    store.readBootstrapState();
+    /** 在单一事务内校验旧状态、兼容回填绑定并收敛上次中断 Job。 */
+    store.reconcileInterruptedJobs(new Date().toISOString());
     return store;
   } catch (error) {
     try {
@@ -463,10 +618,37 @@ interface JobRow {
   state: "failed" | "succeeded";
 }
 
+interface ActiveJobRow {
+  completed_at: string | null;
+  error_code: string | null;
+  error_log_id: string | null;
+  id: string;
+  kind: "initial-index" | "rebuild";
+  requested_at: string;
+  started_at: string | null;
+  state: "queued" | "running";
+}
+
 interface PersistedGraphCounts {
   edgeCount: number;
   fileCount: number;
   nodeCount: number;
+}
+
+/** 按持久插入顺序读取并完整校验当前 workspace 的全部 terminal Job。 */
+function readStoredTerminalJobs(
+  database: Database.Database,
+  workspaceKey: string,
+): StoredIndexJob[] {
+  const rows = database.prepare(`
+    SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id
+    FROM jobs
+    WHERE workspace_key = ? AND state IN ('succeeded', 'failed')
+    ORDER BY rowid
+  `).all(workspaceKey) as JobRow[];
+  const jobs = rows.map(mapJob);
+  jobs.forEach(validateStoredTerminalJob);
+  return jobs;
 }
 
 /** 读取 hierarchy 的实际节点、文件和边计数，供启动屏障与摘要交叉校验。 */
@@ -496,13 +678,16 @@ function readPersistedGraphCounts(
 function validateBootstrapState(
   state: GraphStoreBootstrapState,
   counts: PersistedGraphCounts,
+  committedJob: StoredIndexJob | null,
+  committedJobId: string | null,
+  latestSucceededJob: StoredIndexJob | null,
 ): void {
   const summary = state.committed;
   if (summary === null) {
     if (counts.nodeCount !== 0 || counts.edgeCount !== 0 || counts.fileCount !== 0) {
       throw new Error("无提交基线时不允许残留 hierarchy 行。");
     }
-    if (state.lastJob?.state === "succeeded") {
+    if (committedJobId !== null || latestSucceededJob !== null) {
       throw new Error("成功 Job 缺少对应的持久提交摘要。");
     }
   } else {
@@ -520,24 +705,24 @@ function validateBootstrapState(
     ) {
       throw new Error("持久化 workspace 摘要与实际 hierarchy 不一致。");
     }
-    if (state.lastJob === null) {
-      throw new Error("持久提交缺少对应的 terminal Job。");
+    if (committedJobId === null || committedJobId.length === 0 || committedJob === null) {
+      throw new Error("持久提交缺少对应的 succeeded Job。");
     }
     if (
-      state.lastJob.state === "succeeded" &&
-      state.lastJob.completedAt !== summary.generatedAt
+      committedJob.id !== committedJobId ||
+      committedJob.completedAt !== summary.generatedAt ||
+      latestSucceededJob?.id !== committedJobId
     ) {
       throw new Error("成功 Job 与持久提交时间不一致。");
     }
-  }
-  if (state.lastJob !== null) {
-    validateStoredTerminalJob(state.lastJob);
   }
 }
 
 /** terminal Job 必须具备单调、真实的 UTC 时间及与状态一致的错误字段。 */
 function validateStoredTerminalJob(job: StoredIndexJob): void {
   if (
+    job.id.length === 0 ||
+    !isIndexJobKind(job.kind) ||
     job.startedAt === undefined ||
     job.completedAt === undefined ||
     !isCanonicalUtcTimestamp(job.requestedAt) ||
@@ -546,12 +731,67 @@ function validateStoredTerminalJob(job: StoredIndexJob): void {
     Date.parse(job.requestedAt) > Date.parse(job.startedAt) ||
     Date.parse(job.startedAt) > Date.parse(job.completedAt) ||
     (job.state === "failed" &&
-      (job.errorCode === undefined || job.errorLogId === undefined)) ||
+      (job.errorCode === undefined ||
+        job.errorCode.length === 0 ||
+        !PERSISTED_INDEX_JOB_ERROR_CODES.has(job.errorCode) ||
+        job.errorLogId === undefined ||
+        job.errorLogId.length === 0)) ||
     (job.state === "succeeded" &&
       (job.errorCode !== undefined || job.errorLogId !== undefined))
   ) {
     throw new Error("持久化 terminal Job 合同不完整或时间不单调。");
   }
+}
+
+/** 恢复后的 failed Job 必须逐字段等于本事务计算出的唯一预期终态。 */
+function matchesRecoveredJob(actual: StoredIndexJob, expected: StoredIndexJob): boolean {
+  return actual.id === expected.id &&
+    actual.kind === expected.kind &&
+    actual.state === expected.state &&
+    actual.requestedAt === expected.requestedAt &&
+    actual.startedAt === expected.startedAt &&
+    actual.completedAt === expected.completedAt &&
+    actual.errorCode === expected.errorCode &&
+    actual.errorLogId === expected.errorLogId;
+}
+
+/** queued/running Job 必须在恢复写入前满足可安全收敛的持久化合同。 */
+function validateStoredActiveJob(job: ActiveJobRow): void {
+  const hasValidBase =
+    job.id.length > 0 &&
+    isIndexJobKind(job.kind) &&
+    isCanonicalUtcTimestamp(job.requested_at) &&
+    job.completed_at === null &&
+    job.error_code === null &&
+    job.error_log_id === null;
+  const hasValidStage = job.state === "queued"
+    ? job.started_at === null
+    : job.started_at !== null &&
+      isCanonicalUtcTimestamp(job.started_at) &&
+      Date.parse(job.requested_at) <= Date.parse(job.started_at);
+  if (!hasValidBase || !hasValidStage) {
+    throw new Error("持久化活动 Job 合同不完整或时间不单调。");
+  }
+}
+
+/** 当前切片只持久化 initial-index 与 rebuild 两种 Job。 */
+function isIndexJobKind(value: string): value is StoredIndexJob["kind"] {
+  return value === "initial-index" || value === "rebuild";
+}
+
+/** 为每个 workspace 生成不暴露到公共合同的提交 Job 绑定键。 */
+function committedJobMetaKey(workspaceKey: string): string {
+  return `${COMMITTED_JOB_META_KEY_PREFIX}${workspaceKey}`;
+}
+
+/** 系统时钟回拨时不让恢复完成时间早于已持久化的 Job 阶段。 */
+function timestampAtOrAfter(candidate: string, floor: string): string {
+  const candidateTime = Date.parse(candidate);
+  const floorTime = Date.parse(floor);
+  if (Number.isFinite(candidateTime) && Number.isFinite(floorTime) && candidateTime < floorTime) {
+    return floor;
+  }
+  return candidate;
 }
 
 /** SQLite 数值摘要只接受非负安全整数。 */

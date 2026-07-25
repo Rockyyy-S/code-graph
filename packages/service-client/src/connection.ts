@@ -347,8 +347,7 @@ async function assertNoLegacyWorkspaceCache(
     throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
   }
   throw createServiceClientError(
-    "SERVICE_INSTANCE_CONFLICT",
-    "检测到无法安全归属到当前物理根的旧版服务缓存。",
+    "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
   );
 }
 

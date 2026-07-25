@@ -122,6 +122,9 @@ export function createIndexJobRuntime(
   ): Promise<void> => {
     const startedAt = timestampAtOrAfter(now(), requestedAt);
     try {
+      if (signal.aborted) {
+        throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "工作区扫描已被安全取消。");
+      }
       state.publishRunningJob(jobId, startedAt);
       options.store.markJobRunning(jobId, startedAt);
       if (options.ignoreState.kind !== "ready") {

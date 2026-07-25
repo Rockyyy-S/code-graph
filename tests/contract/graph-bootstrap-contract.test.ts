@@ -89,6 +89,7 @@ describe("graph bootstrap public contract", () => {
       "GRAPH_STORE_OPEN_FAILED",
       "GRAPH_WRITE_FAILED",
       "INDEX_JOB_ALREADY_RUNNING",
+      "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
     ]));
     expect(validateErrorV1({
       category: "configuration",

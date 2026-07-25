@@ -14,13 +14,13 @@
 - 证据定位：从 PR #8 当前 HEAD 的 required check 进入，不依赖仓库内缓存的 run ID。
 - 失败处理：任一外部条件失败都必须修复并冻结新 SHA，旧 SHA 的成功证据不得复用。
 
-## 二次复审修复候选
+## 最终复审修复候选
 
 - blocking gate 数：`22`
 - `gateRegistryDigest`：`b91f8793a5edb4a1f8428c2aca88ba6ecd7b89e23a4a5af1ab72217979903a4f`
-- `gateImplementationDigest`：`373c7a258c69095876b64330482ed54cb2e1bd1eb776cc4bd53a43049d58bf86`
+- `gateImplementationDigest`：`d77bba165a34e6ed512fce7a7c12e85a0b8de9c1b5cdfd3f941bd80ca1b19007`
 - 固定 producer commit：`0981130a71a3960aa374a82829d42aa9d9f15012`
-- 本地验证：`pnpm unit` 45 文件 / 279 用例、`pnpm contract` 21 文件 / 179 用例、
+- 本地验证：`pnpm unit` 45 文件 / 292 用例、`pnpm contract` 21 文件 / 179 用例、
   `pnpm type`、`pnpm lint`、`pnpm build`、`pnpm dependency-boundary`、
   `pnpm basic-security`、`pnpm planning-trace` 与本地 `architecture-required` 22/22 全部通过。
 - 本轮修复：兼容旧 v1 Job 字段缺失；校验真实 UTC 日历时间与 hierarchy 摘要计数；
@@ -31,6 +31,11 @@
   公共 Schema 可由标准严格 Ajv 直接编译；legacy `.bak` 纳入轮转；取消路径跳过同步失败写；
   声明 `job/start` 时强制 Job 状态字段；时间回拨保持 Job 生命周期单调；启动时交叉校验 SQLite
   摘要、实际 hierarchy 与 terminal Job。
+- 连续复审闭环：取消后的 queued Job 不进入 SQLite running；启动时原子收敛遗留 active Job；
+  提交摘要通过私有 meta 键强绑定精确 succeeded Job；合法旧 schema v1 仅在唯一候选、摘要与 hierarchy
+  一致时事务回填，歧义 fail closed；全部 terminal/active Job、恢复 UPDATE 命中、逐字段预期终态与
+  全 workspace active 清零均在同一事务内回验；legacy 缓存返回独立 non-retryable 错误并提供显式
+  `job/start` 恢复步骤。六轮 Blind/Edge/Acceptance 三层复审最终全部 CLEAN。
 - 外部状态：候选 SHA 尚未冻结；必须在提交并推送后，对新 HEAD 完整重跑 Provider child evidence、
   attestation、Controller App `architecture-required`、fresh drift monitor 与 ruleset 校验。
 
@@ -107,8 +112,8 @@
 - base/head 公共能力差异精确为上述 8 项；`violations=[]`
 - 8 个专属 verification entry 全部通过
 - repository contract preflight 通过
-- `pnpm unit`：45 文件 / 269 用例通过
-- `pnpm contract`：21 文件 / 174 用例通过
+- `pnpm unit`：45 文件 / 292 用例通过
+- `pnpm contract`：21 文件 / 179 用例通过
 - 本地 `architecture-required`：22/22 通过
 - SQLite：精确八表、WAL、foreign keys、NORMAL、5000 ms busy timeout、迁移幂等、未知高版本拒绝、
   故障副本、事务回滚与真实 `SQLITE_BUSY` 竞争通过

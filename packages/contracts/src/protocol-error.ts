@@ -11,6 +11,7 @@ export const SERVICE_ERROR_CODES = [
   "SERVICE_INITIALIZE_REQUIRED",
   "SERVICE_INVALID_REQUEST",
   "SERVICE_INSTANCE_CONFLICT",
+  "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
   "SERVICE_METHOD_NOT_FOUND",
   "SERVICE_PROTOCOL_INCOMPATIBLE",
   "SERVICE_START_TIMEOUT",
@@ -119,6 +120,12 @@ export const SERVICE_ERROR_REGISTRY: Readonly<
     message: "无法确认当前工作区的唯一服务实例。",
     retryable: true,
     suggestedAction: "等待现有实例完成启动后重新发现。",
+  },
+  SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED: {
+    category: "lifecycle",
+    message: "检测到无法安全归属到当前物理根的旧版服务缓存。",
+    retryable: false,
+    suggestedAction: "按 Service Control V1 的“旧版缓存恢复”步骤停止旧服务并备份旧缓存；当前版本不自动迁移旧图谱。",
   },
   SERVICE_METHOD_NOT_FOUND: {
     category: "protocol",

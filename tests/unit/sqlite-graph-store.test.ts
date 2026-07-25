@@ -20,7 +20,10 @@ interface RawSqliteDatabase {
   close: () => void;
   exec: (source: string) => RawSqliteDatabase;
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
-  prepare: (source: string) => { get: () => unknown; run: (...parameters: unknown[]) => unknown };
+  prepare: (source: string) => {
+    get: (...parameters: unknown[]) => unknown;
+    run: (...parameters: unknown[]) => unknown;
+  };
 }
 
 /** 从 store-sqlite 自身依赖边界解析的原生 SQLite 构造器。 */
@@ -154,6 +157,423 @@ describe("sqlite graph store", () => {
 
     await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
       .rejects.toThrow(/摘要与实际 hierarchy 不一致/u);
+  });
+
+  it("requires a succeeded Job that matches the committed summary", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "6".repeat(64);
+    const graph = buildHierarchyGraph(workspaceKey, []);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-committed",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("job-committed", "2026-07-25T00:00:01.000Z");
+    store.commitHierarchy({
+      completedAt: "2026-07-25T00:00:02.000Z",
+      graph,
+      jobId: "job-committed",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+    });
+    store.createJob({
+      id: "job-later-failed",
+      kind: "rebuild",
+      requestedAt: "2026-07-25T00:00:03.000Z",
+    });
+    store.markJobRunning("job-later-failed", "2026-07-25T00:00:04.000Z");
+    store.markJobFailed(
+      "job-later-failed",
+      "2026-07-25T00:00:05.000Z",
+      "GRAPH_SCAN_FAILED",
+      "log-later-failed",
+    );
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare("DELETE FROM jobs WHERE state = 'succeeded'").run();
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/缺少对应的 succeeded Job/u);
+  });
+
+  it("binds a committed summary to the exact succeeded Job even when timestamps collide", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "3".repeat(64);
+    const graph = buildHierarchyGraph(workspaceKey, []);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-earlier-same-time",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("job-earlier-same-time", "2026-07-25T00:00:01.000Z");
+    store.commitHierarchy({
+      completedAt: "2026-07-25T00:00:02.000Z",
+      graph,
+      jobId: "job-earlier-same-time",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+    });
+    store.createJob({
+      id: "job-current-same-time",
+      kind: "rebuild",
+      requestedAt: "2026-07-25T00:00:02.000Z",
+    });
+    store.markJobRunning("job-current-same-time", "2026-07-25T00:00:02.000Z");
+    store.commitHierarchy({
+      completedAt: "2026-07-25T00:00:02.000Z",
+      graph,
+      jobId: "job-current-same-time",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare("DELETE FROM jobs WHERE id = ?").run("job-current-same-time");
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/缺少对应的 succeeded Job/u);
+  });
+
+  it("backfills the exact committed Job binding for a valid pre-binding schema v1 database", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "8".repeat(64);
+    const graph = buildHierarchyGraph(workspaceKey, []);
+    let store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-legacy-committed",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("job-legacy-committed", "2026-07-25T00:00:01.000Z");
+    store.commitHierarchy({
+      completedAt: "2026-07-25T00:00:02.000Z",
+      graph,
+      jobId: "job-legacy-committed",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+    });
+    store.close();
+
+    let rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare("DELETE FROM meta WHERE key LIKE 'bootstrap-committed-job:%'").run();
+    rawDatabase.close();
+
+    store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    try {
+      expect(store.readBootstrapState()).toMatchObject({
+        committed: { generatedAt: "2026-07-25T00:00:02.000Z" },
+        lastJob: { id: "job-legacy-committed", state: "succeeded" },
+      });
+    } finally {
+      store.close();
+    }
+
+    rawDatabase = new RawSqlite(databasePath);
+    const binding = rawDatabase.prepare(`
+      SELECT value FROM meta WHERE key = ?
+    `).get(`bootstrap-committed-job:${workspaceKey}`) as { value: string };
+    rawDatabase.close();
+    expect(binding.value).toBe("job-legacy-committed");
+  });
+
+  it("rejects an ambiguous pre-binding database with colliding succeeded timestamps", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "9".repeat(64);
+    const graph = buildHierarchyGraph(workspaceKey, []);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    for (const [id, kind] of [
+      ["job-legacy-first", "initial-index"],
+      ["job-legacy-second", "rebuild"],
+    ] as const) {
+      store.createJob({
+        id,
+        kind,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+      });
+      store.markJobRunning(id, "2026-07-25T00:00:01.000Z");
+      store.commitHierarchy({
+        completedAt: "2026-07-25T00:00:02.000Z",
+        graph,
+        jobId: id,
+        summary: {
+          builtinRulesVersion: "builtin-ignore-v1",
+          edgeCount: 0,
+          excludedPathCount: 0,
+          generatedAt: "2026-07-25T00:00:02.000Z",
+          indexedFileCount: 0,
+          nodeCount: 1,
+        },
+      });
+    }
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare("DELETE FROM meta WHERE key LIKE 'bootstrap-committed-job:%'").run();
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/无法唯一恢复/u);
+  });
+
+  it("reconciles interrupted running Jobs on the next startup", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "5".repeat(64);
+    let store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-interrupted",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("job-interrupted", "2026-07-25T00:00:01.000Z");
+    store.close();
+
+    store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    try {
+      expect(store.readBootstrapState().lastJob).toMatchObject({
+        errorCode: "GRAPH_SCAN_FAILED",
+        id: "job-interrupted",
+        state: "failed",
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("does not rewrite a malformed queued Job before rejecting the database", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "2".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.close();
+
+    let rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare(`
+      INSERT INTO jobs(id, workspace_key, kind, state, requested_at)
+      VALUES ('', ?, 'initial-index', 'queued', 'not-a-time')
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/活动 Job 合同不完整/u);
+
+    rawDatabase = new RawSqlite(databasePath);
+    const row = rawDatabase.prepare(`
+      SELECT state, started_at, completed_at, error_code, error_log_id
+      FROM jobs
+      WHERE id = ''
+    `).get() as Record<string, unknown>;
+    rawDatabase.close();
+    expect(row).toEqual({
+      completed_at: null,
+      error_code: null,
+      error_log_id: null,
+      started_at: null,
+      state: "queued",
+    });
+  });
+
+  it("rejects recovery when a database trigger ignores the interrupted Job update", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "a".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-trigger-ignored",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.exec(`
+      CREATE TRIGGER ignore_interrupted_job_update
+      BEFORE UPDATE OF state ON jobs
+      WHEN OLD.state IN ('queued', 'running')
+      BEGIN
+        SELECT RAISE(IGNORE);
+      END;
+    `);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/中断 Job 未能收敛/u);
+  });
+
+  it("rejects recovery when an after-update trigger restores the Job to active state", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "b".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-trigger-restored",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.exec(`
+      CREATE TRIGGER restore_interrupted_job_after_update
+      AFTER UPDATE OF state ON jobs
+      WHEN OLD.state IN ('queued', 'running')
+      BEGIN
+        UPDATE jobs
+        SET state = OLD.state,
+            started_at = OLD.started_at,
+            completed_at = OLD.completed_at,
+            error_code = OLD.error_code,
+            error_log_id = OLD.error_log_id
+        WHERE id = OLD.id;
+      END;
+    `);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/中断 Job 未能收敛/u);
+  });
+
+  it("rejects recovery when a trigger rewrites the failed Job to different valid fields", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "f".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-trigger-rewritten",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.exec(`
+      CREATE TRIGGER rewrite_interrupted_job_after_update
+      AFTER UPDATE OF state ON jobs
+      WHEN OLD.state IN ('queued', 'running')
+      BEGIN
+        UPDATE jobs
+        SET kind = 'rebuild',
+            requested_at = '2026-07-24T23:59:59.000Z',
+            error_code = 'GRAPH_WRITE_FAILED',
+            error_log_id = 'trigger-log-id'
+        WHERE id = OLD.id;
+      END;
+    `);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/中断 Job 未能收敛/u);
+  });
+
+  it("rejects recovery when a trigger inserts a new active Job", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "0".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-trigger-original",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.exec(`
+      CREATE TRIGGER insert_active_job_after_update
+      AFTER UPDATE OF state ON jobs
+      WHEN OLD.state IN ('queued', 'running')
+      BEGIN
+        INSERT INTO jobs(id, workspace_key, kind, state, requested_at)
+        VALUES ('job-trigger-injected', OLD.workspace_key, 'rebuild', 'queued', NEW.completed_at);
+      END;
+    `);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/中断 Job 未能收敛/u);
+  });
+
+  it("rejects empty persisted terminal Job identifiers", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "4".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("", "2026-07-25T00:00:01.000Z");
+    store.markJobFailed(
+      "",
+      "2026-07-25T00:00:02.000Z",
+      "GRAPH_SCAN_FAILED",
+      "log-empty-id",
+    );
+    store.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/terminal Job 合同不完整/u);
+  });
+
+  it("rejects an unknown error code in any persisted terminal Job", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = "1".repeat(64);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.createJob({
+      id: "job-older-corrupt",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobFailed(
+      "job-older-corrupt",
+      "2026-07-25T00:00:01.000Z",
+      "GRAPH_SCAN_FAILED",
+      "log-older-corrupt",
+    );
+    store.createJob({
+      id: "job-latest-valid",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:02.000Z",
+    });
+    store.markJobFailed(
+      "job-latest-valid",
+      "2026-07-25T00:00:03.000Z",
+      "GRAPH_SCAN_FAILED",
+      "log-latest-valid",
+    );
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare("UPDATE jobs SET error_code = 'UNKNOWN_FAILURE' WHERE id = ?")
+      .run("job-older-corrupt");
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/terminal Job 合同不完整/u);
   });
 
   it("rolls back all hierarchy rows when a synchronous write fails", async () => {

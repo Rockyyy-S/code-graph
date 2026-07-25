@@ -189,6 +189,48 @@ describe("index job runtime", () => {
     expect(markJobFailed).not.toHaveBeenCalled();
   });
 
+  it("does not enter SQLite running state when shutdown cancels a queued Job", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    let scheduledOperation: (() => void) | undefined;
+    const markJobRunning = vi.fn(
+      (jobId: string, startedAt: string) => store.markJobRunning(jobId, startedAt),
+    );
+    const runtime = createIndexJobRuntime({
+      closeTimeoutMs: 100,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      schedule: (operation) => {
+        scheduledOperation = operation;
+      },
+      serviceInstanceId: "instance-cancel-queued",
+      statusEpoch: "epoch-cancel-queued",
+      store: {
+        close: () => store.close(),
+        commitHierarchy: (input) => store.commitHierarchy(input),
+        createJob: (job) => store.createJob(job),
+        markJobFailed: (jobId, completedAt, errorCode, errorLogId) =>
+          store.markJobFailed(jobId, completedAt, errorCode, errorLogId),
+        markJobRunning,
+        readBootstrapState: () => store.readBootstrapState(),
+      },
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    runtime.startJob({ kind: "rebuild" });
+    const closePromise = runtime.close();
+    scheduledOperation?.();
+    await expect(closePromise).resolves.toBeUndefined();
+    expect(markJobRunning).not.toHaveBeenCalled();
+    expect(runtime.getStatus().lastIndexJob).toMatchObject({
+      error: { code: "GRAPH_SCAN_FAILED" },
+      state: "failed",
+    });
+  });
+
   it("keeps Job lifecycle timestamps monotonic across a wall-clock rollback", async () => {
     const fixture = await createFixture();
     const store = await openSqliteGraphStore({
