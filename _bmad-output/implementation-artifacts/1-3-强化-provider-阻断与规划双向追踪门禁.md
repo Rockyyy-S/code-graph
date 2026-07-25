@@ -6,7 +6,7 @@ provider_snapshot_at: 2026-07-23T09:35:00+08:00
 
 # Story 1.3: 强化 provider 阻断与规划双向追踪门禁
 
-Status: in-progress
+Status: done
 
 <!-- 说明：本 Story 已完成需求、架构、现有代码、前序 Story、Git、provider 与技术版本分析；实现完成状态仍由 dev-story、真实外部门禁证据和独立代码审查流程决定。 -->
 
@@ -217,7 +217,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 
 #### Full re-review rerun 2026-07-24
 
-- [ ] [Review][Patch] [High] 外部 producer 固定的 GateHarness 与新增参数合同不兼容；已决定采用两阶段不可变提交：先形成兼容新参数的 Harness commit，再由后续 producer commit 固定该 SHA，并同步 producer identity、registry 与批准链 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
+- [x] [Review][Patch] [High] 外部 producer 固定的 GateHarness 与新增参数合同不兼容；已以不可变 Harness `5fe566b8…` 和后续 producer `c01e7c05…` 完成两阶段固定，并同步 producer identity、registry 与批准链 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
 - [x] [Review][Patch] [High] capability→gate 字符串映射仍不能证明新增 gate 真实覆盖能力；已决定采用严格能力专属合同：映射必须同时绑定专属测试/fixture、独立 gate 入口与 evidence，机器验证这些资产随能力同 PR 新增或更新，并拒绝重复无关命令、空 handler 与不可证明的覆盖关系 [scripts/contracts/validate-public-capability-gates.mjs:48]
 - [x] [Review][Patch] [High] success 发布前的 workflow-run 复验仍存在最终 TOCTOU 窗口；已决定采用无需新增托管的有界闭环：POST success 后再次复验最新 run/attempt、PR 快照与 monitor，任一变化立即发布 failure/in-progress 并重新计算 [../code-graph-gate-controller/bin/run-controller.mjs:411]
 - [x] [Review][Patch] [High] 相同 registry digest 的 implementation proposal 被 currentRecord 提前返回，受保护 gate 实现无法通过 proposed 流程获批 [../code-graph-gate-controller/lib/registry.mjs:313]
@@ -236,7 +236,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 
 #### Final adversarial re-review 2026-07-24
 
-- [ ] [Review][Patch] [High] GateHarness V2 的封闭参数合同尚未接入真实 immutable producer；阶段 A 已就绪，阶段 B 必须先形成真实 Harness commit H，再由后续 producer commit 固定 H 并同步 producer identity、registry、批准链与 Hosted 同 SHA 证据，禁止猜测 SHA [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
+- [x] [Review][Patch] [High] GateHarness V2 的封闭参数合同已由真实 immutable producer `c01e7c05…` 固定 Harness `5fe566b8…`，并完成 sequence 17 proposal、批准链与 Hosted 同 SHA 证据 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
 - [x] [Review][Patch] [High] lease guardian deadline 触发后，若被取消的 cycle 忽略 abort 并正常 resolve，会把超时误判为成功；等待只应用于确认紧急撤销收敛，最终必须传播原 deadline 错误 [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:118]
 - [x] [Review][Patch] [High] proposed registry 只在 cycle 开始时验证有效期，长时间验证可在 `expiresAt` 之后发布 success；发布前及 POST-success 闭环必须重新选择并验证同一 proposal [../code-graph-gate-controller/lib/registry.mjs:340]
 - [x] [Review][Patch] [High] 同一 head commit 被多个开放 PR 复用时，PR 专属 proposal 和 workflow run 会折叠为 commit 级结论；开放 PR 必须拒绝重复 head，run 选择与复验必须绑定 `run.pull_requests` 中的 PR number [../code-graph-gate-controller/bin/run-controller.mjs:264]
@@ -253,9 +253,9 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 
 #### Cumulative adversarial re-review 2026-07-24
 
-- [ ] [Review][Patch] [High] Hosted producer 仍固定 GateHarness V1 `da694bce…`，没有传入 V2 必需的 `--pull-number` 与 `--proposed-record-directory`，旧 Harness 也未把可信 base/head 注入候选 gate；当前累计实现尚无最终候选同 SHA 的 Hosted 证据 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
+- [x] [Review][Patch] [High] Hosted producer 已升级到 GateHarness V2 `5fe566b8…`，传入 `--pull-number`、`--proposed-record-directory` 与可信 base/head；run `30144361628` attempt 2 在精确候选 `22f6796…` 上完成十四项、artifact 与 attestation 全绿 [../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml:104]
 - [x] [Review][Patch] [High] 能力专属测试只按字符串与断言词法标记验收；不读取 fixture、不验证 capability、仅对路径/evidence 字符串做恒真断言的测试仍可让 AC4 差异检查返回零违规 [scripts/contracts/validate-public-capability-gates.mjs:476]
-- [ ] [Review][Patch] [High] `architecture-required` 是 commit 级 check，但现有 Controller 仅按 schedule/monitor 完成事件运行；关闭后新建或重开 PR 可即时复用旧绿色，CAS/replay 也未绑定 PR/run/attestation，必须由现有 Controller 在 PR 生命周期变化时先覆盖 pending（无需新增托管） [../code-graph-gate-controller/.github/workflows/controller.yml:3]
+- [x] [Review][Patch] [High] PR `opened/reopened/synchronize/ready_for_review/edited` 生命周期现由 Controller App 先覆盖稳定 pending，随后重算 child evidence；CAS/replay 已绑定 PR/run/attestation，关闭后重开或修改 base 不能复用旧绿色 [../code-graph-gate-controller/.github/workflows/controller.yml:3]
 - [x] [Review][Patch] [High] 相同开放 head 的唯一性只在 cycle 起点检查；检查后新开 PR 或 force-push 到共享 head，可在发布前及 POST-success 后形成两个 PR 共用 commit 绿色的 TOCTOU 窗口 [../code-graph-gate-controller/bin/run-controller.mjs:90]
 - [x] [Review][Patch] [High] 旧 Controller SHA 的 guardian 可继续接受绑定旧 SHA 的 fresh monitor success，并忽略默认分支新 SHA 上的最新 failure；发布前必须确认 Controller 默认分支仍指向本次部署 SHA [../code-graph-gate-controller/lib/controller-policy.mjs:170]
 - [x] [Review][Patch] [High] guardian 在 cycle 忽略 abort 且紧急撤销等待超时后仍进入下一轮，可产生重叠 cycle 并并发撤销/发布同一 commit check，破坏串行 CAS [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:34]
@@ -300,7 +300,7 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [x] [Review][Patch] [Medium] proposed record 的 `effectiveAt` 未进入 owner approval digest；现 approval 与 record 精确绑定同一生效时刻 [../code-graph-gate-controller/lib/registry.mjs:197]
 - [x] [Review][Patch] [Medium] 默认分支推进后旧 lease guardian 会继续占用串行队列；现完成 fail-closed 撤销后立即让新可信 revision 接管 [../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs:45]
 - [x] [Review][Patch] [High] 能力专属测试可对 fixture 做无关断言；现 binding 声明 `assertionTarget`，正负回调必须断言该真实导出的调用结果，且 Contracts 源码整体进入 Harness 实现摘要 [scripts/contracts/validate-public-capability-gates.mjs:474]
-- [ ] [Review][Patch] [High] 最终 producer `c01e7c05…`、十四项 registry、精确候选 HEAD 与可信 sequence 尚需完成 Controller proposal/迁移及 Hosted 同 SHA 验证 [.github/workflows/architecture-required.yml:23]
+- [x] [Review][Patch] [High] 最终 producer `c01e7c05…`、十四项 registry 与精确候选 `22f6796…` 已由 sequence 17 proposal 批准；Hosted run `30144361628` attempt 2、attestation `37060591` 与 Controller App check `89644207243` 同 SHA 成功 [.github/workflows/architecture-required.yml:23]
 
 ## Dev Notes
 
@@ -562,6 +562,7 @@ GPT-5 Codex
 - Final adversarial re-review：闭合 guardian deadline 洗白、proposal 过期、重复 head/PR-run 绑定、POST-success 即时撤销、Schema 词法指纹与 namespace/freeze、能力验证 runtime、CLI 唯一分派、CommonMark block state 与远程 shell tokenizer 共 13 项；仅保留需要真实 SHA 的 Harness 两阶段接入。
 - Cumulative adversarial re-review：闭合开放 PR duplicate-head 发布前/发布后复验、Controller 默认分支可信 SHA、guardian 非重叠轮次、公共能力 runtime 证据、Schema/RPC mutation 与语义指纹、权威 DAG/AD Binds/ProductValidation 段落、安全扫描跨行和无扩展名脚本、Windows `%` 与 CommonMark destination 共 20 项；File List 已按两个仓库基线重建为 108 个 Story 范围文件。
 - Re-review 2026-07-25：闭合官方 attestation audience 需求口径、严格三元 CAS、extension/RPC 真实注册面、bootstrap 专属验证、真实断言与 CLI 控制流、Schema shadow/逃逸、HTML comment/fence、stdin 解释器、Node/no-op 根脚本及 pending 幂等共 14 项；File List 更新为 124 个 Story 范围文件。
+- Final production review：不可变 Harness `5fe566b8…`、producer `c01e7c05…`、sequence 17 proposal、Controller Environment 凭据、PR 生命周期 pending 与 base 编辑重算均已部署。精确候选 `22f6796…` 的 Hosted run `30144361628` attempt 2、artifact `8615554976`、attestation `37060591`、push monitor `30144700025` 及 App-owned check `89644207243` 全绿；全部 Review Patch 已闭合，Story 状态更新为 `done`。
 
 ### File List
 
@@ -572,6 +573,7 @@ GPT-5 Codex
 - _bmad-output/planning-artifacts/prds/prd-bmad-2026-07-09/addendum.md
 - _bmad-output/planning-artifacts/prds/prd-bmad-2026-07-09/prd.md
 - .github/workflows/architecture-required.yml
+- .github/workflows/architecture-pr-lifecycle.yml
 - .gitignore
 - apps/cli/package.json
 - apps/cli/src/index.ts
@@ -651,7 +653,9 @@ GPT-5 Codex
 - ../code-graph-gate-controller/.github/workflows/controller.yml
 - ../code-graph-gate-controller/.github/workflows/drift-monitor.yml
 - ../code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml
+- ../code-graph-gate-controller/.github/workflows/publish-pr-pending.yml
 - ../code-graph-gate-controller/bin/produce-gate-evidence.mjs
+- ../code-graph-gate-controller/bin/publish-pr-pending.mjs
 - ../code-graph-gate-controller/bin/run-controller-lease-guardian.mjs
 - ../code-graph-gate-controller/bin/run-controller.mjs
 - ../code-graph-gate-controller/bin/run-drift-monitor.mjs
@@ -683,12 +687,15 @@ GPT-5 Codex
 - ../code-graph-gate-controller/tests/harness-cli.test.mjs
 - ../code-graph-gate-controller/tests/harness.test.mjs
 - ../code-graph-gate-controller/tests/process-deadline.test.mjs
+- ../code-graph-gate-controller/tests/publish-pr-pending.test.mjs
 - ../code-graph-gate-controller/tests/registry.test.mjs
 - ../code-graph-gate-controller/tests/workflow-contract.test.mjs
 - ../code-graph-gate-controller/trusted/previous-registry-approval.json
 - ../code-graph-gate-controller/trusted/previous-registry.json
 - ../code-graph-gate-controller/trusted/registry-approval.json
 - ../code-graph-gate-controller/trusted/registry.json
+- ../code-graph-gate-controller/trusted/proposed/story-1-3-pr-5.approval.json
+- ../code-graph-gate-controller/trusted/proposed/story-1-3-pr-5.json
 
 ### Change Log
 
@@ -703,3 +710,4 @@ GPT-5 Codex
 - 2026-07-24：Final adversarial re-review 的 13 项可修复 finding 全部闭合；Controller 88/88、主仓 201 unit/138 contract 及九项 `architecture-required` 全绿。Harness V2 阶段 B 必须依赖未来真实 commit H 与 producer pin，未执行提交、推送、部署或 Provider 切换，Story 与 sprint 保持 `in-progress`。
 - 2026-07-25：Cumulative adversarial re-review 的 22 项 Patch 中 20 项本地可修项已闭合；Controller 93/93、主仓 220 unit/144 contract、`type`、`lint` 与九项 `architecture-required` 全绿，File List 重建为 108 个 Story 范围文件。Hosted producer 的不可变 Harness V2 两提交链与 PR 生命周期 pending 覆盖仍需外部授权/状态变更，Story 与 sprint 保持 `in-progress`。
 - 2026-07-25：本轮 Re-review 的 14 项 Patch 已全部本地闭合；Controller 98/98、主仓 230 unit/157 contract、`type`、`lint` 与十四项 `architecture-required` 全绿，File List 更新为 124 个 Story 范围文件。Hosted Harness V2 不可变 producer 链与 PR 生命周期 pending 覆盖仍需提交/推送及 Provider 外部状态变更，未获本轮授权，Story 与 sprint 保持 `in-progress`。
+- 2026-07-25：最终生产迁移完成。Harness `5fe566b8…` 与 producer `c01e7c05…` 已不可变固定，sequence 17 proposal 精确批准候选 `22f6796…`；Hosted run `30144361628` attempt 2、artifact/attestation、monitor `30144700025`、Controller App check `89644207243` 与 active/strict/无 bypass ruleset 全部通过。全部 Review Patch 闭合，Story 与 sprint 更新为 `done`。

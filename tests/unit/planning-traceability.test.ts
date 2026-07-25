@@ -277,12 +277,18 @@ ProductValidationPlanV1
 
   it("检测 Story 1.3 未完成时 Story 1.4 越权推进", () => {
     expectRule(
-      mutateSource("sprintStatus", (source) =>
-        source.replace(
-          "1-4-安全初始化首次图谱与最小存储: backlog",
-          "1-4-安全初始化首次图谱与最小存储: in-progress",
-        ),
-      ),
+      mutateSource("sprintStatus", (source) => {
+        // 当前真实基线已完成 Story 1.3，负向 fixture 必须显式恢复未完成前置条件。
+        return source
+          .replace(
+            "1-3-强化-provider-阻断与规划双向追踪门禁: done",
+            "1-3-强化-provider-阻断与规划双向追踪门禁: in-progress",
+          )
+          .replace(
+            "1-4-安全初始化首次图谱与最小存储: backlog",
+            "1-4-安全初始化首次图谱与最小存储: in-progress",
+          );
+      }),
       "story-dependency",
     );
   });

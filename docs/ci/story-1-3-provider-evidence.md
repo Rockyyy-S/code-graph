@@ -1,12 +1,11 @@
 # Story 1.3 Provider 证据
 
-> 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset 与真实失败阻断均已激活；
-> 当前候选 HEAD 为 `aeb3cf996dfd2dbcc17a1d39f9e70729eb092768`，Hosted child run
-> `30063946450` 已完成。受控观测证明旧 success 曾在 monitor 过期后保留约 48 分钟，随后
-> App-owned failure `89398429939` 撤销绿色结论；恢复 monitor `30067144344` 与 Controller
-> `30067151956` 后，新 success `89400277110` 使 PR #5 恢复 `CLEAN`。复审修复新增平台中立
-> lease guardian、全局故障撤销和 PR 快照重验；当前 Story 保持 `in-progress`，等待这些本地修复
-> 进入新的可信 Controller/Hosted 证据链。
+> 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset、PR 生命周期 pending 与真实失败
+> 阻断均已激活。最终 producer `c01e7c0550b9d9150df26c20cebb10aaefdf648d` 固定不可变
+> GateHarness `5fe566b89322257076fe9cf5a9f181aa8e7d8fe7`；sequence 17 proposal 精确批准候选
+> `22f6796dd18bed18d49f22631553d7a183da7558`。Hosted run `30144361628` attempt 2、
+> artifact/attestation 与 Controller App check `89644207243` 全部成功。Story 1.3 的生产复审 finding
+> 已闭合；最终 Story 文档提交仍由同一 required check 在合并前执行精确 head 复验。
 
 ## Provider 与控制面身份
 
@@ -18,17 +17,23 @@
 - billing plan API 字段：当前授权令牌返回 `null`；仅作信息记录，不把未暴露的 plan 字段追加为原始 AC 阻塞
 - 外部控制面仓库：`Rockyyy-S/code-graph-gate-controller`
 - 当前生产可信记录：sequence `16`，source commit `b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf`
-- 当前生产 reusable producer：`78e84adecc7ef1b73a881dbd4bb6224ce7a7a769`
+- 当前可信根 reusable producer：`78e84adecc7ef1b73a881dbd4bb6224ce7a7a769`（sequence 16 历史根）
 - 当前生产 gate registry digest：`779bc1d3fd9a35b7f8fe15180d9f542ca7497cade97daff434f4bc91477f6e34`
 - 当前生产 gate implementation digest：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
 - 当前生产 approval evidence digest：`3967706832096969d6469cfb41a7f1bbc9009890afe05745826348f3a9a82328`
+- 已批准 proposed sequence：`17`
+- proposed head/source commit：`22f6796dd18bed18d49f22631553d7a183da7558`
+- proposed reusable producer：`c01e7c0550b9d9150df26c20cebb10aaefdf648d`
+- proposed gate registry digest：`9a4cb4adcce9c1767ce156cb0b5dc464eae2ca9cbca124caa5b7d0e770a74bd0`
+- proposed gate implementation digest：`3c32ce2afc5f32bebcb4ca4e44799dbc644c4c8e08934ef8b4cf204c70758ef2`
+- proposed approval evidence digest：`201f113d411dce95424df364db1744d50168fd3ce6426bfc38ffdcf063ffd13f`
 
 ## 最新审查修复生产迁移
 
-- GateHarness 实现提交：`da694bce36baf82a5e839ab72fe24139f4d0a25d`
-- reusable producer 提交：`78e84adecc7ef1b73a881dbd4bb6224ce7a7a769`
-- 已批准 `gateRegistryDigest`：`779bc1d3fd9a35b7f8fe15180d9f542ca7497cade97daff434f4bc91477f6e34`
-- 已批准 `gateImplementationDigest`：`c6544b7d924c347e04e7dade8cacc908d463b2a164d015faf6f247ba4d223cec`
+- GateHarness V2 实现提交：`5fe566b89322257076fe9cf5a9f181aa8e7d8fe7`
+- reusable producer 提交：`c01e7c0550b9d9150df26c20cebb10aaefdf648d`
+- 已批准 proposed `gateRegistryDigest`：`9a4cb4adcce9c1767ce156cb0b5dc464eae2ca9cbca124caa5b7d0e770a74bd0`
+- 已批准 proposed `gateImplementationDigest`：`3c32ce2afc5f32bebcb4ca4e44799dbc644c4c8e08934ef8b4cf204c70758ef2`
 - 实现摘要投影：九项根命令、根质量工具链，以及 47 个 gate runner、工作区发现器、
   TypeScript/esbuild/ESLint/Vitest 配置、八个受保护目录、依赖锁定与直接 Node 入口；
   本地忽略的 `scripts/architecture/graphify-out` 生成缓存明确排除；受保护文本的 CRLF 统一
@@ -52,10 +57,10 @@
   当前 Node 执行，绝对 native launcher 直接执行，其他相对值 fail closed
 - TypeScript 增量状态：11 个 composite 配置均把 `tsconfig*.tsbuildinfo` 固定到已授权 `dist`，
   不再要求 gate UID 写入只读源码目录
-- 生产可信记录：`TrustedGateRegistryRecordV1 sequence=16` 已绑定 source commit、producer 与 registry；
-  审批类型 `gate-trust-root-migration`
-- 迁移状态：sequence=16 已部署；Controller 最新修复通过 60 项测试，Hosted run
-  `30063231289` attempt 2、monitor `30063386894` 与 Controller `30063500387` 均成功
+- 生产可信记录：`TrustedGateRegistryRecordV1 sequence=16` 保留为迁移前历史根；精确 PR head 通过
+  `ProposedGateRegistryRecordV1 sequence=17` 绑定新 producer、registry、实现摘要与 owner approval
+- 迁移状态：Controller 104/104 tests 通过；Hosted run `30144361628` attempt 2、push monitor
+  `30144700025` 与 App-owned `architecture-required` check `89644207243` 均成功
 
 生产切换必须在精确 SHA/摘要获得明确批准后执行，并在切换后对同一主仓库候选 SHA
 重新验证 child evidence、Controller umbrella、ruleset 与 monitor freshness。下方历史成功运行不能证明
@@ -151,9 +156,24 @@
 | child run `30063231289` attempt 2 | `b853937a2aae3a78a8e2b6b7ac05be4a7d7c93bf` | sequence=16 生效后九项 gate 全部 `pass`，`evidenceCount=9, passed=true`，raw/final artifact 与 attestation 全部成功 |
 | Controller run `30063500387` | 同上 | App `4372284` 发布 check `89389784122` 为 `architecture-required=success`；结果 `accepted`，trusted sequence `16` |
 | PR #5 | 同上 | `mergeStateStatus=CLEAN`；required check 仅由 Controller App `4372284` 满足 |
-| child run `30063946450` | `aeb3cf996dfd2dbcc17a1d39f9e70729eb092768` | 当前候选 Hosted child 完成，作为本次复审前生产候选基线 |
+| child run `30063946450` | `aeb3cf996dfd2dbcc17a1d39f9e70729eb092768` | 复审前生产候选基线 |
 | Controller failure check `89398429939` | 同上 | monitor 已过期后撤销旧 success，App-owned `architecture-required=failure` 使 PR fail closed |
 | Controller success check `89400277110` | 同上 | 恢复 monitor 与 Controller 后重新发布 success，PR #5 恢复 `CLEAN` |
+| child run `30144361628` attempt 2 | `22f6796dd18bed18d49f22631553d7a183da7558` | 最终 P/H 与 sequence 17 proposal 生效；十四项 gate、raw/final artifact 和 attestation 全部成功 |
+| Controller check `89644207243` | 同上 | App `4372284` 验证 producer、artifact、attestation、十四项 evidence 与 trusted sequence `17` 后发布 success |
+
+sequence=17 proposed 最终审查 artifact：
+
+- raw artifact ID：`8615553581`
+- final artifact ID：`8615554976`
+- artifact name：`gate-evidence-30144361628-2-22f6796dd18bed18d49f22631553d7a183da7558`
+- final archive digest：`sha256:5bf4f2002b3f2c4765460330debe2ebfa2206a7dd38af4da3f9b0e31fb3c5ed7`
+- attested `gate-evidence.json` digest：`2ad5ec397aa01b139dcc89b521d08f36e1082a40e58dd9a7544775f76d691adf`
+- attestation ID：`37060591`
+- evaluation context digest：`b4bd993f0800620c13c98c4782d7ed2781c22399c9169c9258ad6de6782e1d60`
+- replay digest：`a0b190a4d3a773d0a40123d382533d602676e3135e46bda49fdc3317859dd2c7`
+- gate registry digest：`9a4cb4adcce9c1767ce156cb0b5dc464eae2ca9cbca124caa5b7d0e770a74bd0`
+- gate implementation digest：`3c32ce2afc5f32bebcb4ca4e44799dbc644c4c8e08934ef8b4cf204c70758ef2`
 
 sequence=15 最终恢复 artifact：
 
@@ -200,10 +220,12 @@ sequence=16 最终恢复 artifact：
 | monitor `30067144344` | provider/ruleset 恢复后重新取得 fresh monitor success |
 | Controller `30067151956` | 重新验证当前候选与可信根后完成恢复聚合 |
 | success check `89400277110` | App `4372284` 重新发布 `architecture-required=success`，PR #5 恢复 `CLEAN` |
+| monitor `30144700025` | Controller main `bc7da2e…` 的可信 push 立即触发完整 ruleset/App 验证并成功，避免部署等待 scheduled workflow 延迟 |
+| Controller `30144707345` | monitor 完成事件触发 guardian，并为精确候选发布 check `89644207243` success |
 
 Drift Monitor 使用完整分页 REST 验证 ruleset 内容，并使用同一只读 App 的 GraphQL
 `bypassActors.totalCount` 验证 bypass 空集合，避免因 REST 对只读 token 隐藏 `bypass_actors`
-而降低权限。复审实现保留 monitor 完成事件与错开 schedule 作为触发，同时由常驻 lease guardian
+而降低权限。复审实现保留默认分支可信 push、monitor 完成事件与错开 schedule 作为触发，同时由常驻 lease guardian
 在单个受信任运行内每分钟重验 freshness；失败、缺失或超过 15 分钟即进入全局撤销。撤销路径在发布
 failure 前后重复采样开放 PR，发布正常结论前也重新读取当前 base/head，关闭 force-push/reopen 到旧
 快照的本地竞态。该行为合同不要求特定云平台或 webhook；运行适配器能否持续存活属于部署验证，
@@ -211,10 +233,10 @@ failure 前后重复采样开放 PR，发布正常结论前也重新读取当前
 
 ## 最终验证
 
-- 外部 Controller 当前复审修复分支 tests：98/98 通过
+- 外部 Controller 最终生产分支 tests：104/104 通过
 - `pnpm install --frozen-lockfile`：通过
 - `pnpm architecture-required`：本地十四项全部通过；新增五项为 Gate Schema 能力专属 verification
-- sequence=15 候选 child evidence、artifact、attestation、Controller umbrella、ruleset 与 fresh monitor：全部通过
-- 当前候选 `aeb3cf9…` 的 child run `30063946450`、failure `89398429939`、恢复 monitor/Controller 与 success `89400277110` 已回填
-- 复审新增 lease guardian、全局错误撤销、deadline、可信 monitor ref/path/head 绑定和 PR 快照重验；新的 Hosted 同 SHA 证据需在部署后刷新
+- sequence=17 proposed 候选 `22f6796…` 的 child evidence、artifact、attestation、Controller umbrella、ruleset 与 fresh push monitor：全部通过
+- 最终 producer/Harness、PR 生命周期 pending、base 编辑重算、proposal owner approval digest 与旧 guardian 让位均已进入生产链
+- 当前文档提交产生的新 head 仍必须由 PR #5 的相同 Hosted/Controller required check 精确复验后才能合并
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果
