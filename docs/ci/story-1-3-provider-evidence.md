@@ -1,6 +1,6 @@
 # Story 1.3 Provider 证据
 
-> 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset、PR 生命周期 pending 与真实失败
+> 当前结论：生产 Provider 控制面、active/strict/无 bypass ruleset、Controller guardian pending 与真实失败
 > 阻断均已激活。最终 producer `c01e7c0550b9d9150df26c20cebb10aaefdf648d` 固定不可变
 > GateHarness `5fe566b89322257076fe9cf5a9f181aa8e7d8fe7`；sequence 17 proposal 精确批准候选
 > `22f6796dd18bed18d49f22631553d7a183da7558`。Hosted run `30144361628` attempt 2、
@@ -59,12 +59,19 @@
   不再要求 gate UID 写入只读源码目录
 - 生产可信记录：`TrustedGateRegistryRecordV1 sequence=16` 保留为迁移前历史根；精确 PR head 通过
   `ProposedGateRegistryRecordV1 sequence=17` 绑定新 producer、registry、实现摘要与 owner approval
-- 迁移状态：Controller 104/104 tests 通过；Hosted run `30144361628` attempt 2、push monitor
+- 迁移状态：Controller 最终 100/100 tests 通过；Hosted run `30144361628` attempt 2、push monitor
   `30144700025` 与 App-owned `architecture-required` check `89644207243` 均成功
 
 生产切换必须在精确 SHA/摘要获得明确批准后执行，并在切换后对同一主仓库候选 SHA
 重新验证 child evidence、Controller umbrella、ruleset 与 monitor freshness。下方历史成功运行不能证明
 本节生产链已经上线；sequence=15 与 sequence=16 的全绿运行分别保留为迁移前后证据。
+
+PR 生命周期生产烟测使用临时 PR #6。`opened` 后，候选仓库的跨仓 reusable caller 因 GitHub
+不向被调用仓库暴露其 Environment secrets 而在 check `89646312276` 明确失败（`appId option is
+required`）；该路径已删除，候选仓库继续不保存 Controller 凭据。同期既有 Controller lease
+guardian 在约 29 秒内发现新开放 PR/未完成 child run，并由 App `4372284` 发布
+`architecture-required=in_progress` check `89646361140`。因此生产 pending 由 Controller 自身轮询
+开放 PR 与最新 child run 实现，不依赖候选 workflow、跨仓 secret 传递或新增托管服务。
 
 ## GitHub App 与最小权限
 
@@ -233,10 +240,10 @@ failure 前后重复采样开放 PR，发布正常结论前也重新读取当前
 
 ## 最终验证
 
-- 外部 Controller 最终生产分支 tests：104/104 通过
+- 外部 Controller 最终生产分支 tests：100/100 通过
 - `pnpm install --frozen-lockfile`：通过
 - `pnpm architecture-required`：本地十四项全部通过；新增五项为 Gate Schema 能力专属 verification
 - sequence=17 proposed 候选 `22f6796…` 的 child evidence、artifact、attestation、Controller umbrella、ruleset 与 fresh push monitor：全部通过
-- 最终 producer/Harness、PR 生命周期 pending、base 编辑重算、proposal owner approval digest 与旧 guardian 让位均已进入生产链
+- 最终 producer/Harness、Controller guardian pending、base 编辑重算、proposal owner approval digest 与旧 guardian 让位均已进入生产链
 - 当前文档提交产生的新 head 仍必须由 PR #5 的相同 Hosted/Controller required check 精确复验后才能合并
 - Story 1.1/1.2 provider 文档保持历史只读证据，未用旧运行替代本 Story 结果
