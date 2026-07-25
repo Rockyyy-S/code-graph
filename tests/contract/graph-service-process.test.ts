@@ -51,9 +51,9 @@ describe("real graph-service process", () => {
     async () => {
       const graphServiceEntry = path.resolve("apps/graph-service/dist/main.js");
       await access(graphServiceEntry);
-      const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-bootstrap-root-"));
-      const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-bootstrap-cache-"));
-      const outsideRoot = await mkdtemp(path.join(tmpdir(), "codegraph-bootstrap-outside-"));
+      const indexingRoot = await createShortTempRoot("r1");
+      const cacheRoot = await createShortTempRoot("c1");
+      const outsideRoot = await createShortTempRoot("o1");
       roots.push(indexingRoot, cacheRoot, outsideRoot);
       await mkdir(path.join(indexingRoot, "src"));
       await writeFile(path.join(indexingRoot, "src", "index.ts"), "export {};\n");
@@ -156,8 +156,8 @@ describe("real graph-service process", () => {
     async () => {
       const graphServiceEntry = path.resolve("apps/graph-service/dist/main.js");
       await access(graphServiceEntry);
-      const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-ignore-process-root-"));
-      const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-ignore-process-cache-"));
+      const indexingRoot = await createShortTempRoot("r2");
+      const cacheRoot = await createShortTempRoot("c2");
       roots.push(indexingRoot, cacheRoot);
       await writeFile(path.join(indexingRoot, ".codegraphignore"), "dist/\n", "utf8");
       await writeFile(path.join(indexingRoot, "index.ts"), "export {};\n", "utf8");
@@ -203,8 +203,8 @@ describe("real graph-service process", () => {
     async () => {
       const graphServiceEntry = path.resolve("apps/graph-service/dist/main.js");
       await access(graphServiceEntry);
-      const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-empty-process-root-"));
-      const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-empty-process-cache-"));
+      const indexingRoot = await createShortTempRoot("r3");
+      const cacheRoot = await createShortTempRoot("c3");
       roots.push(indexingRoot, cacheRoot);
       await mkdir(path.join(indexingRoot, "node_modules", "pkg"), { recursive: true });
       await writeFile(path.join(indexingRoot, "node_modules", "pkg", "index.js"), "x\n");
@@ -277,8 +277,8 @@ describe("real graph-service process", () => {
       const workerEntry = path.resolve("tests/fixtures/service-client-process.mjs");
       await access(graphServiceEntry);
       await access(serviceClientEntry);
-      const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-process-root-"));
-      const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-process-cache-"));
+      const indexingRoot = await createShortTempRoot("r4");
+      const cacheRoot = await createShortTempRoot("c4");
       roots.push(indexingRoot, cacheRoot);
       const config = { cacheRoot, graphServiceEntry, indexingRoot };
       const launcher = createGraphServiceProcessLauncher({
@@ -339,6 +339,11 @@ describe("real graph-service process", () => {
     30_000,
   );
 });
+
+/** 创建满足 Hosted UDS 100 字节预算的独立短临时目录。 */
+async function createShortTempRoot(slot: string): Promise<string> {
+  return mkdtemp(path.join(tmpdir(), `cg-${slot}-`));
+}
 
 /** 轮询共享权威状态，直到当前 Job 进入 terminal。 */
 async function waitForTerminalStatus(client: GraphServiceConnection) {
