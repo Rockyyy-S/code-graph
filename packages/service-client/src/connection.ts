@@ -17,6 +17,7 @@ import {
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
   SERVICE_METHODS,
+  canonicalizeJson,
   type CompatibleInitializeResult,
   type InitializeResult,
   type JobStartResult,
@@ -66,6 +67,11 @@ export interface ConnectToGraphServiceOptions {
   trust: WorkspaceTrustGate;
 }
 
+/** status 传输立即吸收 rejection，等待观测队列时不会产生裸 Promise 拒绝。 */
+type StatusRequestOutcome =
+  | { kind: "error"; error: unknown }
+  | { kind: "value"; value: unknown };
+
 /** 独立客户端连接；关闭连接不会改变共享服务状态。 */
 export class GraphServiceConnection {
   readonly #connection: MessageConnection;
@@ -73,6 +79,18 @@ export class GraphServiceConnection {
   readonly #requestTimeoutMs: number;
   readonly #protocolState: JsonRpcProtocolState;
   #closed = false;
+  #latestConfigRevision: number;
+  #latestGraphRevision: number | null;
+  #latestIndexStatusCanonical: string;
+  #latestServiceStatusRevision: number;
+  #latestStatusRevision: number;
+  #latestStatusCanonical: string;
+  #latestViewConfigRevision: number;
+  #mustAdvanceIndexStatus = false;
+  #queuedControlMutationCount = 0;
+  #revisionObservationTail: Promise<void> = Promise.resolve();
+  #shutdownPromise: Promise<void> | null = null;
+  #terminalError: ServiceClientError | null = null;
 
   public readonly identity: WorkspaceIdentityResult;
   public readonly initializeResult: InitializeResult;
@@ -94,19 +112,29 @@ export class GraphServiceConnection {
     this.metadata = metadata;
     this.#requestTimeoutMs = requestTimeoutMs;
     this.#protocolState = protocolState;
+    this.#latestConfigRevision = initializeResult.serviceStatus.configRevision;
+    this.#latestGraphRevision = initializeResult.serviceStatus.graphRevision;
+    this.#latestIndexStatusCanonical = canonicalizeIndexStatus(initializeResult.serviceStatus);
+    this.#latestServiceStatusRevision = initializeResult.serviceStatus.serviceStatusRevision;
+    this.#latestStatusRevision = initializeResult.serviceStatus.statusRevision;
+    this.#latestStatusCanonical = canonicalizeJson(initializeResult.serviceStatus);
+    this.#latestViewConfigRevision = initializeResult.serviceStatus.viewConfigRevision;
   }
 
   /** 读取单一权威 ServiceStatusV1 快照。 */
   public async status(): Promise<ServiceStatusV1> {
-    this.#ensureOpen();
-    try {
-      this.#ensureCapability(SERVICE_METHODS.status);
-      const result = await sendRequestWithTimeout<unknown>(
-        this.#connection,
-        SERVICE_METHODS.status,
-        {},
-        this.#requestTimeoutMs,
-      );
+    /** 只读 status 可并发发出；若控制变更已排队，则等待其先完成请求与状态栅栏。 */
+    const statusRequest = this.#queuedControlMutationCount === 0
+      ? this.#sendStatusRequest()
+      : null;
+    return this.#serializeRevisionObservation(async () => {
+      this.#ensureOpen();
+      try {
+      const outcome = await (statusRequest ?? this.#sendStatusRequest());
+      if (outcome.kind === "error") {
+        throw outcome.error;
+      }
+      const result = outcome.value;
       if (!validateServiceStatusV1Compatible(result)) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
@@ -120,28 +148,76 @@ export class GraphServiceConnection {
       if (normalized === null) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      return normalized;
-    } catch (error) {
-      const mapped = this.#protocolState.violated
-        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
-        : mapConnectionError(error);
+      const normalizedCanonical = canonicalizeJson(normalized);
+      const normalizedIndexStatusCanonical = canonicalizeIndexStatus(normalized);
+      const childRevisionAdvanced =
+        normalized.statusRevision > this.#latestStatusRevision ||
+        normalized.configRevision > this.#latestConfigRevision ||
+        normalized.viewConfigRevision > this.#latestViewConfigRevision ||
+        (normalized.graphRevision !== null &&
+          (this.#latestGraphRevision === null ||
+            normalized.graphRevision > this.#latestGraphRevision));
       if (
-        mapped.code === "SERVICE_START_TIMEOUT" ||
-        mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
-        mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        normalized.serviceInstanceId !== this.initializeResult.serviceStatus.serviceInstanceId ||
+        normalized.statusEpoch !== this.initializeResult.serviceStatus.statusEpoch ||
+        normalized.serviceStatusRevision < this.#latestServiceStatusRevision ||
+        normalized.statusRevision < this.#latestStatusRevision ||
+        normalized.configRevision < this.#latestConfigRevision ||
+        normalized.viewConfigRevision < this.#latestViewConfigRevision ||
+        (this.#mustAdvanceIndexStatus && (
+          normalized.statusRevision <= this.#latestStatusRevision ||
+          normalizedIndexStatusCanonical === this.#latestIndexStatusCanonical
+        )) ||
+        (normalized.statusRevision === this.#latestStatusRevision &&
+          normalizedIndexStatusCanonical !== this.#latestIndexStatusCanonical) ||
+        (normalized.serviceStatusRevision === this.#latestServiceStatusRevision &&
+          normalizedCanonical !== this.#latestStatusCanonical) ||
+        (childRevisionAdvanced &&
+          normalized.serviceStatusRevision <= this.#latestServiceStatusRevision) ||
+        (this.#latestGraphRevision !== null &&
+          (normalized.graphRevision === null ||
+            normalized.graphRevision < this.#latestGraphRevision))
       ) {
-        await this.close();
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      throw mapped;
-    }
+      this.#latestServiceStatusRevision = normalized.serviceStatusRevision;
+      this.#latestStatusRevision = normalized.statusRevision;
+      this.#latestConfigRevision = normalized.configRevision;
+      this.#latestIndexStatusCanonical = normalizedIndexStatusCanonical;
+      this.#latestStatusCanonical = normalizedCanonical;
+      this.#latestViewConfigRevision = normalized.viewConfigRevision;
+      this.#mustAdvanceIndexStatus = false;
+      if (normalized.graphRevision !== null) {
+        /** 同一服务实例的已提交 revision 只能单调前进，供后续 Job 响应做时序校验。 */
+        this.#latestGraphRevision = normalized.graphRevision;
+      }
+      return normalized;
+      } catch (error) {
+        const mapped = this.#protocolState.violated
+          ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+          : mapConnectionError(error);
+        if (
+          mapped.code === "SERVICE_START_TIMEOUT" ||
+          mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
+          mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        ) {
+          this.#terminalError = mapped;
+          await this.close();
+        }
+        throw mapped;
+      }
+    });
   }
 
   /** 请求公共 rebuild 路径并返回已持久化的 queued Job。 */
   public async startRebuild(): Promise<JobStartResult> {
-    this.#ensureOpen();
-    /** 未协商的可选能力不代表现有传输损坏，健康旧服务仍可继续提供 status/shutdown。 */
-    this.#ensureCapability(SERVICE_METHODS.startJob);
+    this.#queuedControlMutationCount += 1;
     try {
+      return await this.#serializeRevisionObservation(async () => {
+      this.#ensureOpen();
+      /** 未协商的可选能力不代表现有传输损坏，健康旧服务仍可继续提供 status/shutdown。 */
+      this.#ensureCapability(SERVICE_METHODS.startJob);
+      try {
       const result = await sendRequestWithTimeout<unknown>(
         this.#connection,
         SERVICE_METHODS.startJob,
@@ -151,43 +227,94 @@ export class GraphServiceConnection {
       if (!validateJobStartResultCompatible(result)) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      return result;
-    } catch (error) {
-      const mapped = this.#protocolState.violated
-        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
-        : mapConnectionError(error);
+      const hasBaseGraphRevision = Object.hasOwn(result.job, "baseGraphRevision");
+      /** revisionless v1 只有固定 revision 1；接受响应后不得再发可失败 RPC 猜测 Job 基线。 */
+      const baseGraphRevision = hasBaseGraphRevision
+        ? result.job.baseGraphRevision
+        : (result.job.kind === "initial-index"
+          ? null
+          : 1);
+      const latestGraphRevision = this.#latestGraphRevision;
       if (
-        mapped.code === "SERVICE_START_TIMEOUT" ||
-        mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
-        mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        baseGraphRevision === undefined ||
+        (result.job.kind === "initial-index" && baseGraphRevision !== null) ||
+        (result.job.kind === "initial-index" &&
+          latestGraphRevision !== null) ||
+        (result.job.kind === "rebuild" &&
+          (baseGraphRevision === null ||
+            (latestGraphRevision !== null &&
+              baseGraphRevision < latestGraphRevision)))
       ) {
-        await this.close();
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      throw mapped;
+      if (baseGraphRevision !== null) {
+        /** 已接受 rebuild 的 base 证明服务至少已提交到该 revision。 */
+        this.#latestGraphRevision = baseGraphRevision;
+      }
+      /** 后续 IndexStatus 必须以前进 revision 的新内容反映已接受的 Job 变更。 */
+      this.#mustAdvanceIndexStatus = true;
+      return {
+        accepted: true,
+        job: {
+          baseGraphRevision,
+          id: result.job.id,
+          kind: result.job.kind,
+          requestedAt: result.job.requestedAt,
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      };
+      } catch (error) {
+        const mapped = this.#protocolState.violated
+          ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+          : mapConnectionError(error);
+        if (
+          mapped.code === "SERVICE_START_TIMEOUT" ||
+          mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
+          mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        ) {
+          this.#terminalError = mapped;
+          await this.close();
+        }
+        throw mapped;
+      }
+      });
+    } finally {
+      this.#queuedControlMutationCount -= 1;
     }
   }
 
   /** 受控关闭共享服务，并关闭当前连接。 */
-  public async shutdown(): Promise<void> {
-    this.#ensureOpen();
-    try {
-      this.#ensureCapability(SERVICE_METHODS.shutdown);
-      const result = await sendRequestWithTimeout<unknown>(
-        this.#connection,
-        SERVICE_METHODS.shutdown,
-        {},
-        this.#requestTimeoutMs,
-      );
-      if (!validateShutdownResultCompatible(result)) {
-        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
-      }
-    } catch (error) {
-      throw this.#protocolState.violated
-        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
-        : mapConnectionError(error);
-    } finally {
-      await this.close();
+  public shutdown(): Promise<void> {
+    if (this.#shutdownPromise === null) {
+      this.#queuedControlMutationCount += 1;
+      this.#shutdownPromise = this.#serializeRevisionObservation(async () => {
+        this.#ensureOpen();
+        try {
+          this.#ensureCapability(SERVICE_METHODS.shutdown);
+          const result = await sendRequestWithTimeout<unknown>(
+            this.#connection,
+            SERVICE_METHODS.shutdown,
+            {},
+            this.#requestTimeoutMs,
+          );
+          if (!validateShutdownResultCompatible(result)) {
+            throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+          }
+        } catch (error) {
+          const mapped = this.#protocolState.violated
+            ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+            : mapConnectionError(error);
+          this.#terminalError = mapped;
+          throw mapped;
+        } finally {
+          await this.close();
+        }
+      }).finally(() => {
+        this.#queuedControlMutationCount -= 1;
+      });
     }
+    return this.#shutdownPromise;
   }
 
   /** 仅关闭当前客户端连接，不触发共享服务 shutdown。 */
@@ -207,7 +334,7 @@ export class GraphServiceConnection {
   /** 防止已关闭连接继续发送控制请求。 */
   #ensureOpen(): void {
     if (this.#closed) {
-      throw createServiceClientError(
+      throw this.#terminalError ?? createServiceClientError(
         "SERVICE_START_TIMEOUT",
         "服务连接已经关闭。",
       );
@@ -220,6 +347,51 @@ export class GraphServiceConnection {
       throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
     }
   }
+
+  /** 创建永不裸拒绝的 status outcome，真实错误由观测队列按调用顺序处理。 */
+  #sendStatusRequest(): Promise<StatusRequestOutcome> {
+    try {
+      this.#ensureOpen();
+      this.#ensureCapability(SERVICE_METHODS.status);
+      return sendRequestWithTimeout<unknown>(
+        this.#connection,
+        SERVICE_METHODS.status,
+        {},
+        this.#requestTimeoutMs,
+      ).then(
+        (value) => ({ kind: "value", value }),
+        (error: unknown) => ({ error, kind: "error" }),
+      );
+    } catch (error) {
+      return Promise.resolve({ error, kind: "error" });
+    }
+  }
+
+  /** 按调用顺序串行化 revision 观测与控制变更，status 传输本身仍可并发。 */
+  #serializeRevisionObservation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#revisionObservationTail.then(operation, operation);
+    this.#revisionObservationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+/**
+ * 只规范化由 statusRevision 标识的 IndexStatus 子快照。
+ * config、view 与 telemetry 拥有独立 revision，不得混入该绑定。
+ */
+function canonicalizeIndexStatus(status: ServiceStatusV1): string {
+  return canonicalizeJson({
+    availability: status.availability,
+    committed: status.committed,
+    completeness: status.completeness,
+    currentIndexJob: status.currentIndexJob,
+    freshness: status.freshness,
+    graphRevision: status.graphRevision,
+    lastIndexJob: status.lastIndexJob,
+  });
 }
 
 /**

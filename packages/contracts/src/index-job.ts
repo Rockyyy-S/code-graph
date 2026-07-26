@@ -78,3 +78,18 @@ export interface JobStartResultV1 {
   accepted: true;
   job: QueuedIndexJobV1;
 }
+
+/** 旧 v1 响应必须同时缺少两项 revision，禁止把半新半旧格式误判为 legacy。 */
+type LegacyQueuedIndexJobV1 = Omit<
+  QueuedIndexJobV1,
+  "baseGraphRevision" | "resultGraphRevision"
+> & {
+  baseGraphRevision?: never;
+  resultGraphRevision?: never;
+};
+
+/** 同一 v1 线客户端接受 canonical 或完整 revisionless legacy 排队响应。 */
+export type CompatibleJobStartResultV1 = {
+  accepted: true;
+  job: LegacyQueuedIndexJobV1 | QueuedIndexJobV1;
+};

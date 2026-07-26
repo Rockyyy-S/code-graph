@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
+import contractVitestConfig from "../../vitest.contract.config.js";
 import { validateRepositoryContract } from "../../scripts/contracts/validate-repository-contract.mjs";
 
 const repositoryRoot = path.resolve(
@@ -46,6 +47,8 @@ describe("real root quality commands", () => {
 
     expect(unitConfig).toContain("passWithNoTests: false");
     expect(contractConfig).toContain("passWithNoTests: false");
+    expect((contractVitestConfig as { test?: { fileParallelism?: boolean } }).test)
+      .toMatchObject({ fileParallelism: false });
     expect(unitConfig).toContain("tests/fixtures/**");
     expect(contractConfig).toContain("tests/fixtures/**");
     expect(unitConfig).toContain("apps/**/*");

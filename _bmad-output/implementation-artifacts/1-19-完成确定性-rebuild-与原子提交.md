@@ -154,6 +154,29 @@ so that 查询和后续分析永远基于完整、可重复、未被竞态污染
 - [x] [Review][Patch] terminal `partial` Job 必须同步映射为顶层 `completeness=partial`，拒绝持久化不可能产生的完整度组合 [`packages/contracts/src/runtime-validation.ts:295`]
 - [x] [Review][Patch] 顶层 `completeness=partial` 必须保留 partial/failed/cancelled terminal 证据，缺失终态或 succeeded 均应拒绝 [`packages/contracts/src/runtime-validation.ts:296`]
 - [x] [Review][P1] 为精确 PR HEAD 建立 proposed approval，完成 Hosted artifact、attestation、Controller App 与 strict ruleset 闭环，并要求文档回填后的最终 HEAD 重新取证 [`docs/ci/story-1-19-provider-evidence.md:68`]
+- [x] [Review][Patch] 兼容 `job/start` 响应不得以完整 `JobStartResult` 类型返回缺失 revision 的原对象；规范化旧响应并剥离未知扩展字段 [`packages/service-client/src/connection.ts:151`]
+- [x] [Review][Patch] v1→v2 migration 必须在 `JOIN workspace` 前拒绝外键损坏，并核对 Job 迁移前后行数，禁止静默丢失 orphan Job [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:48`]
+- [x] [Review][Patch] 已迁移的 v2 数据库也必须在快速返回前执行 `foreign_key_check`，拒绝外部工具留下的 orphan Job [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:43`]
+- [x] [Review][Patch] legacy Job 前置计数必须移入 migration transaction 并位于首个 DDL 前，保证前后计数来自同一 SQLite 快照 [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:69`]
+- [x] [Review][Patch] revisionless v1 rebuild 固定映射唯一 legacy revision 1；`job/start` 已接受后禁止再发可失败的 `status()` 猜测 Job 基线 [`packages/service-client/src/connection.ts:155`]
+- [x] [Review][Patch] 初始化已观察 committed graph 时必须拒绝 revisionless `initial-index`，显式 rebuild base 也不得倒退到 initialize 快照之前 [`packages/service-client/src/connection.ts:166`]
+- [x] [Review][Patch] strict/compatible `job/start` validator 必须共同拒绝 `initial-index` 非空 base 与 `rebuild` 空 base，显式非法值不得按字段缺失修复 [`packages/contracts/src/runtime-validation.ts:145`]
+- [x] [Review][Patch] v1/v2 migration 必须在 `BEGIN IMMEDIATE` 锁内重验 Schema 与外键，封闭预检到迁移/返回之间的并发写窗口 [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:43`]
+- [x] [Review][Patch] 外键检查只读取首个违规，避免损坏规模控制打开路径内存；v1 orphan ownership 检查必须与 DDL 共用同一锁定快照 [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:54`]
+- [x] [Review][Patch] compatible `job/start` revision 字段只允许“双缺或双有”，禁止把半新半旧响应误判为 legacy 并伪造 base [`packages/contracts/src/runtime-validation.ts:442`]
+- [x] [Review][Patch] 客户端必须记住同一连接后续 `status()` 已观察到的最高 graph revision，拒绝之后倒退的 rebuild base 或重新出现的 `initial-index` [`packages/service-client/src/connection.ts:122`]
+- [x] [Review][Patch] v1 ownership 迁移前必须在同 workspace 精确匹配一个 node 或 edge，拒绝跨 workspace 引用与 node/edge 同 ID 歧义 [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:187`]
+- [x] [Review][Patch] v2 快速返回前必须全库校验 `fact_kind + fact_id + workspace_key` 多态引用，不能只依赖 SQLite `foreign_key_check` [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:198`]
+- [x] [Review][Patch] 真实进程与 SQLite 锁合同在 Windows 上必须串行文件执行，消除 blocking contract gate 的宿主资源竞争型伪超时且不得跳过用例 [`vitest.contract.config.ts:6`]
+- [x] [Review][Patch] `status()` 与 `startRebuild()` 必须串行化 revision 观测，禁止并发响应乱序把健康旧快照误判为服务回退 [`packages/service-client/src/connection.ts:112`]
+- [x] [Review][Patch] 同一连接除 graphRevision 外还必须拒绝 service/status、index status、config 与 view config revision 回退，并锁定 service instance/epoch [`packages/service-client/src/connection.ts:139`]
+- [x] [Review][Patch] v2 ownership 语义检查必须显式拒绝未知 `fact_kind`，即使外部工具关闭 CHECK 约束也不得绕过打开校验 [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:201`]
+- [x] [Review][Patch] contract 串行配置测试必须读取实际配置对象，不能仅以源码字符串存在性作为 blocking gate 证据 [`tests/contract/quality-command-contract.test.ts:50`]
+- [x] [Review][Patch] 相同 `serviceStatusRevision` 必须绑定不可变 canonical 状态快照，任何内容变化都要求 envelope revision 前进 [`packages/service-client/src/connection.ts:139`]
+- [x] [Review][Patch] graph/index/config/view 任一子 revision 前进时 `serviceStatusRevision` 必须同步前进，保持单一 envelope 总排序 [`packages/service-client/src/connection.ts:143`]
+- [x] [Review][Patch] 前序协议违规关闭连接后，队列中已等待的控制调用必须继承同一 terminal error，禁止误报为可重试启动超时 [`packages/service-client/src/connection.ts:310`]
+- [x] [Review][Patch] `shutdown()` 必须进入同一控制队列并对并发调用幂等，禁止与已接受 rebuild 或 status 响应竞态 [`packages/service-client/src/connection.ts:267`]
+- [x] [Review][Patch] v1 任一包含 hierarchy facts 的 workspace 必须恰有一个 workspace root，拒绝迁移后无 owner 或多 ownership slice [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:186`]
 
 ## Dev Notes
 
@@ -283,8 +306,9 @@ GPT-5 Codex
 - 2026-07-26 完整度终审：补充 terminal `partial` 与顶层 completeness 的一致性负向合同回归，拒绝运行时和持久化不可能产生的状态组合；修复后继续执行完整门禁与三层终审。
 - 2026-07-26 反向完整度终审：补充 `completeness=partial` 缺失 terminal 证据或与 succeeded Job 并存的负向合同回归，仅允许 partial/failed/cancelled 维持降级状态；修复后继续执行完整门禁与三层终审。
 - 2026-07-26 门禁复验：首次 `architecture-required` 的并行 `contract` 子进程出现瞬时失败；立即独立完整 `pnpm contract` 21 文件/181 用例通过，随后原命令完整重跑 23/23 通过，未通过隐藏或跳过用例处理。
-- 2026-07-26 最终全量验证：`type`、`lint`、`build`、`dependency-boundary`、`basic-security`、`planning-trace`、`git diff --check` 均通过；unit 54 文件/380 用例、contract 21 文件/181 用例通过；确定性 rebuild 专项 7 文件/121 用例及真实进程合同 1 文件/5 用例通过；`architecture-required` 23/23 通过。
+- 2026-07-26 最终全量验证：`type`、`lint`、`build`、`dependency-boundary`、`basic-security`、`planning-trace`、`git diff --check` 均通过；unit 54 文件/432 用例、contract 21 文件/181 用例通过；确定性 rebuild 专项 7 文件/121 用例及真实进程合同 1 文件/5 用例通过；contract 文件串行执行以隔离 Windows 真实进程与 SQLite 锁资源竞争，未跳过或放宽用例，`architecture-required` 完整重跑 23/23 通过。
 - 2026-07-26 Provider 实现候选闭环：Controller proposal PR #16 合并后，精确 HEAD `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 的 Hosted run `30204776057` 成功；final artifact 非空，23/23 evidence 为 pass，GitHub attestation 固定 producer SHA，fresh drift monitor `30204738502` 与 Controller App check `89801143334` 均成功，ruleset active/strict/no-bypass，PR 一度达到 `mergeStateStatus=CLEAN`。Provider 文档回填会产生新 HEAD，必须对新 HEAD 重跑同一闭环。
+- 2026-07-26 最终 Blind/Edge Review 修复：旧 `job/start` compatible 响应规范化为完整 queued Job，只允许 revision 字段双缺或双有；revisionless v1 rebuild 固定映射 legacy revision 1。并发 `status()` 可同时发出但响应严格按调用顺序观测，`startRebuild()`、`shutdown()` 等控制变更继续与 revision 观测串行；连接锁定 service instance/epoch、canonical envelope 快照与 graph/service/index/config/view 单调关系，裸拒绝被封装为 outcome，排队调用继承 terminal error。Job 接受后以可证明的 revision 与状态内容前进为准，不要求 Job ID 永久保留在 current/last 两槽。v1/v2 打开路径在 `BEGIN IMMEDIATE` 锁内执行有界外键检查、Job 行数守恒与全库 canonical hierarchy/ownership 校验，拒绝非 canonical node/edge ID、非 NFC/POSIX 路径、file 后缀错误、跨 kind 路径冲突、空 directory 叶子、非唯一 root、断连或成环路径树、跨 workspace edge、多余/缺失 owner、多态 orphan 与未知 fact kind；聚合校验保持线性规模。contract 文件串行执行并由真实配置对象锁定，消除 Windows 宿主资源竞争型伪超时。多轮 RED 回归后定向 109/109、完整 unit 432/432、contract 181/181 与 architecture-required 23/23 通过；`1041ddc` 的 Hosted success 仅保留为历史证据，最终代码 HEAD 必须重新取证。
 
 ### Completion Notes List
 

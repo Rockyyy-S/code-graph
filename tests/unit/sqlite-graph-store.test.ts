@@ -11,9 +11,15 @@ import {
   type CreateStoredIndexJobInput,
 } from "../../packages/application/src/index.js";
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
-import type { HierarchyGraph, HierarchyReadSetV1 } from "../../packages/domain/src/index.js";
+import {
+  buildGraphEdgeId,
+  buildGraphEntityId,
+  type HierarchyGraph,
+  type HierarchyReadSetV1,
+} from "../../packages/domain/src/index.js";
 import {
   applyBootstrapMigration,
+  applyDeterministicCommitMigration,
   SQLITE_BUSY_TIMEOUT_MS,
   SqliteGraphStore,
   openSqliteGraphStore as openSqliteGraphStoreWithDigest,
@@ -43,6 +49,10 @@ interface RawSqliteDatabase {
   prepare: (source: string) => {
     get: (...parameters: unknown[]) => unknown;
     run: (...parameters: unknown[]) => unknown;
+  };
+  transaction: (callback: () => void) => {
+    (): void;
+    immediate: () => void;
   };
 }
 
@@ -1091,6 +1101,504 @@ describe("sqlite graph store", () => {
       store.close();
     }
   });
+
+  it("rejects a v1 orphan Job instead of dropping it during migration", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "orphan-v1-job" });
+    const rawDatabase = new RawSqlite(databasePath);
+    applyBootstrapMigration(rawDatabase as never);
+    /** 模拟旧进程在未启用外键检查时留下的损坏缓存。 */
+    rawDatabase.pragma("foreign_keys = OFF");
+    rawDatabase.prepare(`
+      INSERT INTO jobs(id, workspace_key, kind, state, requested_at)
+      VALUES (?, ?, 'initial-index', 'queued', ?)
+    `).run(
+      "job-v1-orphan",
+      "missing-workspace",
+      "2026-07-26T00:00:00.000Z",
+    );
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/外键完整性/u);
+  });
+
+  it("rejects foreign-key corruption in an already migrated v2 database", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "orphan-v2-job" });
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    /** 模拟外部旧工具关闭外键约束后写入损坏的 v2 Job。 */
+    rawDatabase.pragma("foreign_keys = OFF");
+    rawDatabase.prepare(`
+      INSERT INTO jobs(
+        id, workspace_key, kind, state, requested_at,
+        base_graph_revision, result_graph_revision, legacy_schema_version
+      ) VALUES (?, ?, 'initial-index', 'queued', ?, NULL, NULL, NULL)
+    `).run(
+      "job-v2-orphan",
+      "missing-workspace",
+      "2026-07-26T00:00:01.000Z",
+    );
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
+      .rejects.toThrow(/外键完整性/u);
+  });
+
+  it("rejects v1 ownership whose fact exists only in another workspace", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "cross-workspace-v1-owner" });
+    const otherWorkspaceKey = sha256CanonicalJson({ migration: "cross-workspace-v1-fact" });
+    const openedWorkspaceKey = sha256CanonicalJson({ migration: "cross-workspace-v1-open" });
+    const rawDatabase = new RawSqlite(databasePath);
+    applyBootstrapMigration(rawDatabase as never);
+    rawDatabase.pragma("foreign_keys = ON");
+    rawDatabase.prepare("INSERT INTO workspace(workspace_key) VALUES (?), (?)")
+      .run(workspaceKey, otherWorkspaceKey);
+    rawDatabase.prepare(`
+      INSERT INTO nodes(id, workspace_key, kind, relative_path)
+      VALUES ('foreign-root', ?, 'workspace', ''),
+             ('foreign-node', ?, 'file', 'foreign.ts')
+    `).run(otherWorkspaceKey, otherWorkspaceKey);
+    /** ownership 的父 workspace 合法，但 fact 属于另一 workspace，SQLite FK 无法表达该约束。 */
+    rawDatabase.prepare(`
+      INSERT INTO facts_ownership(fact_id, owner_key, workspace_key)
+      VALUES ('foreign-node', 'hierarchy:foreign', ?)
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }).then(
+      (openedStore) => {
+        openedStore.close();
+        return openedStore;
+      },
+    ))
+      .rejects.toThrow(/ownership/u);
+  });
+
+  it("rejects a v1 ownership fact id that is ambiguous across node and edge", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "ambiguous-v1-owner" });
+    const openedWorkspaceKey = sha256CanonicalJson({ migration: "ambiguous-v1-open" });
+    const rawDatabase = new RawSqlite(databasePath);
+    applyBootstrapMigration(rawDatabase as never);
+    rawDatabase.pragma("foreign_keys = ON");
+    rawDatabase.prepare("INSERT INTO workspace(workspace_key) VALUES (?)").run(workspaceKey);
+    rawDatabase.prepare(`
+      INSERT INTO nodes(id, workspace_key, kind, relative_path)
+      VALUES ('shared-fact-id', ?, 'workspace', ''),
+             ('child-node', ?, 'file', 'child.ts')
+    `).run(workspaceKey, workspaceKey);
+    rawDatabase.prepare(`
+      INSERT INTO edges(id, workspace_key, from_id, relation_type, to_id, qualifier)
+      VALUES ('shared-fact-id', ?, 'shared-fact-id', 'contains', 'child-node', '')
+    `).run(workspaceKey);
+    rawDatabase.prepare(`
+      INSERT INTO facts_ownership(fact_id, owner_key, workspace_key)
+      VALUES ('shared-fact-id', 'hierarchy:shared', ?)
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }))
+      .rejects.toThrow(/ownership/u);
+  });
+
+  it.each(["missing", "multiple"] as const)(
+    "rejects a v1 workspace with facts and %s hierarchy roots",
+    async (rootMode) => {
+      const databasePath = await createDatabasePath();
+      const workspaceKey = sha256CanonicalJson({ migration: `v1-root-${rootMode}` });
+      const openedWorkspaceKey = sha256CanonicalJson({ migration: `v1-root-open-${rootMode}` });
+      const rawDatabase = new RawSqlite(databasePath);
+      applyBootstrapMigration(rawDatabase as never);
+      rawDatabase.pragma("foreign_keys = ON");
+      rawDatabase.prepare("INSERT INTO workspace(workspace_key) VALUES (?)").run(workspaceKey);
+      if (rootMode === "missing") {
+        rawDatabase.prepare(`
+          INSERT INTO nodes(id, workspace_key, kind, relative_path)
+          VALUES ('rootless-file', ?, 'file', 'rootless.ts')
+        `).run(workspaceKey);
+      } else {
+        rawDatabase.prepare(`
+          INSERT INTO nodes(id, workspace_key, kind, relative_path)
+          VALUES ('root-one', ?, 'workspace', ''),
+                 ('root-two', ?, 'workspace', 'duplicate-root')
+        `).run(workspaceKey, workspaceKey);
+      }
+      rawDatabase.close();
+
+      await expect(openSqliteGraphStore({
+        databasePath,
+        workspaceKey: openedWorkspaceKey,
+      }).then((openedStore) => {
+        openedStore.close();
+        return openedStore;
+      })).rejects.toThrow(/root/u);
+    },
+  );
+
+  it("rejects a v1 ownership that is not bound to its workspace root", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "v1-ghost-owner" });
+    const openedWorkspaceKey = sha256CanonicalJson({ migration: "v1-ghost-owner-open" });
+    const rawDatabase = new RawSqlite(databasePath);
+    applyBootstrapMigration(rawDatabase as never);
+    rawDatabase.pragma("foreign_keys = ON");
+    rawDatabase.prepare("INSERT INTO workspace(workspace_key) VALUES (?)").run(workspaceKey);
+    rawDatabase.prepare(`
+      INSERT INTO nodes(id, workspace_key, kind, relative_path)
+      VALUES ('canonical-root', ?, 'workspace', ''),
+             ('owned-file', ?, 'file', 'owned.ts')
+    `).run(workspaceKey, workspaceKey);
+    /** 旧表允许任意 owner；迁移必须拒绝幽灵 owner，而不是把它复制到 v2。 */
+    rawDatabase.prepare(`
+      INSERT INTO facts_ownership(fact_id, owner_key, workspace_key)
+      VALUES ('owned-file', 'hierarchy:ghost-root', ?)
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }))
+      .rejects.toThrow(/ownership/u);
+  });
+
+  it.each([
+    "missing-root",
+    "multiple-root",
+    "unowned-node",
+    "unowned-edge",
+    "cross-workspace-edge",
+    "extra-owner",
+    "unknown-node-kind",
+    "unknown-relation",
+    "noncanonical-backslash",
+    "noncanonical-unicode",
+    "path-kind-collision",
+    "unsupported-file",
+    "empty-directory",
+    "cycle",
+    "disconnected",
+  ] as const)("rejects global v2 hierarchy corruption: %s", async (corruption) => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: `v2-global-${corruption}` });
+    const openedWorkspaceKey = sha256CanonicalJson({ migration: `v2-global-open-${corruption}` });
+    const relativePath = corruption === "noncanonical-backslash"
+      ? "index.ts"
+      : (corruption === "noncanonical-unicode"
+        ? "src/indéx.ts"
+        : (corruption === "path-kind-collision" ? "src.ts/index.ts" : "src/index.ts"));
+    const graph = buildHierarchyGraph(workspaceKey, [relativePath]);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    createJob(store, {
+      id: `job-v2-global-${corruption}`,
+      kind: "initial-index",
+      requestedAt: "2026-07-26T00:00:00.000Z",
+    });
+    store.markJobRunning(`job-v2-global-${corruption}`, "2026-07-26T00:00:01.000Z");
+    commitHierarchy(store, {
+      completedAt: "2026-07-26T00:00:02.000Z",
+      graph,
+      jobId: `job-v2-global-${corruption}`,
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: graph.edges.length,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-26T00:00:02.000Z",
+        indexedFileCount: 1,
+        nodeCount: graph.nodes.length,
+      },
+    });
+    store.close();
+
+    const root = graph.nodes.find((node) => node.kind === "workspace")!;
+    const file = graph.nodes.find((node) => node.kind === "file")!;
+    const edge = graph.edges[0]!;
+    const rawDatabase = new RawSqlite(databasePath);
+    if (corruption === "missing-root") {
+      rawDatabase.prepare("UPDATE nodes SET kind = 'directory' WHERE id = ?").run(root.id);
+    } else if (corruption === "multiple-root") {
+      rawDatabase.prepare(`
+        INSERT INTO nodes(id, workspace_key, kind, relative_path)
+        VALUES ('duplicate-root', ?, 'workspace', 'duplicate-root')
+      `).run(workspaceKey);
+    } else if (corruption === "unowned-node") {
+      rawDatabase.prepare(`
+        DELETE FROM facts_ownership WHERE fact_kind = 'node' AND fact_id = ?
+      `).run(file.id);
+    } else if (corruption === "unowned-edge") {
+      rawDatabase.prepare(`
+        DELETE FROM facts_ownership WHERE fact_kind = 'edge' AND fact_id = ?
+      `).run(edge.id);
+    } else if (corruption === "cross-workspace-edge") {
+      const foreignWorkspaceKey = sha256CanonicalJson({ migration: "v2-edge-foreign" });
+      rawDatabase.prepare("INSERT INTO workspace(workspace_key) VALUES (?)").run(foreignWorkspaceKey);
+      rawDatabase.prepare(`
+        INSERT INTO nodes(id, workspace_key, kind, relative_path)
+        VALUES ('foreign-root', ?, 'workspace', '')
+      `).run(foreignWorkspaceKey);
+      rawDatabase.prepare("UPDATE edges SET workspace_key = ? WHERE id = ?")
+        .run(foreignWorkspaceKey, edge.id);
+      rawDatabase.prepare("DELETE FROM facts_ownership WHERE fact_kind = 'edge' AND fact_id = ?")
+        .run(edge.id);
+      rawDatabase.prepare(`
+        INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+        VALUES ('edge', ?, 'hierarchy:foreign-root', ?)
+      `).run(edge.id, foreignWorkspaceKey);
+      rawDatabase.prepare(`
+        INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+        VALUES ('node', 'foreign-root', 'hierarchy:foreign-root', ?)
+      `).run(foreignWorkspaceKey);
+    } else if (corruption === "extra-owner") {
+      rawDatabase.prepare(`
+        INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+        VALUES ('node', ?, 'hierarchy:ghost-root', ?)
+      `).run(file.id, workspaceKey);
+    } else if (corruption === "unknown-node-kind") {
+      rawDatabase.pragma("ignore_check_constraints = ON");
+      rawDatabase.pragma("foreign_keys = OFF");
+      const futureNodeId = buildGraphEntityId(
+        workspaceKey,
+        "future-kind" as never,
+        file.relativePath,
+      );
+      const fileEdge = graph.edges.find((candidate) => candidate.toId === file.id)!;
+      const futureEdgeId = buildGraphEdgeId(
+        workspaceKey,
+        fileEdge.fromId,
+        fileEdge.relationType,
+        futureNodeId,
+      );
+      rawDatabase.prepare("UPDATE nodes SET id = ?, kind = 'future-kind' WHERE id = ?")
+        .run(futureNodeId, file.id);
+      rawDatabase.prepare("UPDATE edges SET id = ?, to_id = ? WHERE id = ?")
+        .run(futureEdgeId, futureNodeId, fileEdge.id);
+      rawDatabase.prepare(`
+        UPDATE facts_ownership SET fact_id = ?
+        WHERE fact_kind = 'node' AND fact_id = ?
+      `).run(futureNodeId, file.id);
+      rawDatabase.prepare(`
+        UPDATE facts_ownership SET fact_id = ?
+        WHERE fact_kind = 'edge' AND fact_id = ?
+      `).run(futureEdgeId, fileEdge.id);
+    } else if (corruption === "unknown-relation") {
+      rawDatabase.pragma("ignore_check_constraints = ON");
+      const edgeWithFutureRelation = graph.edges[0]!;
+      const futureEdgeId = buildGraphEdgeId(
+        workspaceKey,
+        edgeWithFutureRelation.fromId,
+        "imports" as never,
+        edgeWithFutureRelation.toId,
+      );
+      rawDatabase.prepare("UPDATE edges SET id = ?, relation_type = 'imports' WHERE id = ?")
+        .run(futureEdgeId, edgeWithFutureRelation.id);
+      rawDatabase.prepare(`
+        UPDATE facts_ownership SET fact_id = ?
+        WHERE fact_kind = 'edge' AND fact_id = ?
+      `).run(futureEdgeId, edgeWithFutureRelation.id);
+    } else if (corruption === "noncanonical-backslash") {
+      /** 规范 ID 不变，但原始持久路径不得依赖读取时再消除 dot/反斜杠。 */
+      rawDatabase.prepare("UPDATE nodes SET relative_path = '.\\index.ts' WHERE id = ?")
+        .run(file.id);
+    } else if (corruption === "noncanonical-unicode") {
+      /** 规范 ID 不变，但 NFD 原文不得伪装成已持久化的 NFC 路径。 */
+      rawDatabase.prepare("UPDATE nodes SET relative_path = ? WHERE id = ?")
+        .run(file.relativePath.normalize("NFD"), file.id);
+    } else if (corruption === "path-kind-collision") {
+      const collidingPath = "src.ts";
+      const collidingFileId = buildGraphEntityId(workspaceKey, "file", collidingPath);
+      const collidingEdgeId = buildGraphEdgeId(
+        workspaceKey,
+        root.id,
+        "contains",
+        collidingFileId,
+      );
+      rawDatabase.prepare(`
+        INSERT INTO nodes(id, workspace_key, kind, relative_path)
+        VALUES (?, ?, 'file', ?)
+      `).run(collidingFileId, workspaceKey, collidingPath);
+      rawDatabase.prepare(`
+        INSERT INTO edges(id, workspace_key, from_id, relation_type, to_id, qualifier)
+        VALUES (?, ?, ?, 'contains', ?, '')
+      `).run(collidingEdgeId, workspaceKey, root.id, collidingFileId);
+      rawDatabase.prepare(`
+        INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+        VALUES ('node', ?, ?, ?), ('edge', ?, ?, ?)
+      `).run(
+        collidingFileId,
+        `hierarchy:${root.id}`,
+        workspaceKey,
+        collidingEdgeId,
+        `hierarchy:${root.id}`,
+        workspaceKey,
+      );
+    } else if (corruption === "unsupported-file") {
+      const unsupportedPath = "src/index.txt";
+      const unsupportedFileId = buildGraphEntityId(workspaceKey, "file", unsupportedPath);
+      const fileEdge = graph.edges.find((candidate) => candidate.toId === file.id)!;
+      const unsupportedEdgeId = buildGraphEdgeId(
+        workspaceKey,
+        fileEdge.fromId,
+        fileEdge.relationType,
+        unsupportedFileId,
+      );
+      rawDatabase.pragma("foreign_keys = OFF");
+      rawDatabase.prepare("UPDATE nodes SET id = ?, relative_path = ? WHERE id = ?")
+        .run(unsupportedFileId, unsupportedPath, file.id);
+      rawDatabase.prepare("UPDATE edges SET id = ?, to_id = ? WHERE id = ?")
+        .run(unsupportedEdgeId, unsupportedFileId, fileEdge.id);
+      rawDatabase.prepare(`
+        UPDATE facts_ownership SET fact_id = ?
+        WHERE fact_kind = 'node' AND fact_id = ?
+      `).run(unsupportedFileId, file.id);
+      rawDatabase.prepare(`
+        UPDATE facts_ownership SET fact_id = ?
+        WHERE fact_kind = 'edge' AND fact_id = ?
+      `).run(unsupportedEdgeId, fileEdge.id);
+    } else if (corruption === "empty-directory") {
+      const emptyDirectoryId = buildGraphEntityId(workspaceKey, "directory", "empty");
+      const emptyDirectoryEdgeId = buildGraphEdgeId(
+        workspaceKey,
+        root.id,
+        "contains",
+        emptyDirectoryId,
+      );
+      rawDatabase.prepare(`
+        INSERT INTO nodes(id, workspace_key, kind, relative_path)
+        VALUES (?, ?, 'directory', 'empty')
+      `).run(emptyDirectoryId, workspaceKey);
+      rawDatabase.prepare(`
+        INSERT INTO edges(id, workspace_key, from_id, relation_type, to_id, qualifier)
+        VALUES (?, ?, ?, 'contains', ?, '')
+      `).run(emptyDirectoryEdgeId, workspaceKey, root.id, emptyDirectoryId);
+      rawDatabase.prepare(`
+        INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+        VALUES ('node', ?, ?, ?), ('edge', ?, ?, ?)
+      `).run(
+        emptyDirectoryId,
+        `hierarchy:${root.id}`,
+        workspaceKey,
+        emptyDirectoryEdgeId,
+        `hierarchy:${root.id}`,
+        workspaceKey,
+      );
+    } else {
+      const rootEdge = graph.edges.find((candidate) => candidate.fromId === root.id)!;
+      if (corruption === "cycle") {
+        /** 保持端点同 workspace 与 ownership 完整，只把 root 分支改成目录/文件环。 */
+        const cycleEdgeId = buildGraphEdgeId(
+          workspaceKey,
+          file.id,
+          rootEdge.relationType,
+          rootEdge.toId,
+        );
+        rawDatabase.prepare("UPDATE edges SET id = ?, from_id = ? WHERE id = ?")
+          .run(cycleEdgeId, file.id, rootEdge.id);
+        rawDatabase.prepare(`
+          UPDATE facts_ownership SET fact_id = ?
+          WHERE fact_kind = 'edge' AND fact_id = ?
+        `).run(cycleEdgeId, rootEdge.id);
+      } else {
+        rawDatabase.prepare("DELETE FROM edges WHERE id = ?").run(rootEdge.id);
+        rawDatabase.prepare(`
+          DELETE FROM facts_ownership WHERE fact_kind = 'edge' AND fact_id = ?
+        `).run(rootEdge.id);
+      }
+    }
+    rawDatabase.close();
+
+    /** 打开无关干净 workspace，证明完整性检查覆盖数据库全局而非当前 slice。 */
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }).then(
+      (openedStore) => {
+        openedStore.close();
+        return openedStore;
+      },
+    ))
+      .rejects.toThrow();
+  });
+
+  it("rejects a v2 polymorphic ownership whose declared fact does not exist", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "orphan-v2-ownership" });
+    const openedWorkspaceKey = sha256CanonicalJson({ migration: "orphan-v2-open" });
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.close();
+    const rawDatabase = new RawSqlite(databasePath);
+    /** v2 只对 workspace_key 声明 SQLite FK，fact_kind/fact_id 必须由打开路径语义校验。 */
+    rawDatabase.prepare(`
+      INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+      VALUES ('node', 'missing-node', 'hierarchy:missing', ?)
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }))
+      .rejects.toThrow(/ownership/u);
+  });
+
+  it("rejects a v2 ownership with an unknown fact kind", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ migration: "unknown-v2-fact-kind" });
+    const openedWorkspaceKey = sha256CanonicalJson({ migration: "unknown-v2-kind-open" });
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    store.close();
+    const rawDatabase = new RawSqlite(databasePath);
+    /** 模拟外部工具显式关闭 CHECK 约束后写入当前合同未知的多态 kind。 */
+    rawDatabase.pragma("ignore_check_constraints = ON");
+    rawDatabase.prepare(`
+      INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+      VALUES ('future-kind', 'missing-fact', 'hierarchy:future', ?)
+    `).run(workspaceKey);
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }))
+      .rejects.toThrow(/ownership/u);
+  });
+
+  it.each(["v1", "v2"] as const)(
+    "holds an immediate writer lock while validating a %s migration",
+    async (schemaVersion) => {
+      const databasePath = await createDatabasePath();
+      const workspaceKey = sha256CanonicalJson({ migration: `locked-${schemaVersion}` });
+      if (schemaVersion === "v2") {
+        const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+        store.close();
+      }
+      const migrationDatabase = new RawSqlite(databasePath);
+      if (schemaVersion === "v1") {
+        applyBootstrapMigration(migrationDatabase as never);
+      }
+      migrationDatabase.pragma("foreign_keys = ON");
+      const competingDatabase = new RawSqlite(databasePath);
+      competingDatabase.pragma("foreign_keys = OFF");
+      competingDatabase.pragma("busy_timeout = 0");
+      const originalTransaction = migrationDatabase.transaction.bind(migrationDatabase);
+      let competingWrite: unknown = "not-attempted";
+      migrationDatabase.transaction = ((callback: () => void) => {
+        const wrapped = originalTransaction(() => {
+          try {
+            competingDatabase.prepare(`
+              INSERT INTO facts_ownership(fact_id, owner_key, workspace_key)
+              VALUES ('orphan-fact', 'hierarchy:orphan', 'missing-workspace')
+            `).run();
+            competingWrite = "succeeded";
+          } catch (error) {
+            competingWrite = error;
+          }
+          callback();
+        });
+        return wrapped;
+      }) as RawSqliteDatabase["transaction"];
+
+      try {
+        applyDeterministicCommitMigration(migrationDatabase as never);
+        expect(competingWrite).toMatchObject({ code: "SQLITE_BUSY" });
+      } finally {
+        competingDatabase.close();
+        migrationDatabase.close();
+      }
+    },
+  );
 
   it("preserves a succeeded v1 rebuild as a no-op on its committed revision", async () => {
     const databasePath = await createDatabasePath();

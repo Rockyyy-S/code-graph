@@ -2,10 +2,12 @@
 
 > 当前结论：确定性 rebuild、完整 read-set CAS、ownership replacement 与原子 graphRevision 已通过
 > 本地全部 23 项 blocking gate。公共能力差异以隔离 Git candidate 对基线执行，结果为
-> `violations=[]`。实现候选 `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 已完成 Hosted run、
-> artifact attestation、Controller App umbrella check 与 ruleset freshness 闭环。本文回填本身会产生
-> 新的 PR HEAD，因此最终合并仍以 PR #8 对最新精确 HEAD 发布的 required check 为唯一权威；不得把
-> 下述实现候选 run 复用为后续 HEAD 的证据。
+> `violations=[]`。历史实现候选 `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 已完成 Hosted run、
+> artifact attestation、Controller App umbrella check 与 ruleset freshness 闭环；文档 HEAD
+> `1041ddc026da895719abd5a613f8d7ea7e525225` 也完成 Hosted attempt 2。随后多轮终审继续修复
+> compatible Job、连接 revision 时序、migration ownership 完整性与 contract gate 稳定性，因此这些
+> run 只作为历史证据。
+> 最终合并以 PR #8 对最新精确 HEAD 发布的 required check 为唯一权威，不复用任何旧 HEAD 证据。
 
 ## 候选与注册表身份
 
@@ -55,7 +57,7 @@ state 回归集，不能通过 Gate 参数缩小范围。
 | --- | --- |
 | `pnpm type` | pass |
 | `pnpm lint` | pass |
-| `pnpm unit` | 54 文件 / 380 用例 pass |
+| `pnpm unit` | 54 文件 / 432 用例 pass |
 | `pnpm build` | pass |
 | `pnpm contract` | 21 文件 / 181 用例 pass |
 | `pnpm dependency-boundary` | pass |
@@ -66,6 +68,19 @@ state 回归集，不能通过 Gate 参数缩小范围。
 真实进程合同在 build 后执行，覆盖 initialize → `job/start` → `service/status`；SQLite 测试使用真实
 第二连接验证旧/新 revision 原子切换，并覆盖 WAL、busy timeout、迁移、ownership 与多阶段 fault
 injection 全回滚。
+
+最终 Blind/Edge Review 通过多轮 RED 回归收敛以下边界：revisionless v1 `job/start` 只映射固定
+legacy revision 1，显式非法或半新半旧 revision 字段 fail closed；并发 `status()` 可同时发出但按
+调用顺序观测，`startRebuild()`、`shutdown()` 等控制变更继续与 revision 观测串行，并拒绝
+graph/service/index/config/view revision、service instance 或 epoch 回退；前序 terminal error 会传播给
+排队调用，裸 promise rejection 被 outcome 封装。Job 接受后以可证明的 revision 与状态内容前进为准，
+不强制 Job ID 永久保留在 current/last 两槽。v1/v2 migration 在 `BEGIN IMMEDIATE` 锁内执行有界
+外键检查、Job 行数守恒与全库 canonical hierarchy/ownership 校验，拒绝非 canonical node/edge ID、
+非 NFC/POSIX 路径、file 后缀错误、跨 kind 路径冲突、空 directory 叶子、非唯一 root、断连或成环路径树、
+跨 workspace edge、多余/缺失 owner、多态 orphan 及未知 fact kind；聚合校验保持线性规模。完整 contract
+文件改为串行调度并由真实配置对象断言，消除 Windows 进程与 SQLite 锁测试的宿主资源竞争型伪超时，
+未跳过或放宽任何用例。修复后定向 109/109、完整 unit 432/432 与 contract 181/181 通过，随后
+`architecture-required` 完整重跑 23/23 通过。
 
 ## Hosted Provider 状态
 
@@ -88,6 +103,8 @@ injection 全回滚。
   `architecture-required=success`
 - Ruleset：ID `19603163` 为 `active`，启用 strict required status check，无 bypass actor，固定要求
   Controller App 的 `architecture-required`
+- 文档 HEAD `1041ddc026da895719abd5a613f8d7ea7e525225`：Hosted run `30205134913` attempt 2
+  成功，但已被上述 Blind Review 代码修复产生的新 HEAD 取代，不具备最终合并资格
 - 最终 HEAD 规则：任何文档或代码提交都会使上述实现候选 evidence 失去“当前 HEAD”资格；合并前必须由
   同一 Provider 流程对 PR #8 最新 HEAD 重新生成 artifact、attestation 与 Controller success，PR
   `mergeStateStatus=CLEAN` 才视为最终闭环

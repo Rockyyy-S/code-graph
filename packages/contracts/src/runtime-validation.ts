@@ -26,6 +26,7 @@ import {
   jobStartResultV1CompatibleSchema,
   jobStartResultV1Schema,
 } from "./index-job-schema.js";
+import type { CompatibleJobStartResultV1 } from "./index-job.js";
 import type { ServiceMetadataV1 } from "./service-metadata.js";
 import type {
   CompatibleServiceStatusV1,
@@ -136,12 +137,22 @@ export function validateJobStartRequest(value: unknown): value is JobStartReques
 
 /** 严格校验服务端生成的 canonical job/start 响应。 */
 export function validateJobStartResult(value: unknown): value is JobStartResult {
-  return jobStartResultValidator(value) && hasValidJobStartTimestamp(value);
+  return (
+    jobStartResultValidator(value) &&
+    hasValidJobStartRevisions(value) &&
+    hasValidJobStartTimestamp(value)
+  );
 }
 
 /** 兼容校验 job/start 响应，允许同主版本新增可选字段。 */
-export function validateJobStartResultCompatible(value: unknown): value is JobStartResult {
-  return jobStartResultCompatibleValidator(value) && hasValidJobStartTimestamp(value);
+export function validateJobStartResultCompatible(
+  value: unknown,
+): value is CompatibleJobStartResultV1 {
+  return (
+    jobStartResultCompatibleValidator(value) &&
+    hasValidJobStartRevisions(value, true) &&
+    hasValidJobStartTimestamp(value)
+  );
 }
 
 /**
@@ -419,6 +430,34 @@ function hasValidJobRevisions(value: unknown, allowMissing = false): boolean {
     }
   }
   return true;
+}
+
+/** `job/start` 的 Job 类型必须与显式 revision 字段保持同一封闭矩阵。 */
+function hasValidJobStartRevisions(value: unknown, allowMissing = false): boolean {
+  if (typeof value !== "object" || value === null || !("job" in value)) {
+    return false;
+  }
+  const job = value.job as CompatibleJobStartResultV1["job"];
+  const hasBase = Object.hasOwn(job, "baseGraphRevision");
+  const hasResult = Object.hasOwn(job, "resultGraphRevision");
+  if (hasBase !== hasResult || (!allowMissing && !hasBase)) {
+    return false;
+  }
+  if (!hasBase) {
+    return allowMissing;
+  }
+  if (hasBase) {
+    const base = job.baseGraphRevision;
+    if (
+      base === undefined ||
+      (base !== null && (!Number.isSafeInteger(base) || base < 1)) ||
+      (job.kind === "initial-index" && base !== null) ||
+      (job.kind === "rebuild" && base === null)
+    ) {
+      return false;
+    }
+  }
+  return job.resultGraphRevision === null;
 }
 
 /** `job/start` 的 queued Job 必须携带真实存在的 UTC 日历时间。 */

@@ -15,6 +15,7 @@ import {
   validateInitializeResult,
   validateInitializeResultCompatible,
   validateJobStartResult,
+  validateJobStartResultCompatible,
   validateServiceControlRequest,
   validateServiceStatusV1,
   validateServiceStatusV1Compatible,
@@ -483,6 +484,46 @@ describe("service control contract", () => {
         state: "queued",
       },
     })).toBe(false);
+    for (const job of [
+      {
+        baseGraphRevision: 1,
+        id: "job-invalid-initial-base",
+        kind: "initial-index" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+      {
+        baseGraphRevision: null,
+        id: "job-invalid-rebuild-base",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+    ]) {
+      const invalidResult = { accepted: true as const, job };
+      expect(validateJobStartResult(invalidResult)).toBe(false);
+      expect(validateJobStartResultCompatible(invalidResult)).toBe(false);
+    }
+    for (const job of [
+      {
+        baseGraphRevision: 1,
+        id: "job-base-only",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        state: "queued" as const,
+      },
+      {
+        id: "job-result-only",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+    ]) {
+      expect(validateJobStartResultCompatible({ accepted: true, job })).toBe(false);
+    }
     expect(validateServiceStatusV1({
       ...status,
       lastIndexJob: {

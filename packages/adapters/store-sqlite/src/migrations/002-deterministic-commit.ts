@@ -1,4 +1,10 @@
 import type Database from "better-sqlite3";
+import { isSupportedSourceFile } from "@codegraph/application";
+import {
+  buildGraphEdgeId,
+  buildGraphEntityId,
+  normalizeRelativeGraphPath,
+} from "@codegraph/domain";
 import {
   applyBootstrapMigration,
   BOOTSTRAP_SCHEMA_VERSION,
@@ -41,25 +47,23 @@ export function applyDeterministicCommitMigration(database: Database.Database): 
   if (!readUserTableNames(database).includes("schema_migrations")) {
     applyBootstrapMigration(database);
   }
-  const current = database.prepare("SELECT MAX(version) AS version FROM schema_migrations")
-    .get() as { version: number };
-  if (current.version === DETERMINISTIC_COMMIT_SCHEMA_VERSION) {
-    return;
-  }
-  if (current.version !== BOOTSTRAP_SCHEMA_VERSION) {
-    throw new Error("SQLite Schema 版本未知或未完整迁移。");
-  }
-  const orphanOwnership = database.prepare(`
-    SELECT COUNT(*) AS count
-    FROM facts_ownership AS ownership
-    WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE id = ownership.fact_id)
-      AND NOT EXISTS (SELECT 1 FROM edges WHERE id = ownership.fact_id)
-  `).get() as { count: number };
-  if (orphanOwnership.count !== 0) {
-    throw new Error("v1 facts_ownership 包含无法识别的孤立事实。");
-  }
-
   database.transaction(() => {
+    /** IMMEDIATE 锁内重验版本与完整性，禁止外部连接在预检和迁移之间插入损坏行。 */
+    assertDeterministicSchemaSupported(database);
+    const current = database.prepare("SELECT MAX(version) AS version FROM schema_migrations")
+      .get() as { version: number };
+    assertNoForeignKeyViolation(database);
+    assertNoInvalidOwnership(database, current.version);
+    if (current.version === DETERMINISTIC_COMMIT_SCHEMA_VERSION) {
+      return;
+    }
+    if (current.version !== BOOTSTRAP_SCHEMA_VERSION) {
+      throw new Error("SQLite Schema 版本未知或未完整迁移。");
+    }
+    /** 迁移前计数必须与后续 DDL/复制共享同一 SQLite 事务快照。 */
+    const legacyJobCount = (database.prepare("SELECT COUNT(*) AS count FROM jobs").get() as {
+      count: number;
+    }).count;
     database.exec(`
       ALTER TABLE workspace ADD COLUMN graph_revision INTEGER;
       ALTER TABLE workspace ADD COLUMN freshness TEXT;
@@ -92,11 +96,17 @@ export function applyDeterministicCommitMigration(database: Database.Database): 
       INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
       SELECT 'node', old.fact_id, old.owner_key, old.workspace_key
       FROM facts_ownership_v1 AS old
-      WHERE EXISTS (SELECT 1 FROM nodes WHERE id = old.fact_id);
+      WHERE EXISTS (
+        SELECT 1 FROM nodes
+        WHERE id = old.fact_id AND workspace_key = old.workspace_key
+      );
       INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
       SELECT 'edge', old.fact_id, old.owner_key, old.workspace_key
       FROM facts_ownership_v1 AS old
-      WHERE EXISTS (SELECT 1 FROM edges WHERE id = old.fact_id);
+      WHERE EXISTS (
+        SELECT 1 FROM edges
+        WHERE id = old.fact_id AND workspace_key = old.workspace_key
+      );
 
       INSERT OR IGNORE INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
       SELECT 'node', node.id, 'hierarchy:' || root.id, node.workspace_key
@@ -159,8 +169,262 @@ export function applyDeterministicCommitMigration(database: Database.Database): 
       INSERT INTO schema_migrations(version, applied_at)
       VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
     `);
-  })();
+    /** JOIN 只是读取父 workspace，任何行数差异都表示旧 Job 被静默丢弃。 */
+    const migratedJobCount = (database.prepare("SELECT COUNT(*) AS count FROM jobs").get() as {
+      count: number;
+    }).count;
+    if (migratedJobCount !== legacyJobCount) {
+      throw new Error("v1 Job migration 行数不一致，拒绝提交迁移。");
+    }
+  }).immediate();
   assertDeterministicSchemaSupported(database);
+}
+
+/** 只读取首个外键违规，避免损坏规模控制打开路径的内存占用。 */
+function assertNoForeignKeyViolation(database: Database.Database): void {
+  const violation = database.prepare("PRAGMA foreign_key_check").get();
+  if (violation !== undefined) {
+    throw new Error("SQLite 数据库包含外键完整性违规，拒绝继续打开。");
+  }
+}
+
+/** 校验所有含 facts 的 workspace 恰有一个 hierarchy root。 */
+function assertExactlyOneHierarchyRoot(database: Database.Database): void {
+  const invalidRoot = database.prepare(`
+    SELECT 1 AS found
+    FROM workspace AS candidate
+    WHERE (
+      EXISTS (SELECT 1 FROM nodes WHERE workspace_key = candidate.workspace_key) OR
+      EXISTS (SELECT 1 FROM edges WHERE workspace_key = candidate.workspace_key)
+    ) AND (
+      SELECT COUNT(*) FROM nodes
+      WHERE workspace_key = candidate.workspace_key AND kind = 'workspace'
+    ) <> 1
+    LIMIT 1
+  `).get();
+  if (invalidRoot !== undefined) {
+    throw new Error("SQLite workspace 的 hierarchy facts 缺少唯一 root 节点。");
+  }
+}
+
+/** 校验 contains edge 与两端 node 位于同一 workspace。 */
+function assertEdgeEndpointsShareWorkspace(database: Database.Database): void {
+  const invalidEdge = database.prepare(`
+    SELECT 1 AS found
+    FROM edges AS edge
+    WHERE NOT EXISTS (
+      SELECT 1 FROM nodes AS source
+      WHERE source.id = edge.from_id AND source.workspace_key = edge.workspace_key
+    ) OR NOT EXISTS (
+      SELECT 1 FROM nodes AS target
+      WHERE target.id = edge.to_id AND target.workspace_key = edge.workspace_key
+    )
+    LIMIT 1
+  `).get();
+  if (invalidEdge !== undefined) {
+    throw new Error("SQLite edge 与端点 node 的 workspace 归属不一致。");
+  }
+}
+
+/** 逐行重算 node/edge 身份，避免损坏规模转化为无界 JS 内存占用。 */
+function assertCanonicalHierarchyIdentity(database: Database.Database): void {
+  const nodes = database.prepare(`
+    SELECT id, workspace_key, kind, relative_path FROM nodes
+  `).iterate() as Iterable<{
+    id: string;
+    kind: "directory" | "file" | "workspace";
+    relative_path: string;
+    workspace_key: string;
+  }>;
+  try {
+    for (const node of nodes) {
+      if (
+        (node.kind !== "directory" && node.kind !== "file" && node.kind !== "workspace") ||
+        normalizeRelativeGraphPath(node.relative_path) !== node.relative_path ||
+        (node.kind === "file" && !isSupportedSourceFile(node.relative_path)) ||
+        node.id !== buildGraphEntityId(node.workspace_key, node.kind, node.relative_path)
+      ) {
+        throw new Error("invalid node identity");
+      }
+    }
+    const edges = database.prepare(`
+      SELECT id, workspace_key, from_id, relation_type, to_id, qualifier FROM edges
+    `).iterate() as Iterable<{
+      from_id: string;
+      id: string;
+      qualifier: string;
+      relation_type: "contains";
+      to_id: string;
+      workspace_key: string;
+    }>;
+    for (const edge of edges) {
+      if (edge.relation_type !== "contains") {
+        throw new Error("invalid edge relation");
+      }
+      const expectedId = buildGraphEdgeId(
+        edge.workspace_key,
+        edge.from_id,
+        edge.relation_type,
+        edge.to_id,
+        edge.qualifier,
+      );
+      if (edge.id !== expectedId) {
+        throw new Error("invalid edge identity");
+      }
+    }
+  } catch {
+    throw new Error("SQLite hierarchy 包含非规范 node 或 edge 身份。");
+  }
+}
+
+/** 校验每个 workspace 的 contains 关系构成从唯一 root 出发的规范路径树。 */
+function assertCanonicalHierarchyTree(database: Database.Database): void {
+  const duplicatePath = database.prepare(`
+    SELECT 1 AS found
+    FROM nodes
+    GROUP BY workspace_key, relative_path
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get();
+  const emptyDirectory = database.prepare(`
+    SELECT 1 AS found
+    FROM nodes AS node
+    WHERE node.kind = 'directory' AND NOT EXISTS (
+      SELECT 1 FROM edges AS outgoing
+      WHERE outgoing.workspace_key = node.workspace_key AND outgoing.from_id = node.id
+    )
+    LIMIT 1
+  `).get();
+  const invalidParent = database.prepare(`
+    WITH incoming(workspace_key, node_id, edge_count) AS (
+      SELECT workspace_key, to_id, COUNT(*)
+      FROM edges
+      GROUP BY workspace_key, to_id
+    )
+    SELECT 1 AS found
+    FROM nodes AS node
+    LEFT JOIN incoming
+      ON incoming.workspace_key = node.workspace_key AND incoming.node_id = node.id
+    WHERE (node.kind = 'workspace' AND COALESCE(incoming.edge_count, 0) <> 0)
+      OR (node.kind <> 'workspace' AND COALESCE(incoming.edge_count, 0) <> 1)
+    LIMIT 1
+  `).get();
+  const invalidEdgeShape = database.prepare(`
+    SELECT 1 AS found
+    FROM edges AS edge
+    JOIN nodes AS source
+      ON source.id = edge.from_id AND source.workspace_key = edge.workspace_key
+    JOIN nodes AS target
+      ON target.id = edge.to_id AND target.workspace_key = edge.workspace_key
+    WHERE edge.qualifier <> '' OR
+      source.kind = 'file' OR
+      target.kind = 'workspace' OR
+      (source.kind = 'workspace' AND instr(target.relative_path, '/') <> 0) OR
+      (source.kind = 'directory' AND (
+        substr(target.relative_path, 1, length(source.relative_path) + 1) <>
+          source.relative_path || '/' OR
+        instr(substr(target.relative_path, length(source.relative_path) + 2), '/') <> 0
+      ))
+    LIMIT 1
+  `).get();
+  const unreachableNode = database.prepare(`
+    WITH RECURSIVE reachable(workspace_key, node_id) AS (
+      SELECT workspace_key, id FROM nodes WHERE kind = 'workspace'
+      UNION
+      SELECT edge.workspace_key, edge.to_id
+      FROM reachable
+      JOIN edges AS edge
+        ON edge.workspace_key = reachable.workspace_key AND edge.from_id = reachable.node_id
+    )
+    SELECT 1 AS found
+    FROM nodes AS node
+    WHERE NOT EXISTS (
+      SELECT 1 FROM reachable
+      WHERE reachable.workspace_key = node.workspace_key AND reachable.node_id = node.id
+    )
+    LIMIT 1
+  `).get();
+  if (
+    duplicatePath !== undefined ||
+    emptyDirectory !== undefined ||
+    invalidParent !== undefined ||
+    invalidEdgeShape !== undefined ||
+    unreachableNode !== undefined
+  ) {
+    throw new Error("SQLite hierarchy 未形成从唯一 workspace root 出发的规范路径树。");
+  }
+}
+
+/** 校验 SQLite 无法表达的全局 hierarchy、ownership 与多态 fact 不变量。 */
+function assertNoInvalidOwnership(database: Database.Database, schemaVersion: number): void {
+  assertExactlyOneHierarchyRoot(database);
+  assertEdgeEndpointsShareWorkspace(database);
+  const invalid = schemaVersion === BOOTSTRAP_SCHEMA_VERSION
+    ? database.prepare(`
+      SELECT 1 AS found
+      FROM facts_ownership AS ownership
+      WHERE (
+        (SELECT COUNT(*) FROM nodes
+         WHERE id = ownership.fact_id AND workspace_key = ownership.workspace_key) +
+        (SELECT COUNT(*) FROM edges
+         WHERE id = ownership.fact_id AND workspace_key = ownership.workspace_key)
+      ) <> 1 OR ownership.owner_key <> 'hierarchy:' || (
+        SELECT root.id FROM nodes AS root
+        WHERE root.workspace_key = ownership.workspace_key AND root.kind = 'workspace'
+      )
+      LIMIT 1
+    `).get()
+    : database.prepare(`
+      SELECT 1 AS found
+      FROM facts_ownership AS ownership
+      WHERE ownership.fact_kind NOT IN ('edge', 'node')
+        OR (ownership.fact_kind = 'node' AND NOT EXISTS (
+        SELECT 1 FROM nodes
+        WHERE id = ownership.fact_id AND workspace_key = ownership.workspace_key
+      )) OR (ownership.fact_kind = 'edge' AND NOT EXISTS (
+        SELECT 1 FROM edges
+        WHERE id = ownership.fact_id AND workspace_key = ownership.workspace_key
+      ))
+      LIMIT 1
+    `).get();
+  if (invalid !== undefined) {
+    throw new Error("SQLite facts_ownership 包含无效或歧义的 fact 引用。");
+  }
+  assertCanonicalHierarchyIdentity(database);
+  assertCanonicalHierarchyTree(database);
+  if (schemaVersion === DETERMINISTIC_COMMIT_SCHEMA_VERSION) {
+    assertCanonicalV2Ownership(database);
+  }
+}
+
+/** v2 每个 fact 必须且只能由本 workspace 唯一 hierarchy root 持有。 */
+function assertCanonicalV2Ownership(database: Database.Database): void {
+  const invalidOwner = database.prepare(`
+    SELECT 1 AS found
+    FROM facts_ownership AS ownership
+    JOIN nodes AS root
+      ON root.workspace_key = ownership.workspace_key AND root.kind = 'workspace'
+    WHERE ownership.owner_key <> 'hierarchy:' || root.id
+    LIMIT 1
+  `).get();
+  const invalidFactOwnership = database.prepare(`
+    SELECT 1 AS found
+    FROM (
+      SELECT 'node' AS fact_kind, id AS fact_id, workspace_key FROM nodes
+      UNION ALL
+      SELECT 'edge' AS fact_kind, id AS fact_id, workspace_key FROM edges
+    ) AS fact
+    WHERE (
+      SELECT COUNT(*) FROM facts_ownership AS ownership
+      WHERE ownership.fact_kind = fact.fact_kind
+        AND ownership.fact_id = fact.fact_id
+        AND ownership.workspace_key = fact.workspace_key
+    ) <> 1
+    LIMIT 1
+  `).get();
+  if (invalidOwner !== undefined || invalidFactOwnership !== undefined) {
+    throw new Error("SQLite facts_ownership 未唯一绑定 workspace hierarchy root。");
+  }
 }
 
 /** 锁定八表集合，禁止本 Story 提前创建 Findings、impact 或发布表。 */

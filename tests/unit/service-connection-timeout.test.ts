@@ -138,6 +138,645 @@ describe("GraphServiceConnection request deadlines", () => {
     await client.close();
   });
 
+  it("normalizes a legacy job/start response without revision fields", async () => {
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => ({
+        accepted: true,
+        job: {
+          id: "legacy-job",
+          kind: "initial-index",
+          requestedAt: "2026-07-26T00:00:00.000Z",
+          state: "queued",
+        },
+      })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    await expect(client.startRebuild()).resolves.toEqual({
+      accepted: true,
+      job: {
+        baseGraphRevision: null,
+        id: "legacy-job",
+        kind: "initial-index",
+        requestedAt: "2026-07-26T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued",
+      },
+    });
+    expect(dispose).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("maps a revisionless legacy rebuild to the fixed v1 revision", async () => {
+    const connection = {
+      dispose: vi.fn(),
+      sendRequest: vi.fn(async () => ({
+        accepted: true,
+        job: {
+          id: "legacy-rebuild",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:01.000Z",
+          state: "queued",
+        },
+      })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const client = createConnection(
+      connection,
+      new net.Socket(),
+      SERVICE_CAPABILITIES,
+      createAvailableConnectionStatus(),
+    );
+
+    await expect(client.startRebuild()).resolves.toMatchObject({
+      job: { baseGraphRevision: 1, resultGraphRevision: null },
+    });
+    await client.close();
+  });
+
+  it("uses the fixed legacy revision without a post-accept status request", async () => {
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          id: "concurrent-legacy-rebuild",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:01.000Z",
+          state: "queued",
+        },
+      })
+      .mockRejectedValueOnce(new Error("不得发送第二个 RPC"));
+    const connection = {
+      dispose: vi.fn(),
+      sendRequest,
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const client = createConnection(connection, new net.Socket(), SERVICE_CAPABILITIES);
+
+    await expect(client.startRebuild()).resolves.toMatchObject({
+      job: { baseGraphRevision: 1, resultGraphRevision: null },
+    });
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    await client.close();
+  });
+
+  it("rejects replaying the pre-job IndexStatus after a queued Job was accepted", async () => {
+    const initialStatus = createAvailableConnectionStatus();
+    const dispose = vi.fn();
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          baseGraphRevision: 1,
+          id: "queued-before-stale-status",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:01.000Z",
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      })
+      /** 即使 revision 自报前进，未体现 queued/terminal Job 的原快照仍然陈旧。 */
+      .mockResolvedValueOnce({
+        ...initialStatus,
+        serviceStatusRevision: 2,
+        statusRevision: 2,
+      });
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES, initialStatus);
+
+    await expect(client.startRebuild()).resolves.toMatchObject({
+      job: { id: "queued-before-stale-status" },
+    });
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("accepts an advanced IndexStatus that exposes the accepted Job", async () => {
+    const initialStatus = createAvailableConnectionStatus();
+    const acceptedJob = {
+      baseGraphRevision: 1,
+      id: "visible-queued-job",
+      kind: "rebuild" as const,
+      requestedAt: "2026-07-26T00:00:01.000Z",
+      resultGraphRevision: null,
+      state: "queued" as const,
+    };
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({ accepted: true, job: acceptedJob })
+      .mockResolvedValueOnce({
+        ...initialStatus,
+        currentIndexJob: acceptedJob,
+        freshness: "stale" as const,
+        serviceStatusRevision: 2,
+        statusRevision: 2,
+      });
+    const connection = {
+      dispose: vi.fn(),
+      sendRequest,
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const client = createConnection(
+      connection,
+      new net.Socket(),
+      SERVICE_CAPABILITIES,
+      initialStatus,
+    );
+
+    await expect(client.startRebuild()).resolves.toMatchObject({
+      job: { id: acceptedJob.id },
+    });
+    await expect(client.status()).resolves.toMatchObject({
+      currentIndexJob: { id: acceptedJob.id },
+      statusRevision: 2,
+    });
+    await client.close();
+  });
+
+  it("accepts a later healthy status after another client rotated the accepted Job out", async () => {
+    const initialStatus = createAvailableConnectionStatus();
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          baseGraphRevision: 1,
+          id: "completed-before-next-poll",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:01.000Z",
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      })
+      .mockResolvedValueOnce({
+        ...initialStatus,
+        freshness: "stale" as const,
+        lastIndexJob: {
+          baseGraphRevision: 1,
+          completedAt: "2026-07-26T00:00:04.000Z",
+          id: "later-job-from-another-client",
+          kind: "rebuild" as const,
+          requestedAt: "2026-07-26T00:00:02.000Z",
+          resultGraphRevision: 1,
+          startedAt: "2026-07-26T00:00:03.000Z",
+          state: "cancelled" as const,
+        },
+        serviceStatusRevision: 3,
+        statusRevision: 3,
+      });
+    const connection = {
+      dispose: vi.fn(),
+      sendRequest,
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const client = createConnection(
+      connection,
+      new net.Socket(),
+      SERVICE_CAPABILITIES,
+      initialStatus,
+    );
+
+    await expect(client.startRebuild()).resolves.toMatchObject({
+      job: { id: "completed-before-next-poll" },
+    });
+    await expect(client.status()).resolves.toMatchObject({
+      lastIndexJob: { id: "later-job-from-another-client" },
+      statusRevision: 3,
+    });
+    await client.close();
+  });
+
+  it("rejects an explicit null rebuild base without trying to repair it", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          baseGraphRevision: null,
+          id: "invalid-null-rebuild",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:01.000Z",
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      })
+      .mockResolvedValueOnce(createAvailableConnectionStatus());
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects a rebuild base older than the initialize snapshot", async () => {
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => ({
+        accepted: true,
+        job: {
+          baseGraphRevision: 1,
+          id: "stale-explicit-rebuild",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:01.000Z",
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(
+      connection,
+      socket,
+      SERVICE_CAPABILITIES,
+      createAvailableConnectionStatus(2),
+    );
+
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects a rebuild base older than a later observed status", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce(createAvailableConnectionStatus(3))
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          baseGraphRevision: 2,
+          id: "stale-after-status",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:02.000Z",
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      });
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(
+      connection,
+      socket,
+      SERVICE_CAPABILITIES,
+      createAvailableConnectionStatus(),
+    );
+
+    await expect(client.status()).resolves.toMatchObject({ graphRevision: 3 });
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects initial-index after a later status observed the first commit", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({
+        ...createAvailableConnectionStatus(),
+        serviceStatusRevision: 2,
+        statusRevision: 2,
+      })
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          id: "late-initial-after-status",
+          kind: "initial-index",
+          requestedAt: "2026-07-26T00:00:02.000Z",
+          state: "queued",
+        },
+      });
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    await expect(client.status()).resolves.toMatchObject({ graphRevision: 1 });
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("serializes revision-observing RPCs so an older status cannot arrive late", async () => {
+    let resolveStatus!: (value: ReturnType<typeof createAvailableConnectionStatus>) => void;
+    const pendingStatus = new Promise<ReturnType<typeof createAvailableConnectionStatus>>(
+      (resolve) => {
+        resolveStatus = resolve;
+      },
+    );
+    const sendRequest = vi.fn()
+      .mockReturnValueOnce(pendingStatus)
+      .mockResolvedValueOnce({
+        accepted: true,
+        job: {
+          baseGraphRevision: 2,
+          id: "ordered-rebuild",
+          kind: "rebuild",
+          requestedAt: "2026-07-26T00:00:03.000Z",
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      });
+    const connection = {
+      dispose: vi.fn(),
+      sendRequest,
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const client = createConnection(
+      connection,
+      new net.Socket(),
+      SERVICE_CAPABILITIES,
+      createAvailableConnectionStatus(),
+    );
+
+    const statusPromise = client.status();
+    const rebuildPromise = client.startRebuild();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    resolveStatus(createAvailableConnectionStatus());
+    await expect(statusPromise).resolves.toMatchObject({ graphRevision: 1 });
+    await expect(rebuildPromise).resolves.toMatchObject({
+      job: { baseGraphRevision: 2 },
+    });
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+    await client.close();
+  });
+
+  it.each([
+    ["smaller revision", createAvailableConnectionStatus(1)],
+    ["absent graph", createConnectionStatus()],
+  ])("rejects a status regression to %s and closes the connection", async (_label, status) => {
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => status),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(
+      connection,
+      socket,
+      SERVICE_CAPABILITIES,
+      createAvailableConnectionStatus(2),
+    );
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it.each([
+    "serviceStatusRevision",
+    "statusRevision",
+    "configRevision",
+    "viewConfigRevision",
+  ] as const)("rejects a %s regression even when graphRevision is unchanged", async (field) => {
+    const initialStatus = {
+      ...createAvailableConnectionStatus(2),
+      configRevision: 2,
+      serviceStatusRevision: 2,
+      statusRevision: 2,
+      viewConfigRevision: 2,
+    };
+    const regressedStatus = { ...initialStatus, [field]: 1 };
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => regressedStatus),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(
+      connection,
+      socket,
+      SERVICE_CAPABILITIES,
+      initialStatus,
+    );
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects different snapshots that reuse the same service status revision", async () => {
+    const initialStatus = {
+      ...createAvailableConnectionStatus(2),
+      serviceStatusRevision: 2,
+      statusRevision: 2,
+    };
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => ({ ...initialStatus, freshness: "stale" as const })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES, initialStatus);
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects a changed index status that reuses the same status revision", async () => {
+    const initialStatus = {
+      ...createAvailableConnectionStatus(2),
+      serviceStatusRevision: 2,
+      statusRevision: 2,
+    };
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      /** envelope revision 前进不能掩盖 IndexStatus 子快照复用旧 revision。 */
+      sendRequest: vi.fn(async () => ({
+        ...initialStatus,
+        freshness: "stale" as const,
+        serviceStatusRevision: 3,
+      })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES, initialStatus);
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("requires the envelope revision to advance with a child revision", async () => {
+    const initialStatus = createAvailableConnectionStatus();
+    const advancedGraph = {
+      ...createAvailableConnectionStatus(2),
+      serviceStatusRevision: initialStatus.serviceStatusRevision,
+      statusRevision: 2,
+    };
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => advancedGraph),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES, initialStatus);
+
+    await expect(client.status()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("propagates a protocol failure to revision calls already waiting in the queue", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn(async () => ({ future: "invalid" }));
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    const first = client.status();
+    const second = client.startRebuild();
+    await expect(first).rejects.toMatchObject({ code: "SERVICE_PROTOCOL_INCOMPATIBLE" });
+    await expect(second).rejects.toMatchObject({ code: "SERVICE_PROTOCOL_INCOMPATIBLE" });
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("propagates the first concurrent status failure to a later valid response", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn()
+      .mockResolvedValueOnce({ future: "invalid" })
+      .mockResolvedValueOnce(createConnectionStatus());
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    const first = client.status();
+    const second = client.status();
+    await expect(first).rejects.toMatchObject({ code: "SERVICE_PROTOCOL_INCOMPATIBLE" });
+    await expect(second).rejects.toMatchObject({ code: "SERVICE_PROTOCOL_INCOMPATIBLE" });
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("queues shutdown behind an in-flight revision observation", async () => {
+    let resolveStatus!: (value: ReturnType<typeof createConnectionStatus>) => void;
+    const pendingStatus = new Promise<ReturnType<typeof createConnectionStatus>>((resolve) => {
+      resolveStatus = resolve;
+    });
+    const sendRequest = vi.fn()
+      .mockReturnValueOnce(pendingStatus)
+      .mockResolvedValueOnce({ accepted: true });
+    const connection = {
+      dispose: vi.fn(),
+      sendRequest,
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const client = createConnection(connection, new net.Socket(), SERVICE_CAPABILITIES);
+
+    const statusPromise = client.status();
+    const shutdownPromise = client.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    resolveStatus(createConnectionStatus());
+    await expect(statusPromise).resolves.toMatchObject({ availability: "absent" });
+    await expect(shutdownPromise).resolves.toBeUndefined();
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it("deduplicates concurrent shutdown requests", async () => {
+    const dispose = vi.fn();
+    const sendRequest = vi.fn(async () => ({ accepted: true }));
+    const connection = { dispose, sendRequest } as unknown as ConstructorParameters<
+      typeof GraphServiceConnection
+    >[0];
+    const client = createConnection(connection, new net.Socket(), SERVICE_CAPABILITIES);
+
+    await expect(Promise.all([client.shutdown(), client.shutdown()])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects initial-index after initialize already observed a committed graph", async () => {
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => ({
+        accepted: true,
+        job: {
+          id: "invalid-late-initial",
+          kind: "initial-index",
+          requestedAt: "2026-07-26T00:00:02.000Z",
+          state: "queued",
+        },
+      })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(
+      connection,
+      socket,
+      SERVICE_CAPABILITIES,
+      createAvailableConnectionStatus(),
+    );
+
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("rejects a legacy initial-index response with a non-null base", async () => {
+    const job = {
+      baseGraphRevision: 1,
+      id: "invalid-initial",
+      kind: "initial-index",
+      requestedAt: "2026-07-26T00:00:02.000Z",
+      resultGraphRevision: null,
+      state: "queued",
+    };
+    const dispose = vi.fn();
+    const connection = {
+      dispose,
+      sendRequest: vi.fn(async () => ({ accepted: true, job })),
+    } as unknown as ConstructorParameters<typeof GraphServiceConnection>[0];
+    const socket = new net.Socket();
+    const client = createConnection(connection, socket, SERVICE_CAPABILITIES);
+
+    await expect(client.startRebuild()).rejects.toMatchObject({
+      code: "SERVICE_PROTOCOL_INCOMPATIBLE",
+    });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(socket.destroyed).toBe(true);
+  });
+
   it("rejects status without Job fields after job/start was negotiated", async () => {
     const dispose = vi.fn();
     const status = createConnectionStatus() as Record<string, unknown>;
@@ -210,6 +849,8 @@ function createConnection(
   connection: ConstructorParameters<typeof GraphServiceConnection>[0],
   socket: net.Socket,
   capabilities: readonly string[],
+  serviceStatus: ConstructorParameters<typeof GraphServiceConnection>[2]["serviceStatus"] =
+    createConnectionStatus(),
 ): GraphServiceConnection {
   return new GraphServiceConnection(
     connection,
@@ -220,24 +861,7 @@ function createConnection(
       graphSchemaVersion: GRAPH_SCHEMA_VERSION,
       protocolVersion: PROTOCOL_VERSION,
       rulesSchemaVersion: RULES_SCHEMA_VERSION,
-      serviceStatus: {
-        availability: "absent",
-        committed: null,
-        completeness: "empty",
-        configRevision: 1,
-        currentIndexJob: null,
-        freshness: null,
-        graphRevision: null,
-        lastIndexJob: null,
-        lifecycle: "running",
-        serviceInstanceId: "instance",
-        serviceStatusRevision: 1,
-        statusEpoch: "epoch",
-        statusRevision: 1,
-        telemetry: { effective: "off", pending: false, requested: "off" },
-        version: 1,
-        viewConfigRevision: 1,
-      },
+      serviceStatus,
       serviceVersion: "0.0.0-test",
     },
     {
@@ -277,8 +901,29 @@ function createConnectionStatus() {
     serviceStatusRevision: 1,
     statusEpoch: "epoch",
     statusRevision: 1,
-    telemetry: { effective: "off" as const, pending: false, requested: "off" as const },
+    telemetry: { effective: "off" as const, pending: false as const, requested: "off" as const },
     version: 1 as const,
     viewConfigRevision: 1,
+  };
+}
+
+/** 创建旧服务已有一次空图提交时的规范化 revision 1 状态。 */
+function createAvailableConnectionStatus(graphRevision = 1) {
+  return {
+    ...createConnectionStatus(),
+    availability: "available" as const,
+    committed: {
+      builtinRulesVersion: "builtin-ignore-v1" as const,
+      edgeCount: 0,
+      excludedPathCount: 0,
+      generatedAt: "2026-07-26T00:00:00.000Z",
+      graphRevision,
+      indexedFileCount: 0,
+      nodeCount: 1,
+    },
+    freshness: "current" as const,
+    graphRevision,
+    serviceStatusRevision: graphRevision,
+    statusRevision: graphRevision,
   };
 }
