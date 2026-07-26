@@ -2,8 +2,10 @@
 
 > 当前结论：确定性 rebuild、完整 read-set CAS、ownership replacement 与原子 graphRevision 已通过
 > 本地全部 23 项 blocking gate。公共能力差异以隔离 Git candidate 对基线执行，结果为
-> `violations=[]`。本任务未创建或推送正式提交，因此没有伪造 Hosted run、artifact 或 attestation；
-> 合并前仍须由 Provider 对最终不可变 commit SHA 运行同一 registry。
+> `violations=[]`。实现候选 `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 已完成 Hosted run、
+> artifact attestation、Controller App umbrella check 与 ruleset freshness 闭环。本文回填本身会产生
+> 新的 PR HEAD，因此最终合并仍以 PR #8 对最新精确 HEAD 发布的 required check 为唯一权威；不得把
+> 下述实现候选 run 复用为后续 HEAD 的证据。
 
 ## 候选与注册表身份
 
@@ -67,11 +69,28 @@ injection 全回滚。
 
 ## Hosted Provider 状态
 
-- Hosted run：未触发
-- 原因：当前任务未获授权创建提交、推送分支或创建 PR；Provider 只能可信绑定不可变远端 commit SHA
-- 当前结论：本地 registry、公共能力 diff、全部 blocking gate 与独立代码审查均已闭合，Story 已完成本地交付
-- 合并前要求：对最终正式候选 SHA 运行 `child-gate-evidence`，核对 artifact、attestation、Controller
-  `architecture-required` 与 ruleset freshness；不得把本文的本地 pass 冒充 Hosted 证据
+- 实现候选 HEAD：`13e3bb7ff7ef7962c15fd16d65ec7394738d4355`
+- Controller proposal：`Rockyyy-S/code-graph-gate-controller#16` 已合并，merge commit 为
+  `c39610bc9d6d13774c30ef036bf9ab0a4ce2c1b5`
+- Hosted run：`30204776057`；`gate-execution` 与 `gate-evidence` 均为 `success`
+- Final artifact：`gate-evidence-30204776057-1-13e3bb7ff7ef7962c15fd16d65ec7394738d4355`，
+  artifact 记录大小 20,389 bytes；其中 `gate-evidence.json` 为 22,444 bytes
+- Evidence binding：`headOid=13e3bb7ff7ef7962c15fd16d65ec7394738d4355`、
+  `gateRegistryDigest=d584077454968a04d37fc7357fb278990b5fc34f1692f1628db7b80812ea2893`、
+  `gateImplementationDigest=09ada7713546528238c5ac6927026765e6100aa31a6ffdc2f28fa1b2dbdd0647`，
+  23 项 evidence 全部为 `pass`
+- Attestation：`gate-evidence.json` subject SHA-256 为
+  `91c2cc2bcda9553434f4880b35b22906e814a9fe8ffc2660ca9b8efc6f345d12`；已使用 GitHub CLI
+  验证 signer workflow 为固定 producer `produce-gate-evidence.yml@0981130a71a3960aa374a82829d42aa9d9f15012`、
+  source ref 为 `refs/pull/8/merge` 且 runner 为 GitHub-hosted
+- Drift monitor：run `30204738502` 在 Controller `main@c39610b` 上为 `success`
+- Controller App：check run `89801143334` 由 App ID `4372284` 发布，精确绑定实现候选 HEAD，
+  `architecture-required=success`
+- Ruleset：ID `19603163` 为 `active`，启用 strict required status check，无 bypass actor，固定要求
+  Controller App 的 `architecture-required`
+- 最终 HEAD 规则：任何文档或代码提交都会使上述实现候选 evidence 失去“当前 HEAD”资格；合并前必须由
+  同一 Provider 流程对 PR #8 最新 HEAD 重新生成 artifact、attestation 与 Controller success，PR
+  `mergeStateStatus=CLEAN` 才视为最终闭环
 
 私钥、installation token、webhook secret、工作区绝对路径、源码正文与文件读取缓冲均未写入证据、
 日志或本文档。

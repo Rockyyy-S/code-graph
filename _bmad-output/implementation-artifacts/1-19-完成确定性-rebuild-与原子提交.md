@@ -153,6 +153,7 @@ so that 查询和后续分析永远基于完整、可重复、未被竞态污染
 - [x] [Review][Patch] 已有 committed graph 时 failed/partial/cancelled Job 必须是 `rebuild`，不得接受无基线 `initial-index` [`packages/contracts/src/runtime-validation.ts:403`]
 - [x] [Review][Patch] terminal `partial` Job 必须同步映射为顶层 `completeness=partial`，拒绝持久化不可能产生的完整度组合 [`packages/contracts/src/runtime-validation.ts:295`]
 - [x] [Review][Patch] 顶层 `completeness=partial` 必须保留 partial/failed/cancelled terminal 证据，缺失终态或 succeeded 均应拒绝 [`packages/contracts/src/runtime-validation.ts:296`]
+- [x] [Review][P1] 为精确 PR HEAD 建立 proposed approval，完成 Hosted artifact、attestation、Controller App 与 strict ruleset 闭环，并要求文档回填后的最终 HEAD 重新取证 [`docs/ci/story-1-19-provider-evidence.md:68`]
 
 ## Dev Notes
 
@@ -283,7 +284,7 @@ GPT-5 Codex
 - 2026-07-26 反向完整度终审：补充 `completeness=partial` 缺失 terminal 证据或与 succeeded Job 并存的负向合同回归，仅允许 partial/failed/cancelled 维持降级状态；修复后继续执行完整门禁与三层终审。
 - 2026-07-26 门禁复验：首次 `architecture-required` 的并行 `contract` 子进程出现瞬时失败；立即独立完整 `pnpm contract` 21 文件/181 用例通过，随后原命令完整重跑 23/23 通过，未通过隐藏或跳过用例处理。
 - 2026-07-26 最终全量验证：`type`、`lint`、`build`、`dependency-boundary`、`basic-security`、`planning-trace`、`git diff --check` 均通过；unit 54 文件/380 用例、contract 21 文件/181 用例通过；确定性 rebuild 专项 7 文件/121 用例及真实进程合同 1 文件/5 用例通过；`architecture-required` 23/23 通过。
-- 2026-07-26 Provider 记录：`gateRegistryDigest=d584077454968a04d37fc7357fb278990b5fc34f1692f1628db7b80812ea2893`；本任务未创建/推送正式提交，因此 Hosted run 未触发且未被伪报，本地 provider-ready 证据见 `docs/ci/story-1-19-provider-evidence.md`。
+- 2026-07-26 Provider 实现候选闭环：Controller proposal PR #16 合并后，精确 HEAD `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 的 Hosted run `30204776057` 成功；final artifact 非空，23/23 evidence 为 pass，GitHub attestation 固定 producer SHA，fresh drift monitor `30204738502` 与 Controller App check `89801143334` 均成功，ruleset active/strict/no-bypass，PR 一度达到 `mergeStateStatus=CLEAN`。Provider 文档回填会产生新 HEAD，必须对新 HEAD 重跑同一闭环。
 
 ### Completion Notes List
 
