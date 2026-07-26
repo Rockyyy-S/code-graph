@@ -177,6 +177,17 @@ so that 查询和后续分析永远基于完整、可重复、未被竞态污染
 - [x] [Review][Patch] 前序协议违规关闭连接后，队列中已等待的控制调用必须继承同一 terminal error，禁止误报为可重试启动超时 [`packages/service-client/src/connection.ts:310`]
 - [x] [Review][Patch] `shutdown()` 必须进入同一控制队列并对并发调用幂等，禁止与已接受 rebuild 或 status 响应竞态 [`packages/service-client/src/connection.ts:267`]
 - [x] [Review][Patch] v1 任一包含 hierarchy facts 的 workspace 必须恰有一个 workspace root，拒绝迁移后无 owner 或多 ownership slice [`packages/adapters/store-sqlite/src/migrations/002-deterministic-commit.ts:186`]
+- [x] [Review][Patch] 每个非 legacy succeeded Job 的 manifest/input/config/patch digest 必须从持久 read-set 重新派生，拒绝历史证据被篡改后静默打开 [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:1515`]
+- [x] [Review][Patch] terminal Job 历史必须有界保留，状态转换不得全量物化并 JSON 比较整个 Job 表，避免长期累计 O(N²) 与启动内存耗尽 [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:785`]
+- [x] [Review][Patch] 最终提交栅栏不得在 SQLite 同步事务内前后各读取最多 512 MiB 内容；复用事务外双采集、元数据证明与独立 watcher 序列保持 fail closed [`apps/graph-service/src/index-read-set.ts:441`]
+- [x] [Review][Patch] committed 缓存启动不得对同一 512 MiB 合法工作区执行两次完整内容扫描，默认启动 deadline 必须覆盖单次有界复核 [`apps/graph-service/src/index-job-runtime.ts:142`]
+- [x] [Review][Patch] legacy committed Job 回填应按持久 rowid 选择最新 succeeded，并允许多个 Job 共享同一毫秒 completedAt [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:1120`]
+- [x] [Review][Patch] Dev Agent File List 必须补列 compatible connection、quality command contract 与 contract runner 配置的实际变更 [`_bmad-output/implementation-artifacts/1-19-完成确定性-rebuild-与原子提交.md:323`]
+- [x] [Review][Patch] 无独立原生 watcher 的最终栅栏必须强制内容 hash，禁止仅凭可伪造元数据放行旧 patch [`apps/graph-service/src/index-read-set.ts:462`]
+- [x] [Review][Patch] terminal history 裁剪必须以后置查询拒绝 `BEFORE DELETE RAISE(IGNORE)` 等静默抑制 [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:795`]
+- [x] [Review][Patch] retained succeeded Job 数量必须匹配 120 秒启动预算，避免 128 份完整 manifest 重新派生放大启动成本 [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:45`]
+- [x] [Review][Patch] 打开旧版超量历史时必须先保护 committed Job 并裁剪，再对保留 succeeded 证据执行完整语义派生 [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:132`]
+- [x] [Review][Patch] terminal retention 的 16 条总窗口必须包含 committed Job，禁止窗口外保护导致实际保留 17 条 [`packages/adapters/store-sqlite/src/sqlite-graph-store.ts:800`]
 
 ## Dev Notes
 
@@ -306,9 +317,11 @@ GPT-5 Codex
 - 2026-07-26 完整度终审：补充 terminal `partial` 与顶层 completeness 的一致性负向合同回归，拒绝运行时和持久化不可能产生的状态组合；修复后继续执行完整门禁与三层终审。
 - 2026-07-26 反向完整度终审：补充 `completeness=partial` 缺失 terminal 证据或与 succeeded Job 并存的负向合同回归，仅允许 partial/failed/cancelled 维持降级状态；修复后继续执行完整门禁与三层终审。
 - 2026-07-26 门禁复验：首次 `architecture-required` 的并行 `contract` 子进程出现瞬时失败；立即独立完整 `pnpm contract` 21 文件/181 用例通过，随后原命令完整重跑 23/23 通过，未通过隐藏或跳过用例处理。
-- 2026-07-26 最终全量验证：`type`、`lint`、`build`、`dependency-boundary`、`basic-security`、`planning-trace`、`git diff --check` 均通过；unit 54 文件/432 用例、contract 21 文件/181 用例通过；确定性 rebuild 专项 7 文件/121 用例及真实进程合同 1 文件/5 用例通过；contract 文件串行执行以隔离 Windows 真实进程与 SQLite 锁资源竞争，未跳过或放宽用例，`architecture-required` 完整重跑 23/23 通过。
+- 2026-07-26 前序全量验证：`type`、`lint`、`build`、`dependency-boundary`、`basic-security`、`planning-trace`、`git diff --check` 均通过；当时 unit 54 文件/432 用例、contract 21 文件/181 用例通过；确定性 rebuild 专项当时为 7 文件/121 用例及真实进程合同 1 文件/5 用例，`architecture-required` 23/23 通过。该计数随后被 Round 7–10 新增回归取代。
 - 2026-07-26 Provider 实现候选闭环：Controller proposal PR #16 合并后，精确 HEAD `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 的 Hosted run `30204776057` 成功；final artifact 非空，23/23 evidence 为 pass，GitHub attestation 固定 producer SHA，fresh drift monitor `30204738502` 与 Controller App check `89801143334` 均成功，ruleset active/strict/no-bypass，PR 一度达到 `mergeStateStatus=CLEAN`。Provider 文档回填会产生新 HEAD，必须对新 HEAD 重跑同一闭环。
-- 2026-07-26 最终 Blind/Edge Review 修复：旧 `job/start` compatible 响应规范化为完整 queued Job，只允许 revision 字段双缺或双有；revisionless v1 rebuild 固定映射 legacy revision 1。并发 `status()` 可同时发出但响应严格按调用顺序观测，`startRebuild()`、`shutdown()` 等控制变更继续与 revision 观测串行；连接锁定 service instance/epoch、canonical envelope 快照与 graph/service/index/config/view 单调关系，裸拒绝被封装为 outcome，排队调用继承 terminal error。Job 接受后以可证明的 revision 与状态内容前进为准，不要求 Job ID 永久保留在 current/last 两槽。v1/v2 打开路径在 `BEGIN IMMEDIATE` 锁内执行有界外键检查、Job 行数守恒与全库 canonical hierarchy/ownership 校验，拒绝非 canonical node/edge ID、非 NFC/POSIX 路径、file 后缀错误、跨 kind 路径冲突、空 directory 叶子、非唯一 root、断连或成环路径树、跨 workspace edge、多余/缺失 owner、多态 orphan 与未知 fact kind；聚合校验保持线性规模。contract 文件串行执行并由真实配置对象锁定，消除 Windows 宿主资源竞争型伪超时。多轮 RED 回归后定向 109/109、完整 unit 432/432、contract 181/181 与 architecture-required 23/23 通过；`1041ddc` 的 Hosted success 仅保留为历史证据，最终代码 HEAD 必须重新取证。
+- 2026-07-26 前序 Blind/Edge Review 修复：旧 `job/start` compatible 响应规范化为完整 queued Job，只允许 revision 字段双缺或双有；revisionless v1 rebuild 固定映射 legacy revision 1。并发 `status()` 可同时发出但响应严格按调用顺序观测，`startRebuild()`、`shutdown()` 等控制变更继续与 revision 观测串行；连接锁定 service instance/epoch、canonical envelope 快照与 graph/service/index/config/view 单调关系，裸拒绝被封装为 outcome，排队调用继承 terminal error。Job 接受后以可证明的 revision 与状态内容前进为准，不要求 Job ID 永久保留在 current/last 两槽。v1/v2 打开路径在 `BEGIN IMMEDIATE` 锁内执行有界外键检查、Job 行数守恒与全库 canonical hierarchy/ownership 校验，拒绝非 canonical node/edge ID、非 NFC/POSIX 路径、file 后缀错误、跨 kind 路径冲突、空 directory 叶子、非唯一 root、断连或成环路径树、跨 workspace edge、多余/缺失 owner、多态 orphan 与未知 fact kind；聚合校验保持线性规模。该轮曾取得定向 109/109、unit 432/432、contract 181/181 与 architecture-required 23/23，随后被 Round 7–10 追加终审与新计数取代；`1041ddc` 的 Hosted success 仅保留为历史证据。
+- 2026-07-26 Round 7–10 终审修复：历史 modern succeeded Job 从持久 read-set 重新派生全部语义摘要；打开旧版超量历史时先确定 committed 绑定并裁剪到含 committed 在内总计 16 条，再以 O(1) 内存流式验证保留终态。所有状态转换使用目标行后置校验、`total_changes()` 与裁剪后置查询，拒绝 trigger 静默抑制或旁路写。生产 watcher 路径的 SQLite 事务只复核身份/成员与独立原生序列，无 watcher 时强制内容 hash；启动复用首次 capture 证明，默认启动预算统一为 120 秒。Round 10 Blind/Edge/Acceptance 最终均为 `[]`。
+- 2026-07-26 最终本地证据：四个受影响单元文件 161/161，完整 unit 54 文件/437 用例、contract 21 文件/181 用例通过；确定性 rebuild 专项 7 文件/152 用例与真实进程合同 1 文件/5 用例通过。首次专项真实进程运行出现一次资源竞争型超时，独立文件与完整专项随后均原样通过，未跳过或放宽测试。
 
 ### Completion Notes List
 
@@ -317,7 +330,9 @@ GPT-5 Codex
 - `GraphStorePort` 已移除生产 `commitHierarchy()`，唯一 `commitAtomicGraphUpdate()` 提供单事务 CAS 与原子 revision；WAL 第二读者、fault injection、migration、busy timeout 与恢复不变量均有真实测试。
 - 公共状态增加 graph/base/result revision、`current|stale|null` freshness、partial/cancelled；兼容入口确定性归一化 Story 1.2/1.4 旧 `fresh` 与缺失 revision。
 - 最终 fence capability 仅允许同步单次 mutation，异常、后置 read-set 失效、回调逃逸及 `throw undefined` 均整体回滚；启动与运行期 watcher/rename 竞态统一 fail closed 且有界收敛。
-- 新增 `deterministic-rebuild-atomic-v1` 及 7 个公共能力 blocking gate；原子 Gate 固定运行 7 个单元测试文件/121 用例与 1 个真实进程合同文件/5 用例，完整 registry 23/23 通过。
+- 原生 watcher 存在时，事务外双内容采集与事务内身份/成员复核共同闭合线性化点；无 watcher fallback 强制内容 hash，合法 committed 缓存启动只复用首次 capture 证明。
+- terminal Job 总计最多保留 16 条并永久包含当前 committed Job；旧版超量历史在完整派生前先安全裁剪，保留的 modern succeeded 证据逐条重新派生 manifest/input/config/patch digest。
+- 新增 `deterministic-rebuild-atomic-v1` 及 7 个公共能力 blocking gate；原子 Gate 固定运行 7 个单元测试文件/152 用例与 1 个真实进程合同文件/5 用例，完整 registry 23/23 通过。
 - 保持后续边界：未实现 Analyzer/BasicSymbol、完整 `.codegraphignore` grammar、通用 Evidence/tombstone、公共 `job/cancel`、查询、CLI/UI、Findings、impact、export、缓存恢复或遥测。
 
 ### File List
@@ -352,6 +367,8 @@ GPT-5 Codex
 - `packages/contracts/src/service-status.ts`
 - `packages/domain/src/graph-patch.ts`
 - `packages/domain/src/index.ts`
+- `packages/service-client/src/connection.ts`
+- `packages/service-client/src/launcher.ts`
 - `scripts/ci/verify-deterministic-rebuild-v1.mjs`
 - `scripts/contracts/verify-deterministic-rebuild-error-v1.mjs`
 - `scripts/contracts/verify-deterministic-rebuild-initialize-compatible-v1.mjs`
@@ -363,6 +380,7 @@ GPT-5 Codex
 - `tests/contract/graph-bootstrap-contract.test.ts`
 - `tests/contract/graph-service-control.test.ts`
 - `tests/contract/graph-service-process.test.ts`
+- `tests/contract/quality-command-contract.test.ts`
 - `tests/contract/quality-gates-manifest.test.ts`
 - `tests/contract/service-client-control.test.ts`
 - `tests/contract/service-control-contract.test.ts`
@@ -393,8 +411,10 @@ GPT-5 Codex
 - `tests/unit/service-state.test.ts`
 - `tests/unit/sqlite-graph-store.test.ts`
 - `tests/unit/workspace-scanner.test.ts`
+- `vitest.contract.config.ts`
 
 ### Change Log
 
 - 2026-07-26：完成 Story 1.19 确定性 rebuild、完整 read-set CAS、ownership replacement、原子 graphRevision、状态合同与专属 blocking gate，全部本地质量门禁通过，状态推进至 `review`。
 - 2026-07-26：完成多轮三层对抗式代码审查并修复全部发现；最终 Blind Hunter、Edge Case Hunter、Acceptance Auditor 均为零发现，完整门禁复验通过，状态推进至 `done`。
+- 2026-07-26：完成 Round 7–10 追加终审与修复，最终三层再次零发现；unit 437/437、contract 181/181、原子专项 152+5 全部通过，等待最终精确 SHA 的 Hosted Provider 闭环。

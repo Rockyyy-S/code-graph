@@ -293,7 +293,7 @@ describe("index read-set provider", () => {
     expect(forceContentHashCalls).toEqual([true, true]);
   });
 
-  it("forces content hashes at the final linearization point even if metadata proof is forged current", async () => {
+  it("forces content verification when the commit fence has no independent watcher", async () => {
     const root = await createRoot();
     const sourcePath = path.join(root, "index.ts");
     await writeFile(sourcePath, "export const value = 1;\n");

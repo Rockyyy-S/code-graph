@@ -36,7 +36,7 @@ export interface IndexReadSetCapture {
   scanResult: WorkspaceScanResult;
 }
 
-/** 事务外双重完整扫描生成、供事务内同步内容与成员栅栏消费的稳定输入证明。 */
+/** 事务外双重完整扫描生成、供事务内同步身份与成员栅栏消费的稳定输入证明。 */
 export interface PreparedCommitFence {
   monitorSequence: bigint | null;
   observationDigest: string;
@@ -49,6 +49,10 @@ export interface IndexReadSetProvider {
   awaitPendingRenameVerification?: () => Promise<void>;
   capture: (baseGraphRevision: number | null, signal?: AbortSignal) => Promise<IndexReadSetCapture>;
   close?: () => void;
+  isCaptureCurrent?: (
+    capture: IndexReadSetCapture,
+    signal?: AbortSignal,
+  ) => Promise<boolean>;
   prepareCommitFence: (
     expected: HierarchyReadSetV1,
     signal?: AbortSignal,
@@ -455,7 +459,13 @@ export function createIndexReadSetProvider(
       ) {
         return false;
       }
-      const verified = verifyReadSetSynchronously(expected, prepared.verificationProof, true);
+      // 无独立原生 watcher 时只能用内容 hash 闭合最终 CAS；生产 watcher 路径保持轻量元数据复核。
+      const forceContentHash = prepared.monitorSequence === null;
+      const verified = verifyReadSetSynchronously(
+        expected,
+        prepared.verificationProof,
+        forceContentHash,
+      );
       assertNoUserIgnoreConfigSync(options.indexingRoot);
       if (
         !verified ||
@@ -470,10 +480,14 @@ export function createIndexReadSetProvider(
       ) {
         return false;
       }
-      // 事务外双采集缩短风险窗口；事务内前后仍强制内容哈希，锁定真正线性化点。
+      // 事务外双内容采集绑定字节；事务内只复核身份/成员并依赖独立 watcher 原始序列锁定线性化点。
       commitMutation();
       assertMonitorHealthy(monitorError);
-      const postVerified = verifyReadSetSynchronously(expected, prepared.verificationProof, true);
+      const postVerified = verifyReadSetSynchronously(
+        expected,
+        prepared.verificationProof,
+        forceContentHash,
+      );
       assertNoUserIgnoreConfigSync(options.indexingRoot);
       if (
         !postVerified ||
@@ -493,6 +507,43 @@ export function createIndexReadSetProvider(
       return monitorSequence !== false &&
         monitorError === undefined &&
         isCheapFenceCurrent(expected, bootstrapGeneration, options.ignoreSnapshot);
+    },
+    isCaptureCurrent: async (capture) => {
+      assertMonitorHealthy(monitorError);
+      const proof = capture.scanResult.verificationProof;
+      const monitorSequence = readStableMonitorSequence(monitor);
+      if (
+        proof === undefined ||
+        monitorSequence === false ||
+        closed ||
+        renameVerificationScheduled ||
+        !isCheapFenceCurrent(
+          capture.readSet,
+          bootstrapGeneration,
+          options.ignoreSnapshot,
+        )
+      ) {
+        return false;
+      }
+      assertNoUserIgnoreConfigSync(options.indexingRoot);
+      const verified = verifyReadSetSynchronously(
+        capture.readSet,
+        proof,
+        monitorSequence === null,
+      );
+      assertNoUserIgnoreConfigSync(options.indexingRoot);
+      const isCurrent = verified &&
+        !renameVerificationScheduled &&
+        isCheapFenceCurrent(
+          capture.readSet,
+          bootstrapGeneration,
+          options.ignoreSnapshot,
+        ) &&
+        isMonitorSequenceCurrent(monitor, monitorSequence);
+      if (isCurrent) {
+        workspaceInvalidated = false;
+      }
+      return isCurrent;
     },
     isCurrent: async (expected, signal) => {
       const current = await captureReadSet(expected.baseGraphRevision, signal);

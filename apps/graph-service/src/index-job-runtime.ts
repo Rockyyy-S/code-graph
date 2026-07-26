@@ -150,7 +150,9 @@ export async function createVerifiedIndexJobRuntime(
             attempt += 1
           ) {
             await readSetProvider.awaitPendingRenameVerification?.();
-            const fullyCurrent = await readSetProvider.isCurrent(capture.readSet);
+            const fullyCurrent = readSetProvider.isCaptureCurrent === undefined
+              ? await readSetProvider.isCurrent(capture.readSet)
+              : await readSetProvider.isCaptureCurrent(capture);
             await readSetProvider.awaitPendingRenameVerification?.();
             if (
               !startupInvalidated &&

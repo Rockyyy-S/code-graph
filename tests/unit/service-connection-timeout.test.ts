@@ -19,11 +19,16 @@ import {
 } from "../../packages/service-client/src/connection.js";
 import { createBoundedJsonRpcInput } from "../../packages/service-client/src/bounded-json-rpc-input.js";
 import { SQLITE_BUSY_TIMEOUT_MS } from "../../packages/adapters/store-sqlite/src/index.js";
+import {
+  DEFAULT_SERVICE_START_TIMEOUT_MS as DEFAULT_LAUNCHER_START_TIMEOUT_MS,
+} from "../../packages/service-client/src/launcher.js";
 
 describe("GraphServiceConnection request deadlines", () => {
   it("keeps default request and startup deadlines above the SQLite busy timeout", () => {
     expect(DEFAULT_SERVICE_REQUEST_TIMEOUT_MS).toBeGreaterThan(SQLITE_BUSY_TIMEOUT_MS);
     expect(DEFAULT_SERVICE_START_TIMEOUT_MS).toBeGreaterThan(SQLITE_BUSY_TIMEOUT_MS);
+    expect(DEFAULT_SERVICE_START_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
+    expect(DEFAULT_LAUNCHER_START_TIMEOUT_MS).toBe(DEFAULT_SERVICE_START_TIMEOUT_MS);
   });
 
   it("times out status and closes a permanently pending connection", async () => {

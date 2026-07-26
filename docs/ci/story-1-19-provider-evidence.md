@@ -4,7 +4,9 @@
 > 本地全部 23 项 blocking gate。公共能力差异以隔离 Git candidate 对基线执行，结果为
 > `violations=[]`。历史实现候选 `13e3bb7ff7ef7962c15fd16d65ec7394738d4355` 已完成 Hosted run、
 > artifact attestation、Controller App umbrella check 与 ruleset freshness 闭环；文档 HEAD
-> `1041ddc026da895719abd5a613f8d7ea7e525225` 也完成 Hosted attempt 2。随后多轮终审继续修复
+> `1041ddc026da895719abd5a613f8d7ea7e525225` 也完成 Hosted attempt 2，后续精确代码 HEAD
+> `6be599264e51d76292e93c6317b7641edab64a70` 完成 Hosted run `30214389618`。随后 Round 7–10
+> 终审继续修复
 > compatible Job、连接 revision 时序、migration ownership 完整性与 contract gate 稳定性，因此这些
 > run 只作为历史证据。
 > 最终合并以 PR #8 对最新精确 HEAD 发布的 required check 为唯一权威，不复用任何旧 HEAD 证据。
@@ -47,7 +49,7 @@ state 回归集，不能通过 Gate 参数缩小范围。
 - `checkId`：`deterministic-rebuild-atomic-v1`
 - `capabilityOwner`：`qa`
 - `gateDefinitionDigest`：`1db8518291245cfd3f5ec6cc86b6e60694d91d1e25923d441d7cf6678783dce7`
-- 验证结果：7 个单元测试文件、121 个用例及 1 个真实进程合同文件、5 个用例全部通过
+- 验证结果：7 个单元测试文件、152 个用例及 1 个真实进程合同文件、5 个用例全部通过
 - 覆盖：确定性 patch/digest、ownership replacement、完整 read-set、manifest/hash、三次 stale 重排、
   partial/failed/cancelled 不提交、fault rollback、no-op/replay revision、WAL 第二读者半提交不可见
 
@@ -57,7 +59,7 @@ state 回归集，不能通过 Gate 参数缩小范围。
 | --- | --- |
 | `pnpm type` | pass |
 | `pnpm lint` | pass |
-| `pnpm unit` | 54 文件 / 432 用例 pass |
+| `pnpm unit` | 54 文件 / 437 用例 pass |
 | `pnpm build` | pass |
 | `pnpm contract` | 21 文件 / 181 用例 pass |
 | `pnpm dependency-boundary` | pass |
@@ -79,7 +81,10 @@ graph/service/index/config/view revision、service instance 或 epoch 回退；�
 非 NFC/POSIX 路径、file 后缀错误、跨 kind 路径冲突、空 directory 叶子、非唯一 root、断连或成环路径树、
 跨 workspace edge、多余/缺失 owner、多态 orphan 及未知 fact kind；聚合校验保持线性规模。完整 contract
 文件改为串行调度并由真实配置对象断言，消除 Windows 进程与 SQLite 锁测试的宿主资源竞争型伪超时，
-未跳过或放宽任何用例。修复后定向 109/109、完整 unit 432/432 与 contract 181/181 通过，随后
+未跳过或放宽任何用例。Round 7–10 进一步收敛全部历史 succeeded digest 派生、含 committed 的
+16 条 terminal 总窗口、旧库先裁剪后验证、trigger 裁剪后置条件、无 watcher 内容 hash fallback、
+启动 capture 证明复用与 120 秒统一预算。修复后四个受影响单元文件 161/161、完整 unit 437/437、
+contract 181/181、原子专项 152/152 与真实进程合同 5/5 通过，随后
 `architecture-required` 完整重跑 23/23 通过。
 
 ## Hosted Provider 状态
@@ -105,6 +110,11 @@ graph/service/index/config/view revision、service instance 或 epoch 回退；�
   Controller App 的 `architecture-required`
 - 文档 HEAD `1041ddc026da895719abd5a613f8d7ea7e525225`：Hosted run `30205134913` attempt 2
   成功，但已被上述 Blind Review 代码修复产生的新 HEAD 取代，不具备最终合并资格
+- 代码 HEAD `6be599264e51d76292e93c6317b7641edab64a70`：Controller PR #18 已合并；Hosted run
+  `30214389618` 成功，artifact 23/23 pass，artifact SHA-256 为
+  `ae0195fc53a3bb0619f25ec821f4a2b2f4e1c5e6f85a9acadc2e6e786fcc4761`；Controller check
+  `89826172573` 与 drift monitor `30214360472` 成功。该证据同样因 Round 7–10 修复产生新 HEAD
+  而仅保留为历史证据
 - 最终 HEAD 规则：任何文档或代码提交都会使上述实现候选 evidence 失去“当前 HEAD”资格；合并前必须由
   同一 Provider 流程对 PR #8 最新 HEAD 重新生成 artifact、attestation 与 Controller success，PR
   `mergeStateStatus=CLEAN` 才视为最终闭环

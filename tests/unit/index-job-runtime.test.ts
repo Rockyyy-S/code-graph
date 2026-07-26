@@ -750,6 +750,55 @@ describe("index job runtime", () => {
     }
   });
 
+  it("reuses the captured startup proof instead of hashing an unchanged committed workspace twice", async () => {
+    const fixture = await createFixture();
+    await writeFile(path.join(fixture.indexingRoot, "index.ts"), "export const value = 1;\n");
+    const databasePath = path.join(fixture.cacheRoot, "graph.sqlite");
+    const firstStore = await openSqliteGraphStore({ databasePath, workspaceKey: fixture.workspaceKey });
+    const firstRuntime = createIndexJobRuntime({
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-single-startup-scan-first",
+      statusEpoch: "epoch-single-startup-scan-first",
+      store: firstStore,
+      workspaceKey: fixture.workspaceKey,
+    });
+    firstRuntime.startJob({ kind: "rebuild" });
+    await vi.waitFor(
+      () => expect(firstRuntime.getStatus().lastIndexJob?.state).toBe("succeeded"),
+      { timeout: 5_000 },
+    );
+    await firstRuntime.close();
+
+    const reopenedStore = await openSqliteGraphStore({ databasePath, workspaceKey: fixture.workspaceKey });
+    const ignoreState = await createInitialIgnoreState(fixture.indexingRoot);
+    if (ignoreState.kind !== "ready") {
+      throw new Error("测试前置条件不成立。");
+    }
+    const scan = vi.fn(scanWorkspace);
+    const readSetProvider = createIndexReadSetProvider({
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: fixture.indexingRoot,
+      scan,
+      statusEpoch: "epoch-single-startup-scan-second",
+    });
+    const runtime = await createVerifiedIndexJobRuntime({
+      ignoreState,
+      indexingRoot: fixture.indexingRoot,
+      readSetProvider,
+      serviceInstanceId: "instance-single-startup-scan-second",
+      statusEpoch: "epoch-single-startup-scan-second",
+      store: reopenedStore,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      expect(scan).toHaveBeenCalledTimes(1);
+      expect(runtime.getStatus()).toMatchObject({ freshness: "current", graphRevision: 1 });
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("keeps startup current after repeated transient watcher handoff failures", async () => {
     const fixture = await createFixture();
     await writeFile(path.join(fixture.indexingRoot, "index.ts"), "export const value = 1;\n");
@@ -787,12 +836,12 @@ describe("index job runtime", () => {
       indexingRoot: fixture.indexingRoot,
       readSetProvider: {
         ...baseProvider,
-        isCurrent: async (expected, signal) => {
+        isCaptureCurrent: async (capture, signal) => {
           if (transientHandoffFailures < 2) {
             transientHandoffFailures += 1;
             return false;
           }
-          return baseProvider.isCurrent(expected, signal);
+          return baseProvider.isCaptureCurrent!(capture, signal);
         },
       },
       serviceInstanceId: "instance-pending-ignored-second",
@@ -839,18 +888,18 @@ describe("index job runtime", () => {
       indexingRoot: fixture.indexingRoot,
       statusEpoch: "epoch-startup-budget-second",
     });
-    const isCurrent = vi.fn(async () => false);
+    const isCaptureCurrent = vi.fn(async () => false);
     const runtime = await createVerifiedIndexJobRuntime({
       ignoreState,
       indexingRoot: fixture.indexingRoot,
-      readSetProvider: { ...baseProvider, isCurrent },
+      readSetProvider: { ...baseProvider, isCaptureCurrent },
       serviceInstanceId: "instance-startup-budget-second",
       statusEpoch: "epoch-startup-budget-second",
       store: reopenedStore,
       workspaceKey: fixture.workspaceKey,
     });
     try {
-      expect(isCurrent).toHaveBeenCalledTimes(MAX_STARTUP_READ_SET_STABILITY_ATTEMPTS);
+      expect(isCaptureCurrent).toHaveBeenCalledTimes(MAX_STARTUP_READ_SET_STABILITY_ATTEMPTS);
       expect(runtime.getStatus()).toMatchObject({ freshness: "stale", graphRevision: 1 });
       expect(reopenedStore.readBootstrapState()).toMatchObject({ freshness: "stale" });
     } finally {

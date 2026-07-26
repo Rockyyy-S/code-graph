@@ -41,6 +41,9 @@ export const MAX_SQLITE_FAILURE_BACKUP_SETS = 3;
 /** 故障诊断副本总预算为 64 MiB；超限时保留原始打开错误而跳过复制。 */
 export const MAX_SQLITE_FAILURE_BACKUP_BYTES = 64 * 1024 * 1024;
 
+/** 公开状态只消费 last/current Job；终态总计最多 16 条，并为当前 committed Job 永久预留一槽。 */
+const MAX_RETAINED_TERMINAL_JOBS = 16;
+
 let failureBackupSequence = 0;
 
 /** meta 表中用于把提交摘要强绑定到实际 succeeded Job 的私有键前缀。 */
@@ -126,7 +129,6 @@ export class SqliteGraphStore implements GraphStorePort {
     this.#database.transaction(() => {
       const totalChangesBefore = this.#readTotalChanges();
       let expectedChanges = 0;
-      const jobsBeforeRecovery = this.#readJobEvidenceRows();
       const rows = this.#database.prepare(`
         SELECT id, kind, state, requested_at, started_at,
                completed_at, error_code, error_log_id,
@@ -136,8 +138,15 @@ export class SqliteGraphStore implements GraphStorePort {
         ORDER BY rowid
       `).all(this.#workspaceKey) as ActiveJobRow[];
       rows.forEach(validateStoredActiveJob);
-      /** 旧 schema v1 缺少绑定键时，只在全部旧状态无歧义合法后回填。 */
+      /** 先绑定真实 committed Job，才能在不误删当前提交证据的前提下裁剪旧历史。 */
       expectedChanges += this.#backfillLegacyCommittedJobBinding();
+      expectedChanges += this.#pruneTerminalJobHistory();
+      validateStoredJobHistory(
+        this.#database,
+        this.#digestPort,
+        this.#workspaceKey,
+        this.#readWorkspaceRow().graph_revision,
+      );
       this.readBootstrapState();
       let expectedWorkspaceAfterRecovery = this.#readWorkspaceRow();
       if (rows.length > 0) {
@@ -214,22 +223,7 @@ export class SqliteGraphStore implements GraphStorePort {
       if (remainingActive.count !== 0) {
         throw new Error("中断 Job 未能收敛。");
       }
-      const recoveryById = new Map(recoveries.map((recovery) => [recovery.id, recovery]));
-      const expectedJobs = jobsBeforeRecovery.map((row) => {
-        const recovery = recoveryById.get(row.id);
-        return recovery === undefined
-          ? row
-          : {
-              ...row,
-              completed_at: recovery.completedAt,
-              error_code: recovery.errorCode,
-              error_log_id: recovery.errorLogId,
-              result_graph_revision: recovery.resultGraphRevision,
-              started_at: recovery.startedAt,
-              state: "failed" as const,
-            };
-      });
-      this.#assertJobEvidenceRows(expectedJobs, "中断 Job 恢复影响了非目标 Job。");
+      expectedChanges += this.#pruneTerminalJobHistory();
       this.#assertWorkspaceEquals(
         expectedWorkspaceAfterRecovery,
         "中断 Job 恢复后的 workspace 状态不一致。",
@@ -249,14 +243,18 @@ export class SqliteGraphStore implements GraphStorePort {
     this.#ensureOpen();
     this.#database.transaction(() => {
       const totalChangesBefore = this.#readTotalChanges();
-      const beforeRows = this.#readJobEvidenceRows();
       const result = this.#database.prepare(`
         INSERT INTO jobs(id, workspace_key, kind, state, requested_at, base_graph_revision)
         VALUES (?, ?, ?, 'queued', ?, ?)
       `).run(job.id, this.#workspaceKey, job.kind, job.requestedAt, job.baseGraphRevision);
       requireSingleChange(result.changes, "queued Job 未能持久化。");
-      const afterRows = this.#readJobEvidenceRows();
-      const inserted = afterRows.find((row) => row.id === job.id);
+      const inserted = this.#database.prepare(`
+        SELECT rowid, id, kind, state, requested_at, started_at, completed_at,
+               error_code, error_log_id, base_graph_revision, result_graph_revision,
+               read_set_json, patch_digest, legacy_schema_version
+        FROM jobs
+        WHERE id = ? AND workspace_key = ?
+      `).get(job.id, this.#workspaceKey) as JobEvidenceRow | undefined;
       if (
         inserted === undefined ||
         inserted.kind !== job.kind ||
@@ -275,10 +273,6 @@ export class SqliteGraphStore implements GraphStorePort {
         throw new Error("queued Job 后置状态不一致。");
       }
       validateStoredActiveJob(inserted);
-      this.#assertJobEvidenceRows(
-        [...beforeRows, inserted].sort((left, right) => left.rowid - right.rowid),
-        "queued Job 写入影响了非目标 Job。",
-      );
       this.#assertOnlyExpectedChanges(
         totalChangesBefore,
         1,
@@ -292,22 +286,41 @@ export class SqliteGraphStore implements GraphStorePort {
     this.#ensureOpen();
     this.#database.transaction(() => {
       const totalChangesBefore = this.#readTotalChanges();
-      const beforeRows = this.#readJobEvidenceRows();
-      const target = beforeRows.find((row) => row.id === jobId && row.state === "queued");
+      const target = this.#database.prepare(`
+        SELECT id, kind, state, requested_at, started_at, completed_at,
+               error_code, error_log_id, base_graph_revision, result_graph_revision,
+               read_set_json, patch_digest, legacy_schema_version
+        FROM jobs
+        WHERE id = ? AND workspace_key = ? AND state = 'queued'
+      `).get(jobId, this.#workspaceKey) as ActiveJobEvidenceRow | undefined;
       if (target === undefined) {
         throw new Error("Job 无法进入 running。");
       }
+      validateStoredActiveJob(target);
       const result = this.#database.prepare(`
         UPDATE jobs
         SET state = 'running', started_at = ?
         WHERE id = ? AND workspace_key = ? AND state = 'queued'
       `).run(startedAt, jobId, this.#workspaceKey);
       requireSingleChange(result.changes, "Job 无法进入 running。");
-      const expected = beforeRows.map((row) => row.id === jobId
-        ? { ...row, started_at: startedAt, state: "running" as const }
-        : row);
-      this.#assertJobEvidenceRows(expected, "running Job 后置状态不一致。");
-      validateStoredActiveJob(expected.find((row) => row.id === jobId)!);
+      const persisted = this.#database.prepare(`
+        SELECT id, kind, state, requested_at, started_at, completed_at,
+               error_code, error_log_id, base_graph_revision, result_graph_revision,
+               read_set_json, patch_digest, legacy_schema_version
+        FROM jobs
+        WHERE id = ? AND workspace_key = ?
+      `).get(jobId, this.#workspaceKey) as ActiveJobEvidenceRow | undefined;
+      if (
+        persisted === undefined ||
+        persisted.state !== "running" ||
+        persisted.started_at !== startedAt ||
+        persisted.requested_at !== target.requested_at ||
+        persisted.kind !== target.kind ||
+        persisted.base_graph_revision !== target.base_graph_revision
+      ) {
+        throw new Error("running Job 后置状态不一致。");
+      }
+      validateStoredActiveJob(persisted);
       this.#assertOnlyExpectedChanges(
         totalChangesBefore,
         1,
@@ -366,7 +379,6 @@ export class SqliteGraphStore implements GraphStorePort {
       this.#markUncommittedTerminal(jobId, "partial", completedAt);
       const totalChangesBefore = this.#readTotalChanges();
       const beforeWorkspace = this.#readWorkspaceRow();
-      const beforeWorkspaceJobs = this.#readJobEvidenceRows();
       const workspaceResult = this.#database.prepare(`
         UPDATE workspace
         SET completeness = 'partial',
@@ -379,7 +391,6 @@ export class SqliteGraphStore implements GraphStorePort {
         completeness: "partial",
         freshness: beforeWorkspace.committed_at === null ? null : "stale",
       }, "partial Job 的 workspace 后置状态不一致。");
-      this.#assertJobEvidenceRows(beforeWorkspaceJobs, "partial workspace 更新影响了 Job 集合。");
       this.#assertOnlyExpectedChanges(
         totalChangesBefore,
         1,
@@ -398,7 +409,6 @@ export class SqliteGraphStore implements GraphStorePort {
   #markWorkspaceStale(): void {
     const totalChangesBefore = this.#readTotalChanges();
     const beforeWorkspace = this.#readWorkspaceRow();
-    const beforeJobs = this.#readJobEvidenceRows();
     const result = this.#database.prepare(`
       UPDATE workspace
       SET freshness = CASE WHEN committed_at IS NULL THEN NULL ELSE 'stale' END
@@ -409,7 +419,6 @@ export class SqliteGraphStore implements GraphStorePort {
       ...beforeWorkspace,
       freshness: beforeWorkspace.committed_at === null ? null : "stale",
     }, "workspace stale 后置状态不一致。");
-    this.#assertJobEvidenceRows(beforeJobs, "workspace stale 更新影响了 Job 集合。");
     this.#assertOnlyExpectedChanges(
       totalChangesBefore,
       1,
@@ -498,11 +507,24 @@ export class SqliteGraphStore implements GraphStorePort {
       FROM workspace
       WHERE workspace_key = ?
     `).get(this.#workspaceKey) as WorkspaceRow | undefined;
-    const terminalJobs = readStoredTerminalJobs(this.#database, this.#workspaceKey);
-    terminalJobs.forEach((job) =>
-      validateTerminalJobAgainstWorkspace(job, workspace?.graph_revision ?? null));
-    const lastJob = terminalJobs.at(-1) ?? null;
-    const latestSucceededJob = terminalJobs.findLast((job) => job.state === "succeeded") ?? null;
+    const lastJobRow = readLatestTerminalJobRow(this.#database, this.#workspaceKey);
+    const latestSucceededJobRow = readLatestSucceededJobRow(this.#database, this.#workspaceKey);
+    const lastJob = lastJobRow === undefined
+      ? null
+      : mapValidatedTerminalJob(
+          lastJobRow,
+          this.#workspaceKey,
+          this.#digestPort,
+          workspace?.graph_revision ?? null,
+        );
+    const latestSucceededJob = latestSucceededJobRow === undefined
+      ? null
+      : mapValidatedTerminalJob(
+          latestSucceededJobRow,
+          this.#workspaceKey,
+          this.#digestPort,
+          workspace?.graph_revision ?? null,
+        );
     const committedJobMeta = this.#database.prepare(`
       SELECT value
       FROM meta
@@ -667,7 +689,6 @@ export class SqliteGraphStore implements GraphStorePort {
   ): void {
     this.#ensureOpen();
     const totalChangesBefore = this.#readTotalChanges();
-    const beforeRows = this.#readJobEvidenceRows();
     const before = this.#database.prepare(`
       SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id,
              base_graph_revision, result_graph_revision, read_set_json, patch_digest,
@@ -727,21 +748,10 @@ export class SqliteGraphStore implements GraphStorePort {
     if (!matchesRecoveredJob(persistedJob, expected)) {
       throw new Error(`Job ${state} 后置状态不一致。`);
     }
-    const expectedRows = beforeRows.map((row) => row.id === jobId
-      ? {
-          ...row,
-          completed_at: completedAt,
-          error_code: errorCode ?? null,
-          error_log_id: errorLogId ?? null,
-          result_graph_revision: row.base_graph_revision,
-          started_at: row.started_at ?? completedAt,
-          state,
-        }
-      : row);
-    this.#assertJobEvidenceRows(expectedRows, `Job ${state} 写入影响了非目标 Job。`);
+    const prunedJobs = this.#pruneTerminalJobHistory();
     this.#assertOnlyExpectedChanges(
       totalChangesBefore,
-      1,
+      1 + prunedJobs,
       `Job ${state} 写入触发了旁路表变更。`,
     );
   }
@@ -782,23 +792,66 @@ export class SqliteGraphStore implements GraphStorePort {
     }
   }
 
-  /** 事务完整性检查使用 rowid 绑定全部 Job，防止 trigger 额外插入或改写旁路行。 */
-  #readJobEvidenceRows(): JobEvidenceRow[] {
-    return this.#database.prepare(`
-      SELECT rowid, id, kind, state, requested_at, started_at, completed_at,
-             error_code, error_log_id, base_graph_revision, result_graph_revision,
-             read_set_json, patch_digest, legacy_schema_version
+  /** 删除超出公开 last/current 需求的旧终态，同时永久保护当前 committed Job。 */
+  #pruneTerminalJobHistory(): number {
+    const committedJobId = readMetaValue(
+      this.#database,
+      committedJobMetaKey(this.#workspaceKey),
+    );
+    const recentLimit = committedJobId === null
+      ? MAX_RETAINED_TERMINAL_JOBS
+      : MAX_RETAINED_TERMINAL_JOBS - 1;
+    const changes = this.#database.prepare(`
+      DELETE FROM jobs
+      WHERE workspace_key = ?
+        AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
+        AND (? IS NULL OR id <> ?)
+        AND rowid NOT IN (
+          SELECT rowid
+          FROM jobs
+          WHERE workspace_key = ?
+            AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
+            AND (? IS NULL OR id <> ?)
+          ORDER BY rowid DESC
+          LIMIT ?
+        )
+    `).run(
+      this.#workspaceKey,
+      committedJobId,
+      committedJobId,
+      this.#workspaceKey,
+      committedJobId,
+      committedJobId,
+      recentLimit,
+    ).changes;
+    const remainingPrunable = this.#database.prepare(`
+      SELECT COUNT(*) AS count
       FROM jobs
       WHERE workspace_key = ?
-      ORDER BY rowid
-    `).all(this.#workspaceKey) as JobEvidenceRow[];
-  }
-
-  /** 所有 Job 行必须逐字段等于事务计算出的唯一预期集合。 */
-  #assertJobEvidenceRows(expected: readonly JobEvidenceRow[], message: string): void {
-    if (JSON.stringify(this.#readJobEvidenceRows()) !== JSON.stringify(expected)) {
-      throw new Error(message);
+        AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
+        AND (? IS NULL OR id <> ?)
+        AND rowid NOT IN (
+          SELECT rowid
+          FROM jobs
+          WHERE workspace_key = ?
+            AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
+            AND (? IS NULL OR id <> ?)
+          ORDER BY rowid DESC
+          LIMIT ?
+        )
+    `).get(
+      this.#workspaceKey,
+      committedJobId,
+      committedJobId,
+      this.#workspaceKey,
+      committedJobId,
+      committedJobId,
+      recentLimit,
+    ) as { count: number };
+    if (remainingPrunable.count !== 0) {
+      throw new Error("terminal Job 历史裁剪未能收敛到有界集合。");
     }
+    return changes;
   }
 
   /** 同步事务内部的 CAS、patch、metadata 与 Job 实际提交。 */
@@ -807,7 +860,6 @@ export class SqliteGraphStore implements GraphStorePort {
     if (!matchesExpectedSnapshot(workspace, input.expectedSnapshot)) {
       return { graphRevision: workspace.graph_revision, kind: "stale" };
     }
-    const jobsBeforeCommit = this.#readJobEvidenceRows();
     const runningJob = this.#database.prepare(`
       SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id,
              base_graph_revision, result_graph_revision, read_set_json, patch_digest,
@@ -934,6 +986,7 @@ export class SqliteGraphStore implements GraphStorePort {
       committedReadSetDigestMetaKey(this.#workspaceKey),
       readSetDigest,
     ).changes;
+    expectedChanges += this.#pruneTerminalJobHistory();
 
     this.#assertWorkspaceEquals(expectedWorkspace, "原子提交的 workspace 后置状态不一致。");
     const finalJob = this.#database.prepare(`
@@ -960,19 +1013,6 @@ export class SqliteGraphStore implements GraphStorePort {
     ) {
       throw new Error("原子提交的 Job 后置状态不一致。");
     }
-    const expectedJobs = jobsBeforeCommit.map((row) => row.id === input.jobId
-      ? {
-          ...row,
-          completed_at: input.completedAt,
-          error_code: null,
-          error_log_id: null,
-          patch_digest: patch.patchDigest,
-          read_set_json: serializedReadSet,
-          result_graph_revision: nextRevision,
-          state: "succeeded" as const,
-        }
-      : row);
-    this.#assertJobEvidenceRows(expectedJobs, "原子提交影响了非目标 Job。");
     if (
       readMetaValue(this.#database, committedJobMetaKey(this.#workspaceKey)) !== input.jobId ||
       readMetaValue(this.#database, committedReadSetDigestMetaKey(this.#workspaceKey)) !== readSetDigest
@@ -1136,23 +1176,35 @@ export class SqliteGraphStore implements GraphStorePort {
     if (workspace === undefined || workspace.committed_at === null) {
       return 0;
     }
-    const terminalJobs = readStoredTerminalJobs(this.#database, this.#workspaceKey);
-    const latestSucceededJob = terminalJobs.findLast((job) => job.state === "succeeded") ?? null;
-    const bindingCandidates = terminalJobs.filter(
-      (job) => job.state === "succeeded" && job.completedAt === workspace.committed_at,
-    );
+    const latestSucceededJobRow = readLatestSucceededJobRow(this.#database, this.#workspaceKey);
+    const latestSucceededJob = latestSucceededJobRow === undefined
+      ? null
+      : mapValidatedTerminalJob(
+          latestSucceededJobRow,
+          this.#workspaceKey,
+          this.#digestPort,
+          workspace.graph_revision,
+        );
     if (
       latestSucceededJob === null ||
-      bindingCandidates.length !== 1 ||
-      bindingCandidates[0]?.id !== latestSucceededJob.id
+      latestSucceededJob.completedAt !== workspace.committed_at
     ) {
-      throw new Error("旧版持久提交的 succeeded Job 绑定无法唯一恢复。");
+      throw new Error("旧版持久提交的最新 succeeded Job 与 workspace 摘要不一致。");
     }
+    const lastJobRow = readLatestTerminalJobRow(this.#database, this.#workspaceKey);
+    const lastJob = lastJobRow === undefined
+      ? null
+      : mapValidatedTerminalJob(
+          lastJobRow,
+          this.#workspaceKey,
+          this.#digestPort,
+          workspace.graph_revision,
+        );
     const state = {
       committed: mapWorkspaceSummary(workspace),
       completeness: mapWorkspaceCompleteness(workspace),
       freshness: mapWorkspaceFreshness(workspace),
-      lastJob: terminalJobs.at(-1) ?? null,
+      lastJob,
     };
     validateBootstrapState(
       state,
@@ -1415,7 +1467,7 @@ interface JobRow {
   state: "cancelled" | "failed" | "partial" | "succeeded";
 }
 
-/** 同一 workspace 的全部 Job 私有列与 rowid，用于事务前后集合级比较。 */
+/** 单个 Job 的完整私有列与 rowid，用于目标行后置校验。 */
 interface JobEvidenceRow {
   base_graph_revision: number | null;
   completed_at: string | null;
@@ -1492,11 +1544,13 @@ interface PersistedGraphCounts {
   unknownOwnershipCount: number;
 }
 
-/** 按持久插入顺序读取并完整校验当前 workspace 的全部 terminal Job。 */
-function readStoredTerminalJobs(
+/** 打开边界以 O(1) 内存流式校验全部历史 Job，避免长期使用时物化整个表。 */
+function validateStoredJobHistory(
   database: Database.Database,
+  digestPort: CanonicalDigestPort | undefined,
   workspaceKey: string,
-): StoredIndexJob[] {
+  graphRevision: number | null,
+): void {
   const rows = database.prepare(`
     SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id,
            base_graph_revision, result_graph_revision, read_set_json, patch_digest,
@@ -1504,15 +1558,64 @@ function readStoredTerminalJobs(
     FROM jobs
     WHERE workspace_key = ? AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
     ORDER BY rowid
-  `).all(workspaceKey) as JobRow[];
-  rows.forEach(validatePersistedSucceededAttempt);
-  const jobs = rows.map(mapJob);
-  jobs.forEach(validateStoredTerminalJob);
-  return jobs;
+  `).iterate(workspaceKey) as IterableIterator<JobRow>;
+  for (const row of rows) {
+    mapValidatedTerminalJob(row, workspaceKey, digestPort, graphRevision);
+  }
 }
 
-/** 仅 migration 明确标记的 schema v1 Job 可缺少证据，其余成功 attempt 必须完整绑定。 */
-function validatePersistedSucceededAttempt(row: JobRow): void {
+/** 只读取公开状态所需的最后 terminal Job，历史完整性由打开边界流式校验。 */
+function readLatestTerminalJobRow(
+  database: Database.Database,
+  workspaceKey: string,
+): JobRow | undefined {
+  return database.prepare(`
+    SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id,
+           base_graph_revision, result_graph_revision, read_set_json, patch_digest,
+           legacy_schema_version
+    FROM jobs
+    WHERE workspace_key = ? AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
+    ORDER BY rowid DESC
+    LIMIT 1
+  `).get(workspaceKey) as JobRow | undefined;
+}
+
+/** 按持久 rowid 读取最新 succeeded；毫秒时间相等不影响确定性绑定。 */
+function readLatestSucceededJobRow(
+  database: Database.Database,
+  workspaceKey: string,
+): JobRow | undefined {
+  return database.prepare(`
+    SELECT id, kind, state, requested_at, started_at, completed_at, error_code, error_log_id,
+           base_graph_revision, result_graph_revision, read_set_json, patch_digest,
+           legacy_schema_version
+    FROM jobs
+    WHERE workspace_key = ? AND state = 'succeeded'
+    ORDER BY rowid DESC
+    LIMIT 1
+  `).get(workspaceKey) as JobRow | undefined;
+}
+
+/** 校验并映射单个 terminal Job，供流式打开验证和 O(1) 状态恢复复用。 */
+function mapValidatedTerminalJob(
+  row: JobRow,
+  workspaceKey: string,
+  digestPort: CanonicalDigestPort | undefined,
+  graphRevision: number | null,
+): StoredIndexJob {
+  validatePersistedSucceededAttempt(row, workspaceKey, digestPort);
+  const job = mapJob(row);
+  validateStoredTerminalJob(job);
+  validateTerminalJobAgainstWorkspace(job, graphRevision);
+  return job;
+}
+
+/** 仅 migration 明确标记的 schema v1 Job 可缺少证据，其余成功 attempt 必须完整可派生。 */
+function validatePersistedSucceededAttempt(
+  row: JobRow,
+  workspaceKey: string,
+  digestPort: CanonicalDigestPort | undefined,
+): void {
   if (row.state !== "succeeded") {
     return;
   }
@@ -1534,6 +1637,18 @@ function validatePersistedSucceededAttempt(row: JobRow): void {
     throw new Error("历史 succeeded Job 的 patch digest 不合法。");
   }
   const readSet = parsePersistedHierarchyReadSet(row.read_set_json!);
+  if (digestPort === undefined) {
+    throw new Error("历史 succeeded Job 的完整证据校验缺少规范 digest 实现。");
+  }
+  const derivedEvidence = deriveHierarchyEvidenceDigests(workspaceKey, readSet, digestPort);
+  if (
+    derivedEvidence.manifestDigest !== readSet.manifestDigest ||
+    derivedEvidence.inputDigest !== readSet.inputDigest ||
+    derivedEvidence.configDigest !== readSet.configDigest ||
+    derivedEvidence.patchDigest !== row.patch_digest
+  ) {
+    throw new Error("历史 succeeded Job 的 read-set 或 patch digest 无法从规范语义重新派生。");
+  }
   const resultRevision = row.result_graph_revision;
   const attemptBase = readSet.baseGraphRevision;
   const kindMatchesAttempt = row.kind === "initial-index"
@@ -2001,9 +2116,40 @@ function validateCommittedJobEvidence(
     workspaceKey,
     readSet.manifest.map((entry) => entry.path),
   );
-  const derivedManifestDigest = digestPort.digest(readSet.manifest);
-  const derivedInputDigest = digestPort.digest({ manifest: readSet.manifest });
-  const derivedConfigDigest = digestPort.digest({
+  const derivedEvidence = deriveHierarchyEvidenceDigests(workspaceKey, readSet, digestPort);
+  if (
+    derivedEvidence.manifestDigest !== readSet.manifestDigest ||
+    derivedEvidence.inputDigest !== readSet.inputDigest ||
+    derivedEvidence.configDigest !== readSet.configDigest ||
+    derivedEvidence.patchDigest !== workspace.patch_digest
+  ) {
+    throw new Error("持久提交的 read-set 或 patch digest 无法从规范语义重新派生。");
+  }
+  validatePersistedHierarchyTopology(database, workspaceKey, expectedGraph);
+}
+
+/** 从 succeeded Job 的完整 read-set 独立重建全部语义摘要，不依赖当前 workspace 行。 */
+function deriveHierarchyEvidenceDigests(
+  workspaceKey: string,
+  readSet: HierarchyReadSetV1,
+  digestPort: CanonicalDigestPort,
+): {
+  configDigest: string;
+  inputDigest: string;
+  manifestDigest: string;
+  patchDigest: string;
+} {
+  const expectedGraph = buildHierarchyGraph(
+    workspaceKey,
+    readSet.manifest.map((entry) => entry.path),
+  );
+  const targetNodes = [...expectedGraph.nodes]
+    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
+  const targetEdges = [...expectedGraph.edges]
+    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
+  const manifestDigest = digestPort.digest(readSet.manifest);
+  const inputDigest = digestPort.digest({ manifest: readSet.manifest });
+  const configDigest = digestPort.digest({
     ignore: {
       effectiveDigest: readSet.effectiveIgnoreSnapshot.effectiveDigest,
       version: readSet.effectiveIgnoreSnapshot.version,
@@ -2013,30 +2159,22 @@ function validateCommittedJobEvidence(
       version: HIERARCHY_PRODUCER_VERSION,
     },
   });
-  const targetNodes = [...expectedGraph.nodes]
-    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
-  const targetEdges = [...expectedGraph.edges]
-    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
-  const derivedPatchDigest = digestPort.digest({
-    configDigest: readSet.configDigest,
-    coverage: "complete",
-    edges: targetEdges,
-    inputDigest: readSet.inputDigest,
-    manifestDigest: readSet.manifestDigest,
-    nodes: targetNodes,
-    ownershipSliceId: hierarchyOwnershipSliceId(workspaceKey),
-    producerKind: HIERARCHY_PRODUCER_KIND,
-    producerVersion: HIERARCHY_PRODUCER_VERSION,
-  });
-  if (
-    derivedManifestDigest !== readSet.manifestDigest ||
-    derivedInputDigest !== readSet.inputDigest ||
-    derivedConfigDigest !== readSet.configDigest ||
-    derivedPatchDigest !== workspace.patch_digest
-  ) {
-    throw new Error("持久提交的 read-set 或 patch digest 无法从规范语义重新派生。");
-  }
-  validatePersistedHierarchyTopology(database, workspaceKey, expectedGraph);
+  return {
+    configDigest,
+    inputDigest,
+    manifestDigest,
+    patchDigest: digestPort.digest({
+      configDigest: readSet.configDigest,
+      coverage: "complete",
+      edges: targetEdges,
+      inputDigest: readSet.inputDigest,
+      manifestDigest: readSet.manifestDigest,
+      nodes: targetNodes,
+      ownershipSliceId: hierarchyOwnershipSliceId(workspaceKey),
+      producerKind: HIERARCHY_PRODUCER_KIND,
+      producerVersion: HIERARCHY_PRODUCER_VERSION,
+    }),
+  };
 }
 
 /** 用 committed Job 的规范 manifest 重建期望 hierarchy，拒绝同计数但拓扑或 ownership 被替换。 */

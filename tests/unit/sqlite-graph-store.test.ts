@@ -419,7 +419,7 @@ describe("sqlite graph store", () => {
     expect(binding.value).toBe("job-legacy-committed");
   });
 
-  it("rejects an ambiguous pre-binding database with colliding succeeded timestamps", async () => {
+  it("backfills the latest persisted succeeded Job when legacy timestamps collide", async () => {
     const databasePath = await createDatabasePath();
     const workspaceKey = "9".repeat(64);
     const graph = buildHierarchyGraph(workspaceKey, []);
@@ -454,8 +454,198 @@ describe("sqlite graph store", () => {
     rawDatabase.prepare("DELETE FROM meta WHERE key LIKE 'bootstrap-committed-job:%'").run();
     rawDatabase.close();
 
-    await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
-      .rejects.toThrow(/无法唯一恢复/u);
+    const reopened = await openSqliteGraphStore({ databasePath, workspaceKey });
+    try {
+      expect(reopened.readBootstrapState().lastJob).toMatchObject({
+        id: "job-legacy-second",
+        state: "succeeded",
+      });
+    } finally {
+      reopened.close();
+    }
+
+    const reboundDatabase = new RawSqlite(databasePath);
+    const rebound = reboundDatabase.prepare(`
+      SELECT value FROM meta WHERE key = ?
+    `).get(`bootstrap-committed-job:${workspaceKey}`) as { value: string };
+    reboundDatabase.close();
+    expect(rebound.value).toBe("job-legacy-second");
+  });
+
+  it("bounds retained terminal Job history while preserving the latest status", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ history: "bounded-terminal-jobs" });
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    try {
+      for (let index = 0; index < 140; index += 1) {
+        const id = `job-retained-${index.toString().padStart(3, "0")}`;
+        const requestedAt = new Date(Date.UTC(2026, 6, 25, 0, 0, 0, index * 3)).toISOString();
+        const startedAt = new Date(Date.UTC(2026, 6, 25, 0, 0, 0, index * 3 + 1)).toISOString();
+        const completedAt = new Date(Date.UTC(2026, 6, 25, 0, 0, 0, index * 3 + 2)).toISOString();
+        createJob(store, { id, kind: "initial-index", requestedAt });
+        store.markJobRunning(id, startedAt);
+        store.markJobFailed(id, completedAt, "GRAPH_SCAN_FAILED", `log-retained-${index}`);
+      }
+      expect(store.readBootstrapState().lastJob).toMatchObject({
+        id: "job-retained-139",
+        state: "failed",
+      });
+    } finally {
+      store.close();
+    }
+
+    const rawDatabase = new RawSqlite(databasePath);
+    const count = rawDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM jobs WHERE workspace_key = ?
+    `).get(workspaceKey) as { count: number };
+    rawDatabase.close();
+    expect(count.count).toBeLessThanOrEqual(16);
+  });
+
+  it("rejects a terminal transition when a trigger suppresses bounded-history pruning", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ history: "prune-trigger-ignored" });
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    try {
+      for (let index = 0; index < 16; index += 1) {
+        const id = `job-prune-guard-${index.toString().padStart(2, "0")}`;
+        const requestedAt = new Date(Date.UTC(2026, 6, 25, 1, 0, 0, index * 3)).toISOString();
+        const startedAt = new Date(Date.UTC(2026, 6, 25, 1, 0, 0, index * 3 + 1)).toISOString();
+        const completedAt = new Date(Date.UTC(2026, 6, 25, 1, 0, 0, index * 3 + 2)).toISOString();
+        createJob(store, { id, kind: "initial-index", requestedAt });
+        store.markJobRunning(id, startedAt);
+        store.markJobFailed(id, completedAt, "GRAPH_SCAN_FAILED", `log-prune-guard-${index}`);
+      }
+
+      const rawDatabase = new RawSqlite(databasePath);
+      rawDatabase.exec(`
+        CREATE TRIGGER suppress_terminal_history_prune
+        BEFORE DELETE ON jobs
+        BEGIN
+          SELECT RAISE(IGNORE);
+        END;
+      `);
+      rawDatabase.close();
+
+      createJob(store, {
+        id: "job-prune-guard-overflow",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T01:01:00.000Z",
+      });
+      store.markJobRunning("job-prune-guard-overflow", "2026-07-25T01:01:01.000Z");
+      expect(() => store.markJobFailed(
+        "job-prune-guard-overflow",
+        "2026-07-25T01:01:02.000Z",
+        "GRAPH_SCAN_FAILED",
+        "log-prune-guard-overflow",
+      )).toThrow(/历史裁剪未能收敛/u);
+
+      expect(store.readBootstrapState().lastJob).toMatchObject({
+        id: "job-prune-guard-15",
+        state: "failed",
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("prunes oversized pre-retention history before deriving the retained succeeded evidence", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ history: "oversized-pre-retention" });
+    let store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    createJob(store, {
+      id: "job-oversized-committed",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T02:00:00.000Z",
+    });
+    store.markJobRunning("job-oversized-committed", "2026-07-25T02:00:01.000Z");
+    commitHierarchy(store, {
+      completedAt: "2026-07-25T02:00:02.000Z",
+      graph: buildHierarchyGraph(workspaceKey, []),
+      jobId: "job-oversized-committed",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T02:00:02.000Z",
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    const evidence = rawDatabase.prepare(`
+      SELECT read_set_json, patch_digest
+      FROM jobs
+      WHERE id = 'job-oversized-committed'
+    `).get() as { patch_digest: string; read_set_json: string };
+    const insert = rawDatabase.prepare(`
+      INSERT INTO jobs(
+        id, workspace_key, kind, state, requested_at, started_at, completed_at,
+        base_graph_revision, result_graph_revision, read_set_json, patch_digest
+      ) VALUES (?, ?, 'initial-index', 'succeeded', ?, ?, ?, NULL, 1, ?, ?)
+    `);
+    let latestId = "job-oversized-committed";
+    let latestCompletedAt = "2026-07-25T02:00:02.000Z";
+    for (let index = 0; index < 40; index += 1) {
+      latestId = `job-oversized-history-${index.toString().padStart(2, "0")}`;
+      const requestedAt = new Date(Date.UTC(2026, 6, 25, 2, 1, 0, index * 3)).toISOString();
+      const startedAt = new Date(Date.UTC(2026, 6, 25, 2, 1, 0, index * 3 + 1)).toISOString();
+      latestCompletedAt = new Date(Date.UTC(2026, 6, 25, 2, 1, 0, index * 3 + 2)).toISOString();
+      insert.run(
+        latestId,
+        workspaceKey,
+        requestedAt,
+        startedAt,
+        latestCompletedAt,
+        evidence.read_set_json,
+        evidence.patch_digest,
+      );
+    }
+    rawDatabase.prepare(`
+      UPDATE meta SET value = ? WHERE key = ?
+    `).run(latestId, `bootstrap-committed-job:${workspaceKey}`);
+    rawDatabase.prepare(`
+      UPDATE workspace SET committed_at = ? WHERE workspace_key = ?
+    `).run(latestCompletedAt, workspaceKey);
+    rawDatabase.close();
+
+    let digestCalls = 0;
+    store = await openSqliteGraphStoreWithDigest({
+      databasePath,
+      digestPort: {
+        digest: (value) => {
+          digestCalls += 1;
+          return sha256CanonicalJson(value);
+        },
+      },
+      workspaceKey,
+    });
+    try {
+      expect(store.readBootstrapState().lastJob).toMatchObject({
+        id: latestId,
+        state: "succeeded",
+      });
+      expect(digestCalls).toBeLessThan(120);
+    } finally {
+      store.close();
+    }
+
+    const boundedDatabase = new RawSqlite(databasePath);
+    const count = boundedDatabase.prepare(`
+      SELECT COUNT(*) AS count
+      FROM jobs
+      WHERE workspace_key = ? AND state IN ('succeeded', 'failed', 'partial', 'cancelled')
+    `).get(workspaceKey) as { count: number };
+    const committed = boundedDatabase.prepare(`
+      SELECT COUNT(*) AS count
+      FROM jobs
+      WHERE workspace_key = ? AND id = ? AND state = 'succeeded'
+    `).get(workspaceKey, latestId) as { count: number };
+    boundedDatabase.close();
+    expect(count.count).toBe(16);
+    expect(committed.count).toBe(1);
   });
 
   it("reconciles interrupted running Jobs on the next startup", async () => {
@@ -2632,6 +2822,62 @@ describe("sqlite graph store", () => {
 
     await expect(openSqliteGraphStore({ databasePath, workspaceKey })).rejects.toThrow(
       /非 legacy succeeded/u,
+    );
+  });
+
+  it("rejects a tampered patch digest on a superseded succeeded Job", async () => {
+    const databasePath = await createDatabasePath();
+    const workspaceKey = sha256CanonicalJson({ corruption: "historical-patch-digest" });
+    const firstGraph = buildHierarchyGraph(workspaceKey, ["src/first.ts"]);
+    const secondGraph = buildHierarchyGraph(workspaceKey, ["src/second.ts"]);
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    createJob(store, {
+      id: "job-historical-digest-first",
+      kind: "initial-index",
+      requestedAt: "2026-07-25T00:00:00.000Z",
+    });
+    store.markJobRunning("job-historical-digest-first", "2026-07-25T00:00:01.000Z");
+    commitHierarchy(store, {
+      completedAt: "2026-07-25T00:00:02.000Z",
+      graph: firstGraph,
+      jobId: "job-historical-digest-first",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: firstGraph.edges.length,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        indexedFileCount: 1,
+        nodeCount: firstGraph.nodes.length,
+      },
+    });
+    createJob(store, {
+      id: "job-historical-digest-current",
+      kind: "rebuild",
+      requestedAt: "2026-07-25T00:00:03.000Z",
+    });
+    store.markJobRunning("job-historical-digest-current", "2026-07-25T00:00:04.000Z");
+    commitHierarchy(store, {
+      completedAt: "2026-07-25T00:00:05.000Z",
+      graph: secondGraph,
+      jobId: "job-historical-digest-current",
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: secondGraph.edges.length,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:05.000Z",
+        indexedFileCount: 1,
+        nodeCount: secondGraph.nodes.length,
+      },
+    });
+    store.close();
+
+    const rawDatabase = new RawSqlite(databasePath);
+    rawDatabase.prepare("UPDATE jobs SET patch_digest = ? WHERE id = ?")
+      .run("0".repeat(64), "job-historical-digest-first");
+    rawDatabase.close();
+
+    await expect(openSqliteGraphStore({ databasePath, workspaceKey })).rejects.toThrow(
+      /历史 succeeded Job.*digest|规范语义重新派生/u,
     );
   });
 

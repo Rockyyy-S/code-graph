@@ -84,8 +84,8 @@ const CHILD_CLEANUP_TIMEOUT_MS =
 const PARENT_CANCEL_MESSAGE = { type: "codegraph/cancel-startup" } as const;
 const CHILD_READY_MESSAGE_TYPE = "codegraph/ready";
 
-/** 默认启动界限覆盖 SQLite busy timeout、runtime 屏障与 IPC 传输余量。 */
-export const DEFAULT_SERVICE_START_TIMEOUT_MS = 10_000;
+/** 默认启动界限覆盖单次 512 MiB 有界 read-set 复核、SQLite 与 IPC 传输余量。 */
+export const DEFAULT_SERVICE_START_TIMEOUT_MS = 120_000;
 
 const defaultSpawnProcess: SpawnProcess = (command, args, options) =>
   spawn(command, [...args], options);

@@ -36,7 +36,10 @@ import { connectFirstOrStart, type ServiceDiscoveryRecord } from "./discovery.js
 import { createWorkspacePaths } from "./endpoint.js";
 import { createServiceClientError, ServiceClientError } from "./errors.js";
 import { createBoundedJsonRpcInput } from "./bounded-json-rpc-input.js";
-import type { GraphServiceLauncher } from "./launcher.js";
+import {
+  DEFAULT_SERVICE_START_TIMEOUT_MS as LAUNCHER_START_TIMEOUT_MS,
+  type GraphServiceLauncher,
+} from "./launcher.js";
 import {
   deriveWorkspaceIdentity,
   type WorkspaceIdentityOptions,
@@ -46,8 +49,8 @@ import {
 /** 默认 RPC 界限严格覆盖 SQLite 5 秒 busy timeout 与 IPC 传输余量。 */
 export const DEFAULT_SERVICE_REQUEST_TIMEOUT_MS = 10_000;
 
-/** 默认服务启动界限覆盖身份、发现、runtime/store 屏障与传输余量。 */
-export const DEFAULT_SERVICE_START_TIMEOUT_MS = 10_000;
+/** 连接发现与 launcher 共享同一绝对启动预算，禁止内外层默认值漂移。 */
+export const DEFAULT_SERVICE_START_TIMEOUT_MS = LAUNCHER_START_TIMEOUT_MS;
 
 /** 宿主显式提供的 Workspace Trust 门禁。 */
 export interface WorkspaceTrustGate {
