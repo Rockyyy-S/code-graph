@@ -19,9 +19,11 @@ export interface SpawnedProcess {
   kill: (signal?: NodeJS.Signals) => boolean;
   on: {
     (event: "error", listener: (error: Error) => void): SpawnedProcess;
+    (event: "message", listener: (message: unknown) => void): SpawnedProcess;
   };
   off: {
     (event: "error", listener: (error: Error) => void): SpawnedProcess;
+    (event: "message", listener: (message: unknown) => void): SpawnedProcess;
     (event: "spawn", listener: () => void): SpawnedProcess;
   };
   once: {
@@ -52,9 +54,19 @@ export type SpawnProcess = (
   },
 ) => SpawnedProcess;
 
+/** 只在受信任 launcher 与 graph-service 子进程之间传递的私有启动对象。 */
+interface GraphServiceLaunchConfig {
+  indexingRoot: string;
+  paths: WorkspacePaths;
+}
+
 /** service-client 使用的按需启动器接口。 */
 export interface GraphServiceLauncher {
-  start: (paths: WorkspacePaths, timeoutMs?: number, signal?: AbortSignal) => Promise<void>;
+  start: (
+    config: GraphServiceLaunchConfig,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ) => Promise<void>;
 }
 
 /** 启动监控的可测试依赖。 */
@@ -70,6 +82,10 @@ const CHILD_STDERR_DRAIN_MS = 250;
 const CHILD_CLEANUP_TIMEOUT_MS =
   CHILD_FORCE_TERMINATION_MS + CHILD_GRACEFUL_SHUTDOWN_MS + CHILD_FORCE_TERMINATION_MS;
 const PARENT_CANCEL_MESSAGE = { type: "codegraph/cancel-startup" } as const;
+const CHILD_READY_MESSAGE_TYPE = "codegraph/ready";
+
+/** 默认启动界限覆盖单次 512 MiB 有界 read-set 复核、SQLite 与 IPC 传输余量。 */
+export const DEFAULT_SERVICE_START_TIMEOUT_MS = 120_000;
 
 const defaultSpawnProcess: SpawnProcess = (command, args, options) =>
   spawn(command, [...args], options);
@@ -90,8 +106,9 @@ export function createGraphServiceProcessLauncher(
   );
   const pendingCleanups = new Map<string, Set<PendingChildCleanup>>();
   return {
-    start: async (paths, timeoutMs, signal) => {
-      const boundedTimeoutMs = normalizeTimeout(timeoutMs ?? 5_000);
+    start: async (config, timeoutMs, signal) => {
+      const { paths } = config;
+      const boundedTimeoutMs = normalizeTimeout(timeoutMs ?? DEFAULT_SERVICE_START_TIMEOUT_MS);
       const deadline = Date.now() + boundedTimeoutMs;
       const cleanupKey = paths.workspaceDirectory;
       await reconcilePendingChildCleanups(pendingCleanups, cleanupKey, deadline);
@@ -102,24 +119,21 @@ export function createGraphServiceProcessLauncher(
         detached: true,
         env: {
           ...process.env,
-          CODEGRAPH_SERVICE_CONFIG: JSON.stringify(paths),
+          CODEGRAPH_SERVICE_CONFIG: JSON.stringify(config),
         },
         shell: false,
         stdio: ["ignore", "ignore", "pipe", "ipc"],
         windowsHide: true,
       });
       const closeMonitor = createChildCloseMonitor(child);
+      const readyMonitor = createChildReadyMonitor(child);
       const readStderr = captureStartupStderr(child);
-      const spawnOutcome = await waitForChildSpawn(child, closeMonitor, deadline, signal);
-      if (spawnOutcome === "exited") {
-        throw await readStartupFailureAfterExit(child, closeMonitor, readStderr, deadline);
-      }
-      if (spawnOutcome === "failed") {
-        child.stderr?.destroy();
-        disconnectControlChannel(child);
-        throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
-      }
-      if (spawnOutcome === "cancelled") {
+      let childCleanupTracked = false;
+      const startChildCleanup = (): void => {
+        if (childCleanupTracked) {
+          return;
+        }
+        childCleanupTracked = true;
         trackChildCleanup(
           pendingCleanups,
           cleanupKey,
@@ -129,10 +143,22 @@ export function createGraphServiceProcessLauncher(
             Date.now() + cleanupTimeoutMs,
           ),
         );
-        throw createServiceClientError("SERVICE_START_TIMEOUT");
-      }
-      child.unref();
+      };
       try {
+        const spawnOutcome = await waitForChildSpawn(child, closeMonitor, deadline, signal);
+        if (spawnOutcome === "exited") {
+          throw await readStartupFailureAfterExit(child, closeMonitor, readStderr, deadline);
+        }
+        if (spawnOutcome === "failed") {
+          child.stderr?.destroy();
+          disconnectControlChannel(child);
+          throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
+        }
+        if (spawnOutcome === "cancelled") {
+          startChildCleanup();
+          throw createServiceClientError("SERVICE_START_TIMEOUT");
+        }
+        child.unref();
         await waitForServicePublication(
           child,
           paths.metadataPath,
@@ -141,30 +167,18 @@ export function createGraphServiceProcessLauncher(
           dependencies.readPublishedPid ?? readPublishedPid,
           closeMonitor,
           readStderr,
-          () => trackChildCleanup(
-            pendingCleanups,
-            cleanupKey,
-            terminateAndReapChild(
-              child,
-              closeMonitor,
-              Date.now() + cleanupTimeoutMs,
-            ),
-          ),
+          readyMonitor,
+          startChildCleanup,
         );
       } catch (error) {
         if (!closeMonitor.exited &&
+            !childCleanupTracked &&
             (hasProtocolCode(error, "SERVICE_START_TIMEOUT") || closeMonitor.error !== null)) {
-          trackChildCleanup(
-            pendingCleanups,
-            cleanupKey,
-            terminateAndReapChild(
-              child,
-              closeMonitor,
-              Date.now() + cleanupTimeoutMs,
-            ),
-          );
+          startChildCleanup();
         }
         throw error;
+      } finally {
+        readyMonitor.dispose();
       }
     },
   };
@@ -179,16 +193,27 @@ async function waitForServicePublication(
   readPid: (metadataPath: string) => Promise<number | null> = readPublishedPid,
   closeMonitor: ChildCloseMonitor = createChildCloseMonitor(child),
   readStderr: () => string = captureStartupStderr(child),
+  readyMonitor: ChildReadyMonitor = createChildReadyMonitor(child),
   trackLosingChildCleanup: () => void = () => undefined,
 ): Promise<void> {
+  let childMetadataPublished = false;
   while (Date.now() <= deadline) {
-    const observation = await Promise.race([
+    const observations: Array<Promise<
+      | { kind: "publication"; publication: Awaited<ReturnType<typeof probePublishedPid>> }
+      | { error: Error; kind: "error" }
+      | { kind: "exit" }
+      | { kind: "ready" }
+    >> = [
       probePublishedPid(metadataPath, deadline, signal, readPid).then(
         (publication) => ({ kind: "publication", publication }) as const,
       ),
       closeMonitor.errorPromise.then((error) => ({ error, kind: "error" }) as const),
       closeMonitor.exitPromise.then(() => ({ kind: "exit" }) as const),
-    ]);
+    ];
+    if (!readyMonitor.ready) {
+      observations.push(readyMonitor.promise.then(() => ({ kind: "ready" }) as const));
+    }
+    const observation = await Promise.race(observations);
     if (observation.kind === "exit") {
       throw await readStartupFailureAfterExit(
         child,
@@ -200,6 +225,14 @@ async function waitForServicePublication(
     if (observation.kind === "error") {
       throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
     }
+    if (observation.kind === "ready") {
+      if (childMetadataPublished && !closeMonitor.exited) {
+        child.stderr?.destroy();
+        disconnectControlChannel(child);
+        return;
+      }
+      continue;
+    }
     const publication = observation.publication;
     if (publication.kind === "cancelled") {
       throw createServiceClientError("SERVICE_START_TIMEOUT");
@@ -209,9 +242,12 @@ async function waitForServicePublication(
         trackLosingChildCleanup();
         return;
       }
-      child.stderr?.destroy();
-      disconnectControlChannel(child);
-      return;
+      childMetadataPublished = true;
+      if (readyMonitor.ready && !closeMonitor.exited) {
+        child.stderr?.destroy();
+        disconnectControlChannel(child);
+        return;
+      }
     }
     const remainingMs = Math.max(0, deadline - Date.now());
     if (remainingMs > 0) {
@@ -438,6 +474,43 @@ interface ChildCloseMonitor {
   errorPromise: Promise<Error>;
   exitPromise: Promise<void>;
   exited: boolean;
+}
+
+/** 子进程仅在 runtime/store/handshake 全部完成后发送的私有 ready 屏障。 */
+interface ChildReadyMonitor {
+  dispose: () => void;
+  promise: Promise<void>;
+  ready: boolean;
+}
+
+/** 从 spawn 返回起监听一次可信父子 IPC ready 消息。 */
+function createChildReadyMonitor(child: SpawnedProcess): ChildReadyMonitor {
+  let resolveReady: (() => void) | undefined;
+  const monitor: ChildReadyMonitor = {
+    dispose: () => child.off("message", onMessage),
+    promise: new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    }),
+    ready: false,
+  };
+  const onMessage = (message: unknown): void => {
+    if (
+      !monitor.ready &&
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === CHILD_READY_MESSAGE_TYPE &&
+      "pid" in message &&
+      typeof message.pid === "number" &&
+      Number.isInteger(message.pid) &&
+      message.pid === child.pid
+    ) {
+      monitor.ready = true;
+      resolveReady?.();
+    }
+  };
+  child.on("message", onMessage);
+  return monitor;
 }
 
 /** 在等待 spawn 事件前注册 exit/close 监听。 */

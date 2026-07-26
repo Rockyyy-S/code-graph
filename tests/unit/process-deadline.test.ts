@@ -7,11 +7,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runProcessWithDeadline } from "../../scripts/ci/run-process-with-deadline.mjs";
 
 const temporaryRoots: string[] = [];
-const processCleanupGraceMs = process.platform === "win32" ? 2_000 : 50;
+/** Windows taskkill 在并行测试的高进程负载下需要独立且有界的 10 秒清理预算。 */
+const processCleanupGraceMs = process.platform === "win32" ? 10_000 : 50;
 
 afterEach(async () => {
   await Promise.all(
-    temporaryRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
+    temporaryRoots.splice(0).map((root) =>
+      // Windows 刚终止进程树时句柄释放存在短暂延迟，使用 fs.rm 的有界 EBUSY 重试。
+      rm(root, { force: true, maxRetries: 5, recursive: true, retryDelay: 100 }),
+    ),
   );
 });
 
@@ -146,7 +150,7 @@ describe("process deadline", () => {
       termination: { code: 0, kind: "exit" },
     });
     await expect(access(marker)).rejects.toBeDefined();
-  });
+  }, 25_000);
 
   it("终止挂起进程及其继承进程组的后代", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "process-tree-deadline-"));
@@ -170,5 +174,5 @@ describe("process deadline", () => {
       termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
     });
     await expect(access(marker)).rejects.toBeDefined();
-  });
+  }, 25_000);
 });

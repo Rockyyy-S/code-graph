@@ -25,10 +25,16 @@ import {
 } from "../../packages/service-client/src/connection.js";
 import { calculateMetadataIntegrity } from "../../packages/service-client/src/discovery.js";
 import { createWorkspacePaths } from "../../packages/service-client/src/endpoint.js";
+import { deriveWorkspaceIdentity } from "../../packages/service-client/src/workspace-identity.js";
 
 const roots: string[] = [];
 const clients: GraphServiceConnection[] = [];
 let runtime: OwnedServiceInstance | null = null;
+
+interface TestLaunchConfig {
+  indexingRoot: string;
+  paths: ServiceInstancePaths;
+}
 
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()));
@@ -42,8 +48,8 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-client-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-client-cache-"));
     roots.push(indexingRoot, cacheRoot);
-    const start = vi.fn(async (paths: ServiceInstancePaths) => {
-      runtime = await startGraphService({ paths });
+    const start = vi.fn(async (config: TestLaunchConfig) => {
+      runtime = await startGraphService(config);
     });
     const common = {
       clientVersion: "0.0.0-test",
@@ -87,6 +93,194 @@ describe("shared service-client control API", () => {
         trust: { isTrusted: true },
       }, cacheRoot),
     ).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+  });
+
+  it("fails closed when an unbound legacy workspace cache still exists", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-legacy-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-legacy-cache-"));
+    roots.push(indexingRoot, cacheRoot);
+    const identity = await deriveWorkspaceIdentity(indexingRoot);
+    const legacyPaths = createWorkspacePaths(identity.workspaceKey, {
+      cacheRoot,
+      platform: process.platform,
+    });
+    await mkdir(legacyPaths.workspaceDirectory, { recursive: true });
+    await writeFile(path.join(legacyPaths.workspaceDirectory, "graph.sqlite"), "legacy", "utf8");
+    const start = vi.fn(async () => undefined);
+
+    await expect(connectToGraphServiceWithCacheRootForTests({
+      clientVersion: "0.0.0-test",
+      indexingRoot,
+      launcher: { start },
+      startTimeoutMs: 1_000,
+      trust: { isTrusted: true },
+    }, cacheRoot)).rejects.toMatchObject({
+      code: "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
+      retryable: false,
+      suggestedAction: expect.stringContaining("备份旧缓存"),
+    });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("normalizes a previous v1 initialize status with missing Job fields", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-previous-v1-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "cgpv1-"));
+    roots.push(indexingRoot, cacheRoot);
+    const workspaceKey = "4".repeat(64);
+    const paths = createWorkspacePaths(workspaceKey, {
+      cacheRoot,
+      platform: process.platform,
+    });
+    await mkdir(paths.workspaceDirectory, { recursive: true });
+    const serviceInstanceId = "previous-v1-instance";
+    const statusEpoch = "previous-v1-epoch";
+    const previousStatus = createAbsentStatus(serviceInstanceId, statusEpoch) as Record<string, unknown>;
+    delete previousStatus.currentIndexJob;
+    delete previousStatus.graphRevision;
+    delete previousStatus.lastIndexJob;
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      consumeJsonRpcMessages(socket, (message) => {
+        if (message.method === "initialize") {
+          socket.write(encodeJsonRpcMessage({
+            id: message.id,
+            jsonrpc: "2.0",
+            result: {
+              capabilities: SERVICE_CAPABILITIES.filter(
+                (capability) => capability !== "job/start",
+              ),
+              cliSchemaVersion: CLI_SCHEMA_VERSION,
+              graphSchemaVersion: GRAPH_SCHEMA_VERSION,
+              protocolVersion: PROTOCOL_VERSION,
+              rulesSchemaVersion: RULES_SCHEMA_VERSION,
+              serviceStatus: previousStatus,
+              serviceVersion: "0.0.0-test",
+            },
+          }));
+        }
+      });
+    });
+    await listen(server, paths.endpoint);
+    let client: GraphServiceConnection | null = null;
+    try {
+      client = await openServiceConnectionForTests(
+        {
+          metadata: {
+            createdAt: new Date().toISOString(),
+            endpoint: paths.endpoint,
+            endpointKind: paths.endpointKind,
+            integrity: "test-only",
+            pid: process.pid,
+            serviceInstanceId,
+            statusEpoch,
+            version: 1,
+            workspaceKey,
+          },
+          sessionToken: "test-session-token",
+        },
+        {
+          identity: { kind: "local", uri: "file:///previous-v1", version: 1 },
+          indexingRoot,
+          physicalRootKey: workspaceKey,
+          workspaceKey,
+        },
+        "0.0.0-test",
+      );
+      expect(client.initializeResult.serviceStatus).toMatchObject({
+        currentIndexJob: null,
+        lastIndexJob: null,
+      });
+    } finally {
+      await client?.close();
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await closeServer(server);
+    }
+  });
+
+  it("closes the connection when startRebuild times out", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-rebuild-timeout-root-"));
+    const cacheRoot = await mkdtemp(path.join(tmpdir(), "cgrt-"));
+    roots.push(indexingRoot, cacheRoot);
+    const workspaceKey = "3".repeat(64);
+    const paths = createWorkspacePaths(workspaceKey, {
+      cacheRoot,
+      platform: process.platform,
+    });
+    await mkdir(paths.workspaceDirectory, { recursive: true });
+    const serviceInstanceId = "rebuild-timeout-instance";
+    const statusEpoch = "rebuild-timeout-epoch";
+    const sockets = new Set<net.Socket>();
+    let connectionClosed = false;
+    const server = net.createServer((socket) => {
+      sockets.add(socket);
+      socket.once("close", () => {
+        connectionClosed = true;
+        sockets.delete(socket);
+      });
+      consumeJsonRpcMessages(socket, (message) => {
+        if (message.method === "initialize") {
+          socket.write(encodeJsonRpcMessage({
+            id: message.id,
+            jsonrpc: "2.0",
+            result: {
+              capabilities: SERVICE_CAPABILITIES,
+              cliSchemaVersion: CLI_SCHEMA_VERSION,
+              graphSchemaVersion: GRAPH_SCHEMA_VERSION,
+              protocolVersion: PROTOCOL_VERSION,
+              rulesSchemaVersion: RULES_SCHEMA_VERSION,
+              serviceStatus: createAbsentStatus(serviceInstanceId, statusEpoch),
+              serviceVersion: "0.0.0-test",
+            },
+          }));
+        }
+        /** job/start 故意不响应，用于验证客户端超时后的连接回收。 */
+      });
+    });
+    await listen(server, paths.endpoint);
+    let client: GraphServiceConnection | null = null;
+    try {
+      client = await openServiceConnectionForTests(
+        {
+          metadata: {
+            createdAt: new Date().toISOString(),
+            endpoint: paths.endpoint,
+            endpointKind: paths.endpointKind,
+            integrity: "test-only",
+            pid: process.pid,
+            serviceInstanceId,
+            statusEpoch,
+            version: 1,
+            workspaceKey,
+          },
+          sessionToken: "test-session-token",
+        },
+        {
+          identity: { kind: "local", uri: "file:///rebuild-timeout", version: 1 },
+          indexingRoot,
+          physicalRootKey: workspaceKey,
+          workspaceKey,
+        },
+        "0.0.0-test",
+        1_000,
+        /** 并行 contract 负载可能阻塞 25ms 定时器；本用例只验证超时后的连接回收。 */
+        250,
+      );
+      await expect(client.startRebuild()).rejects.toMatchObject({
+        code: "SERVICE_START_TIMEOUT",
+      });
+      await vi.waitFor(() => expect(connectionClosed).toBe(true));
+      await expect(client.status()).rejects.toMatchObject({ code: "SERVICE_START_TIMEOUT" });
+    } finally {
+      await client?.close();
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await closeServer(server);
+    }
   });
 
   it.each([
@@ -154,6 +348,7 @@ describe("shared service-client control API", () => {
           {
             identity: { kind: "local", uri: "file:///invalid-rpc", version: 1 },
             indexingRoot,
+            physicalRootKey: workspaceKey,
             workspaceKey,
           },
           "0.0.0-test",
@@ -198,7 +393,9 @@ describe("shared service-client control API", () => {
             committed: null,
             completeness: "empty",
             configRevision: 1,
+            currentIndexJob: null,
             freshness: null,
+            lastIndexJob: null,
             lifecycle: "running",
             serviceInstanceId: "rpc-version-instance",
             serviceStatusRevision: 1,
@@ -233,6 +430,7 @@ describe("shared service-client control API", () => {
           {
             identity: { kind: "local", uri: "file:///rpc-version", version: 1 },
             indexingRoot,
+            physicalRootKey: workspaceKey,
             workspaceKey,
           },
           "0.0.0-test",
@@ -286,6 +484,7 @@ describe("shared service-client control API", () => {
         {
           identity: { kind: "local", uri: "file:///partial-rpc", version: 1 },
           indexingRoot,
+          physicalRootKey: workspaceKey,
           workspaceKey,
         },
         "0.0.0-test",
@@ -389,6 +588,7 @@ describe("shared service-client control API", () => {
         {
           identity: { kind: "local", uri: "file:///concurrent-status", version: 1 },
           indexingRoot,
+          physicalRootKey: workspaceKey,
           workspaceKey,
         },
         "0.0.0-test",
@@ -515,7 +715,7 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-stale-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-stale-cache-"));
     roots.push(indexingRoot, cacheRoot);
-    const start = vi.fn(async (paths: ServiceInstancePaths) => {
+    const start = vi.fn(async ({ paths }: TestLaunchConfig) => {
       await mkdir(paths.workspaceDirectory, { recursive: true });
       await writeFile(paths.tokenPath, randomBytes(32), { flag: "wx", mode: 0o600 });
     });
@@ -537,8 +737,9 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-identity-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-identity-cache-"));
     roots.push(indexingRoot, cacheRoot);
-    const start = vi.fn(async (paths: ServiceInstancePaths) => {
-      runtime = await startGraphService({ paths });
+    const start = vi.fn(async (config: TestLaunchConfig) => {
+      const { paths } = config;
+      runtime = await startGraphService(config);
       const metadata = JSON.parse(
         await readFile(paths.metadataPath, "utf8"),
       ) as ServiceMetadataV1;
@@ -651,7 +852,10 @@ function createAbsentStatus(serviceInstanceId: string, statusEpoch: string) {
     committed: null,
     completeness: "empty" as const,
     configRevision: 1,
+    currentIndexJob: null,
     freshness: null,
+    graphRevision: null,
+    lastIndexJob: null,
     lifecycle: "running" as const,
     serviceInstanceId,
     serviceStatusRevision: 1,

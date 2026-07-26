@@ -1,17 +1,24 @@
 import { randomBytes } from "node:crypto";
+import { Ajv2020 } from "../../packages/contracts/node_modules/ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import {
   CLI_SCHEMA_VERSION,
+  createErrorV1,
   GRAPH_SCHEMA_VERSION,
   PROTOCOL_VERSION,
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
+  jobStartResultV1Schema,
+  serviceStatusV1Schema,
   validateErrorV1,
   validateInitializeRequest,
   validateInitializeResult,
   validateInitializeResultCompatible,
+  validateJobStartResult,
+  validateJobStartResultCompatible,
   validateServiceControlRequest,
   validateServiceStatusV1,
+  validateServiceStatusV1Compatible,
   validateShutdownResult,
   validateShutdownResultCompatible,
 } from "../../packages/contracts/src/index.js";
@@ -40,7 +47,10 @@ function createAbsentStatus() {
     committed: null,
     completeness: "empty" as const,
     configRevision: 1,
+    currentIndexJob: null,
     freshness: null,
+    graphRevision: null,
+    lastIndexJob: null,
     lifecycle: "running" as const,
     serviceInstanceId: "instance-test",
     serviceStatusRevision: 1,
@@ -63,6 +73,7 @@ describe("service control contract", () => {
     expect(RULES_SCHEMA_VERSION).toBe(1);
     expect(CLI_SCHEMA_VERSION).toBe(1);
     expect(SERVICE_CAPABILITIES).toEqual([
+      "job/start",
       "service/shutdown",
       "service/status",
     ]);
@@ -98,6 +109,31 @@ describe("service control contract", () => {
     ).toBe(false);
   });
 
+  it("validates nested failed Job errors against the stable registry", () => {
+    const status = {
+      ...createAbsentStatus(),
+      lastIndexJob: {
+        baseGraphRevision: null,
+        completedAt: "2026-07-25T00:00:02.000Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-nested-error"),
+        id: "job-failed",
+        kind: "initial-index" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        startedAt: "2026-07-25T00:00:01.000Z",
+        state: "failed" as const,
+      },
+    };
+    expect(validateServiceStatusV1(status)).toBe(true);
+    expect(validateServiceStatusV1({
+      ...status,
+      lastIndexJob: {
+        ...status.lastIndexJob,
+        error: { ...status.lastIndexJob.error, category: "storage" },
+      },
+    })).toBe(false);
+  });
+
   it("uses strict canonical responses and compatible client parsing", () => {
     const result = {
       capabilities: SERVICE_CAPABILITIES,
@@ -118,6 +154,24 @@ describe("service control contract", () => {
         serviceStatus: { ...result.serviceStatus, futureNestedField: true },
       }),
     ).toBe(true);
+    expect(validateInitializeResultCompatible({
+      ...result,
+      serviceStatus: {
+        ...result.serviceStatus,
+        lastIndexJob: {
+          completedAt: "2026-07-25T00:00:02.000Z",
+          error: {
+            ...createErrorV1("GRAPH_SCAN_FAILED", "log-initialize-error"),
+            retryable: false,
+          },
+          id: "job-invalid-error",
+          kind: "initial-index",
+          requestedAt: "2026-07-25T00:00:00.000Z",
+          startedAt: "2026-07-25T00:00:01.000Z",
+          state: "failed",
+        },
+      },
+    })).toBe(false);
     expect(validateInitializeResultCompatible({ ...result, serviceVersion: undefined })).toBe(
       false,
     );
@@ -133,6 +187,363 @@ describe("service control contract", () => {
         capabilities: [SERVICE_CAPABILITIES[0]],
       }),
     ).toBe(true);
+
+    /** Story 1.2 的合法 v1 状态尚未包含索引 Job 字段，同版本兼容解析必须补默认值而非拒绝。 */
+    const previousV1Status: Record<string, unknown> = { ...result.serviceStatus };
+    delete previousV1Status.currentIndexJob;
+    delete previousV1Status.graphRevision;
+    delete previousV1Status.lastIndexJob;
+    expect(validateInitializeResultCompatible({
+      ...result,
+      capabilities: SERVICE_CAPABILITIES.filter((capability) => capability !== "job/start"),
+      serviceStatus: previousV1Status,
+    })).toBe(true);
+    expect(validateInitializeResultCompatible({
+      ...result,
+      serviceStatus: previousV1Status,
+    })).toBe(false);
+  });
+
+  it("rejects impossible timestamps and hierarchy summaries", () => {
+    const status = createAbsentStatus();
+    expect(validateServiceStatusV1({
+      ...status,
+      lastIndexJob: {
+        baseGraphRevision: null,
+        completedAt: "2026-99-99T99:99:99Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-invalid-time"),
+        id: "job-invalid-time",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        startedAt: "2026-07-25T00:00:01.000Z",
+        state: "failed",
+      },
+    })).toBe(false);
+    const availableStatus = {
+      ...status,
+      availability: "available" as const,
+      committed: {
+        builtinRulesVersion: "builtin-ignore-v1" as const,
+        edgeCount: 0,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:01.000Z",
+        graphRevision: 1,
+        indexedFileCount: 0,
+        nodeCount: 1,
+      },
+      freshness: "current" as const,
+      graphRevision: 1,
+      lastIndexJob: {
+        baseGraphRevision: 1,
+        completedAt: "2026-07-25T00:00:03.000Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-null-result"),
+        id: "job-null-result",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:01.000Z",
+        resultGraphRevision: null,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "failed" as const,
+      },
+    };
+    expect(validateServiceStatusV1(availableStatus)).toBe(false);
+    expect(validateServiceStatusV1Compatible(availableStatus)).toBe(false);
+    const cleanAvailableStatus = {
+      ...availableStatus,
+      lastIndexJob: null,
+    };
+    expect(validateServiceStatusV1({
+      ...cleanAvailableStatus,
+      completeness: "partial",
+      freshness: "current",
+    })).toBe(false);
+    expect(validateServiceStatusV1Compatible({
+      ...cleanAvailableStatus,
+      completeness: "partial",
+      freshness: "current",
+    })).toBe(false);
+    const partialWithoutTerminalEvidence = {
+      ...cleanAvailableStatus,
+      completeness: "partial" as const,
+      freshness: "stale" as const,
+    };
+    expect(validateServiceStatusV1(partialWithoutTerminalEvidence)).toBe(false);
+    expect(validateServiceStatusV1Compatible(partialWithoutTerminalEvidence)).toBe(false);
+    const partialAfterSucceededJob = {
+      ...partialWithoutTerminalEvidence,
+      lastIndexJob: {
+        baseGraphRevision: 1,
+        completedAt: "2026-07-25T00:00:01.000Z",
+        id: "job-succeeded-with-partial-status",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: 1,
+        startedAt: "2026-07-25T00:00:00.500Z",
+        state: "succeeded" as const,
+      },
+    };
+    expect(validateServiceStatusV1(partialAfterSucceededJob)).toBe(false);
+    expect(validateServiceStatusV1Compatible(partialAfterSucceededJob)).toBe(false);
+    const partialJobWithoutPartialCompleteness = {
+      ...cleanAvailableStatus,
+      lastIndexJob: {
+        baseGraphRevision: 1,
+        completedAt: "2026-07-25T00:00:03.000Z",
+        id: "job-partial-with-complete-status",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:01.000Z",
+        resultGraphRevision: 1,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "partial" as const,
+      },
+    };
+    expect(validateServiceStatusV1(partialJobWithoutPartialCompleteness)).toBe(false);
+    expect(validateServiceStatusV1Compatible(partialJobWithoutPartialCompleteness)).toBe(false);
+    expect(validateServiceStatusV1({
+      ...cleanAvailableStatus,
+      currentIndexJob: {
+        baseGraphRevision: null,
+        id: "job-invalid-rebuild-base",
+        kind: "rebuild",
+        requestedAt: "2026-07-25T00:00:04.000Z",
+        resultGraphRevision: null,
+        state: "queued",
+      },
+    })).toBe(false);
+    expect(validateServiceStatusV1({
+      ...cleanAvailableStatus,
+      currentIndexJob: {
+        baseGraphRevision: 1,
+        id: "job-invalid-initial-base",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T00:00:04.000Z",
+        resultGraphRevision: null,
+        state: "queued",
+      },
+    })).toBe(false);
+    expect(validateServiceStatusV1({
+      ...cleanAvailableStatus,
+      currentIndexJob: {
+        baseGraphRevision: 1,
+        id: "job-valid-rebuild-base",
+        kind: "rebuild",
+        requestedAt: "2026-07-25T00:00:04.000Z",
+        resultGraphRevision: null,
+        state: "queued",
+      },
+    })).toBe(true);
+    const previousFailedJob = {
+      baseGraphRevision: 1,
+      completedAt: "2026-07-25T00:00:03.000Z",
+      error: createErrorV1("GRAPH_SCAN_FAILED", "log-previous-failed"),
+      id: "job-previous-failed",
+      kind: "rebuild" as const,
+      requestedAt: "2026-07-25T00:00:01.000Z",
+      resultGraphRevision: 1,
+      startedAt: "2026-07-25T00:00:02.000Z",
+      state: "failed" as const,
+    };
+    const invalidJobSequence = {
+      ...cleanAvailableStatus,
+      currentIndexJob: {
+        baseGraphRevision: 1,
+        id: "job-current-before-last",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:02.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+      lastIndexJob: previousFailedJob,
+    };
+    expect(validateServiceStatusV1(invalidJobSequence)).toBe(false);
+    expect(validateServiceStatusV1Compatible(invalidJobSequence)).toBe(false);
+    const reusedJobIdentity = {
+      ...invalidJobSequence,
+      currentIndexJob: {
+        ...invalidJobSequence.currentIndexJob,
+        id: previousFailedJob.id,
+        requestedAt: "2026-07-25T00:00:04.000Z",
+      },
+    };
+    expect(validateServiceStatusV1(reusedJobIdentity)).toBe(false);
+    expect(validateServiceStatusV1Compatible(reusedJobIdentity)).toBe(false);
+    for (const lastIndexJob of [
+      {
+        baseGraphRevision: 1,
+        completedAt: "2026-07-25T00:00:03.000Z",
+        id: "job-terminal-initial-with-base",
+        kind: "initial-index" as const,
+        requestedAt: "2026-07-25T00:00:01.000Z",
+        resultGraphRevision: 1,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "succeeded" as const,
+      },
+      {
+        baseGraphRevision: null,
+        completedAt: "2026-07-25T00:00:03.000Z",
+        id: "job-terminal-rebuild-without-base",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:01.000Z",
+        resultGraphRevision: 1,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "succeeded" as const,
+      },
+      {
+        baseGraphRevision: 2,
+        completedAt: "2026-07-25T00:00:03.000Z",
+        id: "job-terminal-base-after-result",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:01.000Z",
+        resultGraphRevision: 1,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "succeeded" as const,
+      },
+      {
+        baseGraphRevision: 2,
+        completedAt: "2026-07-25T00:00:03.000Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-terminal-base-after-current"),
+        id: "job-terminal-base-after-current",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:01.000Z",
+        resultGraphRevision: 2,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "failed" as const,
+      },
+    ]) {
+      const invalidTerminalStatus = { ...cleanAvailableStatus, lastIndexJob };
+      expect(validateServiceStatusV1(invalidTerminalStatus)).toBe(false);
+      expect(validateServiceStatusV1Compatible(invalidTerminalStatus)).toBe(false);
+    }
+    const impossibleInitialRevision = {
+      ...cleanAvailableStatus,
+      committed: {
+        ...cleanAvailableStatus.committed,
+        graphRevision: 2,
+      },
+      graphRevision: 2,
+      lastIndexJob: {
+        baseGraphRevision: null,
+        completedAt: "2026-07-25T00:00:01.000Z",
+        id: "job-initial-after-first-revision",
+        kind: "initial-index" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: 2,
+        startedAt: "2026-07-25T00:00:00.500Z",
+        state: "succeeded" as const,
+      },
+    };
+    expect(validateServiceStatusV1(impossibleInitialRevision)).toBe(false);
+    expect(validateServiceStatusV1Compatible(impossibleInitialRevision)).toBe(false);
+    for (const terminalState of [
+      { state: "cancelled" as const },
+      {
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-initial-after-commit"),
+        state: "failed" as const,
+      },
+      { state: "partial" as const },
+    ]) {
+      const impossibleInitialAfterCommit = {
+        ...cleanAvailableStatus,
+        lastIndexJob: {
+          ...terminalState,
+          baseGraphRevision: null,
+          completedAt: "2026-07-25T00:00:03.000Z",
+          id: `job-initial-${terminalState.state}-after-commit`,
+          kind: "initial-index" as const,
+          requestedAt: "2026-07-25T00:00:01.000Z",
+          resultGraphRevision: null,
+          startedAt: "2026-07-25T00:00:02.000Z",
+        },
+      };
+      expect(validateServiceStatusV1(impossibleInitialAfterCommit)).toBe(false);
+      expect(validateServiceStatusV1Compatible(impossibleInitialAfterCommit)).toBe(false);
+    }
+    expect(validateServiceStatusV1({
+      ...status,
+      availability: "available",
+      committed: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: 99,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-25T00:00:02.000Z",
+        graphRevision: 1,
+        indexedFileCount: 0,
+        nodeCount: 0,
+      },
+      freshness: "current",
+      graphRevision: 1,
+    })).toBe(false);
+    expect(validateJobStartResult({
+      accepted: true,
+      job: {
+        baseGraphRevision: null,
+        id: "job-invalid-time",
+        kind: "initial-index",
+        requestedAt: "2026-02-30T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued",
+      },
+    })).toBe(false);
+    for (const job of [
+      {
+        baseGraphRevision: 1,
+        id: "job-invalid-initial-base",
+        kind: "initial-index" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+      {
+        baseGraphRevision: null,
+        id: "job-invalid-rebuild-base",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+    ]) {
+      const invalidResult = { accepted: true as const, job };
+      expect(validateJobStartResult(invalidResult)).toBe(false);
+      expect(validateJobStartResultCompatible(invalidResult)).toBe(false);
+    }
+    for (const job of [
+      {
+        baseGraphRevision: 1,
+        id: "job-base-only",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        state: "queued" as const,
+      },
+      {
+        id: "job-result-only",
+        kind: "rebuild" as const,
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        resultGraphRevision: null,
+        state: "queued" as const,
+      },
+    ]) {
+      expect(validateJobStartResultCompatible({ accepted: true, job })).toBe(false);
+    }
+    expect(validateServiceStatusV1({
+      ...status,
+      lastIndexJob: {
+        baseGraphRevision: null,
+        completedAt: "2026-07-25T00:00:01.000Z",
+        error: createErrorV1("GRAPH_SCAN_FAILED", "log-reversed-time"),
+        id: "job-reversed-time",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T00:00:03.000Z",
+        resultGraphRevision: null,
+        startedAt: "2026-07-25T00:00:02.000Z",
+        state: "failed",
+      },
+    })).toBe(false);
+  });
+
+  it("keeps exported public schemas compilable by strict standard Ajv", () => {
+    const publicAjv = new Ajv2020({ strict: true });
+    expect(() => publicAjv.compile(serviceStatusV1Schema)).not.toThrow();
+    expect(() => publicAjv.compile(jobStartResultV1Schema)).not.toThrow();
   });
 
   it("validates empty control requests and canonical shutdown results", () => {

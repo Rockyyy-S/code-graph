@@ -60,7 +60,7 @@ async function expectRule(root: string, rule: string): Promise<void> {
 }
 
 describe("dependency boundary negative paths", () => {
-  it("allows only the architecture-approved Story 1.2 external dependencies", async () => {
+  it("allows only the architecture-approved Story 1.2 and 1.4 external dependencies", async () => {
     const root = await createRepository();
     await addWorkspace(
       root,
@@ -86,6 +86,17 @@ describe("dependency boundary negative paths", () => {
       { "vscode-jsonrpc": "9.0.1" },
       'import "vscode-jsonrpc";\n',
     );
+    await addWorkspace(
+      root,
+      "packages/adapters/store-sqlite",
+      "@codegraph/adapter-store-sqlite",
+      "adapter",
+      {
+        "@types/better-sqlite3": "7.6.13",
+        "better-sqlite3": "12.11.1",
+      },
+      'import "better-sqlite3";\n',
+    );
 
     await expect(checkDependencyBoundaries(root)).resolves.toEqual([]);
   });
@@ -94,8 +105,10 @@ describe("dependency boundary negative paths", () => {
     ["packages/contracts", "@codegraph/contracts", "contracts", "vscode-jsonrpc"],
     ["packages/service-client", "@codegraph/service-client", "service-client", "ajv"],
     ["apps/graph-service", "@codegraph/graph-service", "composition-root", "ajv"],
+    ["packages/contracts", "@codegraph/contracts", "contracts", "better-sqlite3"],
+    ["apps/graph-service", "@codegraph/graph-service", "composition-root", "@types/better-sqlite3"],
   ])(
-    "rejects Story 1.2 dependencies assigned to the wrong role",
+    "rejects architecture-approved dependencies assigned to the wrong role",
     async (relativePath, name, role, dependency) => {
       const root = await createRepository();
       await addWorkspace(

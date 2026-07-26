@@ -69,7 +69,9 @@ describe("root toolchain contract", () => {
     expect(workspace).toContain("- 'packages/*'");
     expect(workspace).toContain("- 'packages/adapters/*'");
     expect(workspace).not.toContain("packages/application/*");
-    expect(workspace).toContain("allowBuilds:\n  esbuild: true");
+    expect(workspace).toContain(
+      "allowBuilds:\n  better-sqlite3: true\n  esbuild: true",
+    );
     expect(npmrc).toContain("frozen-lockfile=true");
     expect(npmrc).toContain("engine-strict=true");
     expect(lockfile).toContain("lockfileVersion: '9.0'");

@@ -1,4 +1,4 @@
-/**
- * @file SQLite 行为不属于本用户故事范围；此处仅保留适配器边界。
- */
-export {};
+/** @file 导出 Story 1.4 better-sqlite3 存储、migration 与诊断常量。 */
+export * from "./migrations/001-bootstrap.js";
+export * from "./migrations/002-deterministic-commit.js";
+export * from "./sqlite-graph-store.js";

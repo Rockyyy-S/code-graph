@@ -1,5 +1,10 @@
 /** @file 导出跨进程控制面合同、Schema 与运行时校验器。 */
 export * from "./protocol-error.js";
+export * from "./index-job.js";
+export {
+  jobStartRequestV1Schema,
+  jobStartResultV1Schema,
+} from "./index-job-schema.js";
 export * from "./canonical-json.js";
 export * from "./quality-gate-schema.js";
 export * from "./quality-gate.js";

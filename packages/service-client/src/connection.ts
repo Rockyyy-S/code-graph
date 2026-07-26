@@ -1,4 +1,5 @@
 import net from "node:net";
+import { lstat } from "node:fs/promises";
 import {
   Message,
   ResponseError,
@@ -16,14 +17,18 @@ import {
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
   SERVICE_METHODS,
+  canonicalizeJson,
   type CompatibleInitializeResult,
   type InitializeResult,
+  type JobStartResult,
   type ServiceCapability,
   type ServiceMetadataV1,
   type ServiceStatusV1,
+  normalizeServiceStatusV1Compatible,
   validateErrorV1,
   validateInitializeResultCompatible,
   validateJsonRpcV2Envelope,
+  validateJobStartResultCompatible,
   validateServiceStatusV1Compatible,
   validateShutdownResultCompatible,
 } from "@codegraph/contracts";
@@ -31,12 +36,21 @@ import { connectFirstOrStart, type ServiceDiscoveryRecord } from "./discovery.js
 import { createWorkspacePaths } from "./endpoint.js";
 import { createServiceClientError, ServiceClientError } from "./errors.js";
 import { createBoundedJsonRpcInput } from "./bounded-json-rpc-input.js";
-import type { GraphServiceLauncher } from "./launcher.js";
+import {
+  DEFAULT_SERVICE_START_TIMEOUT_MS as LAUNCHER_START_TIMEOUT_MS,
+  type GraphServiceLauncher,
+} from "./launcher.js";
 import {
   deriveWorkspaceIdentity,
   type WorkspaceIdentityOptions,
   type WorkspaceIdentityResult,
 } from "./workspace-identity.js";
+
+/** 默认 RPC 界限严格覆盖 SQLite 5 秒 busy timeout 与 IPC 传输余量。 */
+export const DEFAULT_SERVICE_REQUEST_TIMEOUT_MS = 10_000;
+
+/** 连接发现与 launcher 共享同一绝对启动预算，禁止内外层默认值漂移。 */
+export const DEFAULT_SERVICE_START_TIMEOUT_MS = LAUNCHER_START_TIMEOUT_MS;
 
 /** 宿主显式提供的 Workspace Trust 门禁。 */
 export interface WorkspaceTrustGate {
@@ -56,6 +70,11 @@ export interface ConnectToGraphServiceOptions {
   trust: WorkspaceTrustGate;
 }
 
+/** status 传输立即吸收 rejection，等待观测队列时不会产生裸 Promise 拒绝。 */
+type StatusRequestOutcome =
+  | { kind: "error"; error: unknown }
+  | { kind: "value"; value: unknown };
+
 /** 独立客户端连接；关闭连接不会改变共享服务状态。 */
 export class GraphServiceConnection {
   readonly #connection: MessageConnection;
@@ -63,6 +82,18 @@ export class GraphServiceConnection {
   readonly #requestTimeoutMs: number;
   readonly #protocolState: JsonRpcProtocolState;
   #closed = false;
+  #latestConfigRevision: number;
+  #latestGraphRevision: number | null;
+  #latestIndexStatusCanonical: string;
+  #latestServiceStatusRevision: number;
+  #latestStatusRevision: number;
+  #latestStatusCanonical: string;
+  #latestViewConfigRevision: number;
+  #mustAdvanceIndexStatus = false;
+  #queuedControlMutationCount = 0;
+  #revisionObservationTail: Promise<void> = Promise.resolve();
+  #shutdownPromise: Promise<void> | null = null;
+  #terminalError: ServiceClientError | null = null;
 
   public readonly identity: WorkspaceIdentityResult;
   public readonly initializeResult: InitializeResult;
@@ -74,7 +105,7 @@ export class GraphServiceConnection {
     initializeResult: InitializeResult,
     identity: WorkspaceIdentityResult,
     metadata: ServiceMetadataV1,
-    requestTimeoutMs = 5_000,
+    requestTimeoutMs = DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
     protocolState: JsonRpcProtocolState = createJsonRpcProtocolState(),
   ) {
     this.#connection = connection;
@@ -84,59 +115,209 @@ export class GraphServiceConnection {
     this.metadata = metadata;
     this.#requestTimeoutMs = requestTimeoutMs;
     this.#protocolState = protocolState;
+    this.#latestConfigRevision = initializeResult.serviceStatus.configRevision;
+    this.#latestGraphRevision = initializeResult.serviceStatus.graphRevision;
+    this.#latestIndexStatusCanonical = canonicalizeIndexStatus(initializeResult.serviceStatus);
+    this.#latestServiceStatusRevision = initializeResult.serviceStatus.serviceStatusRevision;
+    this.#latestStatusRevision = initializeResult.serviceStatus.statusRevision;
+    this.#latestStatusCanonical = canonicalizeJson(initializeResult.serviceStatus);
+    this.#latestViewConfigRevision = initializeResult.serviceStatus.viewConfigRevision;
   }
 
   /** 读取单一权威 ServiceStatusV1 快照。 */
   public async status(): Promise<ServiceStatusV1> {
-    this.#ensureOpen();
-    try {
-      this.#ensureCapability(SERVICE_METHODS.status);
-      const result = await sendRequestWithTimeout<unknown>(
-        this.#connection,
-        SERVICE_METHODS.status,
-        {},
-        this.#requestTimeoutMs,
-      );
+    /** 只读 status 可并发发出；若控制变更已排队，则等待其先完成请求与状态栅栏。 */
+    const statusRequest = this.#queuedControlMutationCount === 0
+      ? this.#sendStatusRequest()
+      : null;
+    return this.#serializeRevisionObservation(async () => {
+      this.#ensureOpen();
+      try {
+      const outcome = await (statusRequest ?? this.#sendStatusRequest());
+      if (outcome.kind === "error") {
+        throw outcome.error;
+      }
+      const result = outcome.value;
       if (!validateServiceStatusV1Compatible(result)) {
         throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      return result;
-    } catch (error) {
-      const mapped = this.#protocolState.violated
-        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
-        : mapConnectionError(error);
       if (
-        mapped.code === "SERVICE_START_TIMEOUT" ||
-        mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
-        mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        this.initializeResult.capabilities.includes(SERVICE_METHODS.startJob) &&
+        !hasExplicitJobStatusFields(result)
       ) {
-        await this.close();
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
       }
-      throw mapped;
+      const normalized = normalizeServiceStatusV1Compatible(result);
+      if (normalized === null) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      const normalizedCanonical = canonicalizeJson(normalized);
+      const normalizedIndexStatusCanonical = canonicalizeIndexStatus(normalized);
+      const childRevisionAdvanced =
+        normalized.statusRevision > this.#latestStatusRevision ||
+        normalized.configRevision > this.#latestConfigRevision ||
+        normalized.viewConfigRevision > this.#latestViewConfigRevision ||
+        (normalized.graphRevision !== null &&
+          (this.#latestGraphRevision === null ||
+            normalized.graphRevision > this.#latestGraphRevision));
+      if (
+        normalized.serviceInstanceId !== this.initializeResult.serviceStatus.serviceInstanceId ||
+        normalized.statusEpoch !== this.initializeResult.serviceStatus.statusEpoch ||
+        normalized.serviceStatusRevision < this.#latestServiceStatusRevision ||
+        normalized.statusRevision < this.#latestStatusRevision ||
+        normalized.configRevision < this.#latestConfigRevision ||
+        normalized.viewConfigRevision < this.#latestViewConfigRevision ||
+        (this.#mustAdvanceIndexStatus && (
+          normalized.statusRevision <= this.#latestStatusRevision ||
+          normalizedIndexStatusCanonical === this.#latestIndexStatusCanonical
+        )) ||
+        (normalized.statusRevision === this.#latestStatusRevision &&
+          normalizedIndexStatusCanonical !== this.#latestIndexStatusCanonical) ||
+        (normalized.serviceStatusRevision === this.#latestServiceStatusRevision &&
+          normalizedCanonical !== this.#latestStatusCanonical) ||
+        (childRevisionAdvanced &&
+          normalized.serviceStatusRevision <= this.#latestServiceStatusRevision) ||
+        (this.#latestGraphRevision !== null &&
+          (normalized.graphRevision === null ||
+            normalized.graphRevision < this.#latestGraphRevision))
+      ) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      this.#latestServiceStatusRevision = normalized.serviceStatusRevision;
+      this.#latestStatusRevision = normalized.statusRevision;
+      this.#latestConfigRevision = normalized.configRevision;
+      this.#latestIndexStatusCanonical = normalizedIndexStatusCanonical;
+      this.#latestStatusCanonical = normalizedCanonical;
+      this.#latestViewConfigRevision = normalized.viewConfigRevision;
+      this.#mustAdvanceIndexStatus = false;
+      if (normalized.graphRevision !== null) {
+        /** 同一服务实例的已提交 revision 只能单调前进，供后续 Job 响应做时序校验。 */
+        this.#latestGraphRevision = normalized.graphRevision;
+      }
+      return normalized;
+      } catch (error) {
+        const mapped = this.#protocolState.violated
+          ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+          : mapConnectionError(error);
+        if (
+          mapped.code === "SERVICE_START_TIMEOUT" ||
+          mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
+          mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        ) {
+          this.#terminalError = mapped;
+          await this.close();
+        }
+        throw mapped;
+      }
+    });
+  }
+
+  /** 请求公共 rebuild 路径并返回已持久化的 queued Job。 */
+  public async startRebuild(): Promise<JobStartResult> {
+    this.#queuedControlMutationCount += 1;
+    try {
+      return await this.#serializeRevisionObservation(async () => {
+      this.#ensureOpen();
+      /** 未协商的可选能力不代表现有传输损坏，健康旧服务仍可继续提供 status/shutdown。 */
+      this.#ensureCapability(SERVICE_METHODS.startJob);
+      try {
+      const result = await sendRequestWithTimeout<unknown>(
+        this.#connection,
+        SERVICE_METHODS.startJob,
+        { kind: "rebuild" },
+        this.#requestTimeoutMs,
+      );
+      if (!validateJobStartResultCompatible(result)) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      const hasBaseGraphRevision = Object.hasOwn(result.job, "baseGraphRevision");
+      /** revisionless v1 只有固定 revision 1；接受响应后不得再发可失败 RPC 猜测 Job 基线。 */
+      const baseGraphRevision = hasBaseGraphRevision
+        ? result.job.baseGraphRevision
+        : (result.job.kind === "initial-index"
+          ? null
+          : 1);
+      const latestGraphRevision = this.#latestGraphRevision;
+      if (
+        baseGraphRevision === undefined ||
+        (result.job.kind === "initial-index" && baseGraphRevision !== null) ||
+        (result.job.kind === "initial-index" &&
+          latestGraphRevision !== null) ||
+        (result.job.kind === "rebuild" &&
+          (baseGraphRevision === null ||
+            (latestGraphRevision !== null &&
+              baseGraphRevision < latestGraphRevision)))
+      ) {
+        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+      }
+      if (baseGraphRevision !== null) {
+        /** 已接受 rebuild 的 base 证明服务至少已提交到该 revision。 */
+        this.#latestGraphRevision = baseGraphRevision;
+      }
+      /** 后续 IndexStatus 必须以前进 revision 的新内容反映已接受的 Job 变更。 */
+      this.#mustAdvanceIndexStatus = true;
+      return {
+        accepted: true,
+        job: {
+          baseGraphRevision,
+          id: result.job.id,
+          kind: result.job.kind,
+          requestedAt: result.job.requestedAt,
+          resultGraphRevision: null,
+          state: "queued",
+        },
+      };
+      } catch (error) {
+        const mapped = this.#protocolState.violated
+          ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+          : mapConnectionError(error);
+        if (
+          mapped.code === "SERVICE_START_TIMEOUT" ||
+          mapped.code === "SERVICE_PROTOCOL_INCOMPATIBLE" ||
+          mapped.code === "SERVICE_METHOD_NOT_FOUND"
+        ) {
+          this.#terminalError = mapped;
+          await this.close();
+        }
+        throw mapped;
+      }
+      });
+    } finally {
+      this.#queuedControlMutationCount -= 1;
     }
   }
 
   /** 受控关闭共享服务，并关闭当前连接。 */
-  public async shutdown(): Promise<void> {
-    this.#ensureOpen();
-    try {
-      this.#ensureCapability(SERVICE_METHODS.shutdown);
-      const result = await sendRequestWithTimeout<unknown>(
-        this.#connection,
-        SERVICE_METHODS.shutdown,
-        {},
-        this.#requestTimeoutMs,
-      );
-      if (!validateShutdownResultCompatible(result)) {
-        throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
-      }
-    } catch (error) {
-      throw this.#protocolState.violated
-        ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
-        : mapConnectionError(error);
-    } finally {
-      await this.close();
+  public shutdown(): Promise<void> {
+    if (this.#shutdownPromise === null) {
+      this.#queuedControlMutationCount += 1;
+      this.#shutdownPromise = this.#serializeRevisionObservation(async () => {
+        this.#ensureOpen();
+        try {
+          this.#ensureCapability(SERVICE_METHODS.shutdown);
+          const result = await sendRequestWithTimeout<unknown>(
+            this.#connection,
+            SERVICE_METHODS.shutdown,
+            {},
+            this.#requestTimeoutMs,
+          );
+          if (!validateShutdownResultCompatible(result)) {
+            throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+          }
+        } catch (error) {
+          const mapped = this.#protocolState.violated
+            ? createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE")
+            : mapConnectionError(error);
+          this.#terminalError = mapped;
+          throw mapped;
+        } finally {
+          await this.close();
+        }
+      }).finally(() => {
+        this.#queuedControlMutationCount -= 1;
+      });
     }
+    return this.#shutdownPromise;
   }
 
   /** 仅关闭当前客户端连接，不触发共享服务 shutdown。 */
@@ -145,6 +326,7 @@ export class GraphServiceConnection {
       return;
     }
     this.#closed = true;
+    this.#protocolState.pendingResponseIds.clear();
     this.#connection.dispose();
     if (!this.#socket.destroyed) {
       this.#socket.end();
@@ -155,7 +337,7 @@ export class GraphServiceConnection {
   /** 防止已关闭连接继续发送控制请求。 */
   #ensureOpen(): void {
     if (this.#closed) {
-      throw createServiceClientError(
+      throw this.#terminalError ?? createServiceClientError(
         "SERVICE_START_TIMEOUT",
         "服务连接已经关闭。",
       );
@@ -168,6 +350,51 @@ export class GraphServiceConnection {
       throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
     }
   }
+
+  /** 创建永不裸拒绝的 status outcome，真实错误由观测队列按调用顺序处理。 */
+  #sendStatusRequest(): Promise<StatusRequestOutcome> {
+    try {
+      this.#ensureOpen();
+      this.#ensureCapability(SERVICE_METHODS.status);
+      return sendRequestWithTimeout<unknown>(
+        this.#connection,
+        SERVICE_METHODS.status,
+        {},
+        this.#requestTimeoutMs,
+      ).then(
+        (value) => ({ kind: "value", value }),
+        (error: unknown) => ({ error, kind: "error" }),
+      );
+    } catch (error) {
+      return Promise.resolve({ error, kind: "error" });
+    }
+  }
+
+  /** 按调用顺序串行化 revision 观测与控制变更，status 传输本身仍可并发。 */
+  #serializeRevisionObservation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#revisionObservationTail.then(operation, operation);
+    this.#revisionObservationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+/**
+ * 只规范化由 statusRevision 标识的 IndexStatus 子快照。
+ * config、view 与 telemetry 拥有独立 revision，不得混入该绑定。
+ */
+function canonicalizeIndexStatus(status: ServiceStatusV1): string {
+  return canonicalizeJson({
+    availability: status.availability,
+    committed: status.committed,
+    completeness: status.completeness,
+    currentIndexJob: status.currentIndexJob,
+    freshness: status.freshness,
+    graphRevision: status.graphRevision,
+    lastIndexJob: status.lastIndexJob,
+  });
 }
 
 /**
@@ -195,7 +422,7 @@ export async function openServiceConnectionForTests(
   identity: WorkspaceIdentityResult,
   clientVersion: string,
   connectTimeoutMs = 1_000,
-  requestTimeoutMs = 5_000,
+  requestTimeoutMs = DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
 ): Promise<GraphServiceConnection> {
   return openServiceConnection(
     record,
@@ -219,11 +446,11 @@ async function connectToGraphServiceInternal(
     "connectTimeoutMs",
   );
   const requestTimeoutMs = normalizeTimeout(
-    options.requestTimeoutMs ?? 5_000,
+    options.requestTimeoutMs ?? DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
     "requestTimeoutMs",
   );
   const startTimeoutMs = normalizeTimeout(
-    options.startTimeoutMs ?? 5_000,
+    options.startTimeoutMs ?? DEFAULT_SERVICE_START_TIMEOUT_MS,
     "startTimeoutMs",
   );
   const pollIntervalMs = normalizeTimeout(
@@ -237,13 +464,19 @@ async function connectToGraphServiceInternal(
     deadline,
   );
   let paths: ReturnType<typeof createWorkspacePaths>;
+  let legacyPaths: ReturnType<typeof createWorkspacePaths>;
   try {
     paths = createWorkspacePaths(identity.workspaceKey, {
+      ...(cacheRoot === undefined ? {} : { cacheRoot }),
+      rootBindingKey: identity.physicalRootKey,
+    });
+    legacyPaths = createWorkspacePaths(identity.workspaceKey, {
       ...(cacheRoot === undefined ? {} : { cacheRoot }),
     });
   } catch {
     throw createServiceClientError("SERVICE_ENDPOINT_START_FAILED");
   }
+  await assertNoLegacyWorkspaceCacheWithinDeadline(paths, legacyPaths, deadline);
   const remainingStartMs = deadline - Date.now();
   if (remainingStartMs <= 0) {
     throw createServiceClientError("SERVICE_START_TIMEOUT");
@@ -260,9 +493,72 @@ async function connectToGraphServiceInternal(
       ),
     paths,
     pollIntervalMs,
-    start: (remainingMs, signal) => options.launcher.start(paths, remainingMs, signal),
+    start: (remainingMs, signal) => options.launcher.start(
+      { indexingRoot: identity.indexingRoot, paths },
+      remainingMs,
+      signal,
+    ),
     timeoutMs: remainingStartMs,
   });
+}
+
+/**
+ * 旧版本只按公共 workspaceKey 建目录，无法证明其缓存属于当前物理根。
+ * 任意 legacy 目录都必须 fail closed，避免升级时启动第二个 daemon 或静默遗失旧图谱。
+ */
+async function assertNoLegacyWorkspaceCache(
+  paths: ReturnType<typeof createWorkspacePaths>,
+  legacyPaths: ReturnType<typeof createWorkspacePaths>,
+): Promise<void> {
+  if (paths.workspaceDirectory === legacyPaths.workspaceDirectory) {
+    return;
+  }
+  try {
+    await lstat(legacyPaths.workspaceDirectory);
+  } catch (error) {
+    if (hasSystemErrorCode(error, "ENOENT")) {
+      return;
+    }
+    throw createServiceClientError("SERVICE_INSTANCE_CONFLICT");
+  }
+  throw createServiceClientError(
+    "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
+  );
+}
+
+/** 将旧缓存探测纳入统一启动 deadline，避免异常文件系统无限阻塞发现流程。 */
+async function assertNoLegacyWorkspaceCacheWithinDeadline(
+  paths: ReturnType<typeof createWorkspacePaths>,
+  legacyPaths: ReturnType<typeof createWorkspacePaths>,
+  deadline: number,
+): Promise<void> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    throw createServiceClientError("SERVICE_START_TIMEOUT");
+  }
+  let timeout: NodeJS.Timeout | undefined;
+  const outcome = assertNoLegacyWorkspaceCache(paths, legacyPaths).then(
+    () => ({ kind: "value" }) as const,
+    (error: unknown) => ({ error, kind: "error" }) as const,
+  );
+  try {
+    const result = await Promise.race([
+      outcome,
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ kind: "timeout" }), remainingMs);
+      }),
+    ]);
+    if (result.kind === "timeout") {
+      throw createServiceClientError("SERVICE_START_TIMEOUT");
+    }
+    if (result.kind === "error") {
+      throw result.error;
+    }
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 /** 将身份 realpath 纳入公共绝对 deadline，并把本地路径错误收敛为脱敏 ErrorV1。 */
@@ -309,7 +605,7 @@ async function openServiceConnection(
   identity: WorkspaceIdentityResult,
   clientVersion: string,
   connectTimeoutMs = 1_000,
-  requestTimeoutMs = 5_000,
+  requestTimeoutMs = DEFAULT_SERVICE_REQUEST_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<GraphServiceConnection> {
   const socket = net.createConnection(record.metadata.endpoint);
@@ -553,7 +849,21 @@ async function sendRequestWithTimeout<T>(
 /** 过滤旧客户端不认识的 capability，保留强类型公共结果。 */
 function normalizeInitializeResult(result: CompatibleInitializeResult): InitializeResult {
   const capabilities = result.capabilities.filter(isKnownCapability);
-  return { ...result, capabilities };
+  const serviceStatus = normalizeServiceStatusV1Compatible(result.serviceStatus);
+  if (serviceStatus === null) {
+    throw createServiceClientError("SERVICE_PROTOCOL_INCOMPATIBLE");
+  }
+  return { ...result, capabilities, serviceStatus };
+}
+
+/** 协商 job/start 后，后续 status 不能省略当前与最后 Job 字段。 */
+function hasExplicitJobStatusFields(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.hasOwn(value, "currentIndexJob") &&
+    Object.hasOwn(value, "lastIndexJob")
+  );
 }
 
 /** 判断 capability 是否由当前客户端版本认识。 */

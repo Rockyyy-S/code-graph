@@ -1,9 +1,46 @@
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runGraphServiceProcess } from "../../apps/graph-service/src/main.js";
 import type { OwnedServiceInstance } from "../../apps/graph-service/src/instance-owner.js";
 
+/** 构造包含私有 indexingRoot 与独立 WorkspacePaths 的进程环境。 */
+function createEnvironment(workspaceKey: string, endpoint: string) {
+  return {
+    CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
+      indexingRoot: path.resolve("test-workspace"),
+      paths: {
+        endpoint,
+        endpointKind: "named-pipe",
+        lockPath: "C:\\cache\\owner.lock",
+        metadataPath: "C:\\cache\\service-metadata.json",
+        tokenPath: "C:\\cache\\session-token.bin",
+        workspaceDirectory: "C:\\cache",
+        workspaceKey,
+      },
+    }),
+  };
+}
+
 describe("graph-service process lifecycle", () => {
+  it("publishes ready only after the service startup barrier completes", async () => {
+    const messages: unknown[] = [];
+    const sendReady = vi.fn(async (message: unknown) => {
+      messages.push(message);
+    });
+    const runtime = { close: vi.fn(async () => undefined) } as unknown as OwnedServiceInstance;
+
+    await expect(runGraphServiceProcess(
+      createEnvironment("0".repeat(64), "\\\\.\\pipe\\codegraph-ready"),
+      {
+        sendReady,
+        signalTarget: new EventEmitter(),
+        startService: async () => runtime,
+      },
+    )).resolves.toBe(runtime);
+    expect(messages).toEqual([{ pid: process.pid, type: "codegraph/ready" }]);
+  });
+
   it("remembers a termination signal received before startup completes", async () => {
     const signals = new EventEmitter();
     const close = vi.fn(async () => undefined);
@@ -12,17 +49,7 @@ describe("graph-service process lifecycle", () => {
       resolveRuntime = resolve;
     });
     const exitCodes: number[] = [];
-    const environment = {
-      CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-        endpoint: "\\\\.\\pipe\\codegraph-test",
-        endpointKind: "named-pipe",
-        lockPath: "C:\\cache\\owner.lock",
-        metadataPath: "C:\\cache\\service-metadata.json",
-        tokenPath: "C:\\cache\\session-token.bin",
-        workspaceDirectory: "C:\\cache",
-        workspaceKey: "a".repeat(64),
-      }),
-    };
+    const environment = createEnvironment("a".repeat(64), "\\\\.\\pipe\\codegraph-test");
     const running = runGraphServiceProcess(environment, {
       setExitCode: (code) => exitCodes.push(code),
       signalTarget: signals,
@@ -43,17 +70,10 @@ describe("graph-service process lifecycle", () => {
       const signals = new EventEmitter();
       const exitCodes: number[] = [];
       const forceTerminate = vi.fn();
-      const environment = {
-      CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-        endpoint: "\\\\.\\pipe\\codegraph-test-failure",
-        endpointKind: "named-pipe",
-        lockPath: "C:\\cache\\owner.lock",
-        metadataPath: "C:\\cache\\service-metadata.json",
-        tokenPath: "C:\\cache\\session-token.bin",
-        workspaceDirectory: "C:\\cache",
-        workspaceKey: "b".repeat(64),
-      }),
-    };
+      const environment = createEnvironment(
+        "b".repeat(64),
+        "\\\\.\\pipe\\codegraph-test-failure",
+      );
       const runtime = {
         close: vi.fn(async () => {
           throw new Error("cleanup failed");
@@ -86,17 +106,10 @@ describe("graph-service process lifecycle", () => {
       const runtimePromise = new Promise<OwnedServiceInstance>((resolve) => {
         resolveRuntime = resolve;
       });
-      const environment = {
-        CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-          endpoint: "\\\\.\\pipe\\codegraph-test-deadline",
-          endpointKind: "named-pipe",
-          lockPath: "C:\\cache\\owner.lock",
-          metadataPath: "C:\\cache\\service-metadata.json",
-          tokenPath: "C:\\cache\\session-token.bin",
-          workspaceDirectory: "C:\\cache",
-          workspaceKey: "c".repeat(64),
-        }),
-      };
+      const environment = createEnvironment(
+        "c".repeat(64),
+        "\\\\.\\pipe\\codegraph-test-deadline",
+      );
       const running = runGraphServiceProcess(environment, {
         forceTerminate,
         shutdownDeadlineMs: 100,
@@ -123,17 +136,10 @@ describe("graph-service process lifecycle", () => {
     const runtimePromise = new Promise<OwnedServiceInstance>((resolve) => {
       resolveRuntime = resolve;
     });
-    const environment = {
-      CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-        endpoint: "\\\\.\\pipe\\codegraph-private-cancel",
-        endpointKind: "named-pipe",
-        lockPath: "C:\\cache\\owner.lock",
-        metadataPath: "C:\\cache\\service-metadata.json",
-        tokenPath: "C:\\cache\\session-token.bin",
-        workspaceDirectory: "C:\\cache",
-        workspaceKey: "e".repeat(64),
-      }),
-    };
+    const environment = createEnvironment(
+      "e".repeat(64),
+      "\\\\.\\pipe\\codegraph-private-cancel",
+    );
     const running = runGraphServiceProcess(environment, {
       controlTarget: controls,
       signalTarget: signals,
@@ -153,17 +159,10 @@ describe("graph-service process lifecycle", () => {
     const close = vi.fn(async () => new Promise<void>((resolve) => {
       resolveClose = resolve;
     }));
-    const environment = {
-      CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-        endpoint: "\\\\.\\pipe\\codegraph-repeat-signal",
-        endpointKind: "named-pipe",
-        lockPath: "C:\\cache\\owner.lock",
-        metadataPath: "C:\\cache\\service-metadata.json",
-        tokenPath: "C:\\cache\\session-token.bin",
-        workspaceDirectory: "C:\\cache",
-        workspaceKey: "d".repeat(64),
-      }),
-    };
+    const environment = createEnvironment(
+      "d".repeat(64),
+      "\\\\.\\pipe\\codegraph-repeat-signal",
+    );
     await runGraphServiceProcess(environment, {
       signalTarget: signals,
       startService: async () => ({ close }) as unknown as OwnedServiceInstance,
@@ -180,17 +179,10 @@ describe("graph-service process lifecycle", () => {
 
   it("rejects a shutdown deadline beyond the Node timer range", async () => {
     const signals = new EventEmitter();
-    const environment = {
-      CODEGRAPH_SERVICE_CONFIG: JSON.stringify({
-        endpoint: "\\\\.\\pipe\\codegraph-invalid-deadline",
-        endpointKind: "named-pipe",
-        lockPath: "C:\\cache\\owner.lock",
-        metadataPath: "C:\\cache\\service-metadata.json",
-        tokenPath: "C:\\cache\\session-token.bin",
-        workspaceDirectory: "C:\\cache",
-        workspaceKey: "f".repeat(64),
-      }),
-    };
+    const environment = createEnvironment(
+      "f".repeat(64),
+      "\\\\.\\pipe\\codegraph-invalid-deadline",
+    );
 
     await expect(
       runGraphServiceProcess(environment, {

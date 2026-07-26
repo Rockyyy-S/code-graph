@@ -1,10 +1,18 @@
 /** Story 1.2 稳定错误码。 */
 export const SERVICE_ERROR_CODES = [
+  "GRAPH_INPUT_CHANGED_DURING_BUILD",
+  "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+  "GRAPH_SCAN_FAILED",
+  "GRAPH_SCAN_LIMIT_EXCEEDED",
+  "GRAPH_STORE_OPEN_FAILED",
+  "GRAPH_WRITE_FAILED",
+  "INDEX_JOB_ALREADY_RUNNING",
   "SERVICE_AUTH_FAILED",
   "SERVICE_ENDPOINT_START_FAILED",
   "SERVICE_INITIALIZE_REQUIRED",
   "SERVICE_INVALID_REQUEST",
   "SERVICE_INSTANCE_CONFLICT",
+  "SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED",
   "SERVICE_METHOD_NOT_FOUND",
   "SERVICE_PROTOCOL_INCOMPATIBLE",
   "SERVICE_START_TIMEOUT",
@@ -18,9 +26,12 @@ export type ServiceErrorCode = (typeof SERVICE_ERROR_CODES)[number];
 /** 错误类别保持英文稳定值，供客户端自动处理。 */
 export type ErrorCategory =
   | "compatibility"
+  | "configuration"
+  | "indexing"
   | "lifecycle"
   | "protocol"
   | "security"
+  | "storage"
   | "transport";
 
 /** 可序列化、可操作且不包含秘密的协议错误。 */
@@ -45,6 +56,48 @@ interface ErrorDefinition {
 export const SERVICE_ERROR_REGISTRY: Readonly<
   Record<ServiceErrorCode, ErrorDefinition>
 > = {
+  GRAPH_INPUT_CHANGED_DURING_BUILD: {
+    category: "indexing",
+    message: "工作区输入在图谱构建期间持续变化。",
+    retryable: true,
+    suggestedAction: "等待工作区写入稳定后重新请求 rebuild。",
+  },
+  GRAPH_IGNORE_CONFIG_UNSUPPORTED: {
+    category: "configuration",
+    message: "当前版本尚不能安全应用 .codegraphignore。",
+    retryable: false,
+    suggestedAction: "暂时移除 .codegraphignore 并重启服务，或升级到支持该配置的版本后重试。",
+  },
+  GRAPH_SCAN_FAILED: {
+    category: "indexing",
+    message: "工作区安全扫描失败。",
+    retryable: true,
+    suggestedAction: "检查工作区读取权限与安全限制后重试。",
+  },
+  GRAPH_SCAN_LIMIT_EXCEEDED: {
+    category: "indexing",
+    message: "工作区扫描超过安全预算。",
+    retryable: false,
+    suggestedAction: "缩小 indexing root 或排除生成目录后重试。",
+  },
+  GRAPH_STORE_OPEN_FAILED: {
+    category: "storage",
+    message: "本地图谱存储无法安全打开或迁移。",
+    retryable: true,
+    suggestedAction: "检查用户缓存目录空间与权限，并保留故障副本后重试。",
+  },
+  GRAPH_WRITE_FAILED: {
+    category: "storage",
+    message: "本地图谱事务写入失败。",
+    retryable: true,
+    suggestedAction: "检查磁盘空间、占用和权限后重试首次构建。",
+  },
+  INDEX_JOB_ALREADY_RUNNING: {
+    category: "lifecycle",
+    message: "当前 indexing root 已有索引 Job 正在执行。",
+    retryable: true,
+    suggestedAction: "等待当前 Job 结束后再次请求 rebuild。",
+  },
   SERVICE_AUTH_FAILED: {
     category: "security",
     message: "服务认证失败。",
@@ -75,11 +128,17 @@ export const SERVICE_ERROR_REGISTRY: Readonly<
     retryable: true,
     suggestedAction: "等待现有实例完成启动后重新发现。",
   },
+  SERVICE_LEGACY_CACHE_MIGRATION_REQUIRED: {
+    category: "lifecycle",
+    message: "检测到无法安全归属到当前物理根的旧版服务缓存。",
+    retryable: false,
+    suggestedAction: "按 Service Control V1 的“旧版缓存恢复”步骤停止旧服务并备份旧缓存；当前版本不自动迁移旧图谱。",
+  },
   SERVICE_METHOD_NOT_FOUND: {
     category: "protocol",
     message: "请求的方法未由当前服务实现。",
     retryable: false,
-    suggestedAction: "仅调用 initialize、service/status 或 service/shutdown。",
+    suggestedAction: "仅调用 initialize、job/start、service/status 或 service/shutdown。",
   },
   SERVICE_PROTOCOL_INCOMPATIBLE: {
     category: "compatibility",

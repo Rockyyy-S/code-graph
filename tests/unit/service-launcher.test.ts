@@ -56,6 +56,11 @@ async function createPaths() {
   });
 }
 
+/** 构造不把 indexing root 混入 WorkspacePaths 的私有启动对象。 */
+function createLaunchConfig(paths: Awaited<ReturnType<typeof createPaths>>) {
+  return { indexingRoot: path.resolve("."), paths };
+}
+
 describe("trusted graph-service launcher", () => {
   it("spawns an injected executable without a shell or token arguments", async () => {
     const child = createChild();
@@ -65,6 +70,7 @@ describe("trusted graph-service launcher", () => {
         child.emit("spawn");
         void mkdir(paths.workspaceDirectory, { recursive: true })
           .then(() => writeFile(paths.metadataPath, JSON.stringify({ pid: child.pid })))
+          .then(() => child.emit("message", { pid: child.pid, type: "codegraph/ready" }))
           .catch(() => undefined);
       });
       return child;
@@ -76,7 +82,7 @@ describe("trusted graph-service launcher", () => {
       },
       spawnProcess,
     );
-    await launcher.start(paths);
+    await launcher.start(createLaunchConfig(paths));
 
     expect(spawnProcess).toHaveBeenCalledTimes(1);
     const [command, args, options] = spawnProcess.mock.calls[0] ?? [];
@@ -88,9 +94,34 @@ describe("trusted graph-service launcher", () => {
       stdio: ["ignore", "ignore", "pipe", "ipc"],
       windowsHide: true,
     });
-    expect(options?.env?.CODEGRAPH_SERVICE_CONFIG).toBe(JSON.stringify(paths));
+    expect(options?.env?.CODEGRAPH_SERVICE_CONFIG).toBe(
+      JSON.stringify(createLaunchConfig(paths)),
+    );
     expect(options?.env?.CODEGRAPH_SERVICE_CONFIG).not.toMatch(/sessionToken/i);
     expect(child.unref).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps stderr and the cancellation channel until metadata and ready both arrive", async () => {
+    const child = createChild();
+    const paths = await createPaths();
+    const launcher = createGraphServiceProcessLauncher(
+      { args: ["trusted-entry.js"], command: "node" },
+      vi.fn<SpawnProcess>(() => {
+        queueMicrotask(() => child.emit("spawn"));
+        return child;
+      }),
+      { readPublishedPid: async () => child.pid },
+    );
+
+    const starting = launcher.start(createLaunchConfig(paths), 250);
+    await vi.waitFor(() => expect(child.unref).toHaveBeenCalledTimes(1));
+    expect(child.stderr.destroyed).toBe(false);
+    expect(child.disconnect).not.toHaveBeenCalled();
+
+    child.emit("message", { pid: child.pid, type: "codegraph/ready" });
+    await expect(starting).resolves.toBeUndefined();
+    expect(child.stderr.destroyed).toBe(true);
+    expect(child.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("maps an executable permission failure to stable ErrorV1", async () => {
@@ -112,7 +143,7 @@ describe("trusted graph-service launcher", () => {
       platform: "win32",
     });
 
-    await expect(launcher.start(paths)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths))).rejects.toMatchObject({
       code: "SERVICE_ENDPOINT_START_FAILED",
     });
   });
@@ -133,7 +164,7 @@ describe("trusted graph-service launcher", () => {
       spawnProcess,
     );
 
-    await expect(launcher.start(paths)).rejects.toMatchObject(safeError);
+    await expect(launcher.start(createLaunchConfig(paths))).rejects.toMatchObject(safeError);
   });
 
   it("waits for stderr to drain after exit before mapping the startup error", async () => {
@@ -155,7 +186,7 @@ describe("trusted graph-service launcher", () => {
       spawnProcess,
     );
 
-    await expect(launcher.start(paths, 250)).rejects.toMatchObject(safeError);
+    await expect(launcher.start(createLaunchConfig(paths), 250)).rejects.toMatchObject(safeError);
   });
 
   it("drains and destroys stderr when exit occurs without close", async () => {
@@ -183,7 +214,7 @@ describe("trusted graph-service launcher", () => {
     );
 
     const startedAt = Date.now();
-    await expect(launcher.start(paths, 500)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 500)).rejects.toMatchObject({
       code: "SERVICE_INSTANCE_CONFLICT",
     });
     expect(Date.now() - startedAt).toBeLessThan(650);
@@ -205,7 +236,7 @@ describe("trusted graph-service launcher", () => {
     );
     const startedAt = Date.now();
 
-    await expect(launcher.start(paths, 20)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 20)).rejects.toMatchObject({
       code: "SERVICE_START_TIMEOUT",
     });
     expect(Date.now() - startedAt).toBeLessThan(200);
@@ -231,6 +262,7 @@ describe("trusted graph-service launcher", () => {
         child.emit("spawn");
         if (child === secondChild) {
           publishedPid = child.pid ?? null;
+          child.emit("message", { pid: child.pid, type: "codegraph/ready" });
         }
       });
       return child;
@@ -244,10 +276,10 @@ describe("trusted graph-service launcher", () => {
       },
     );
 
-    await expect(launcher.start(paths, 15)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 15)).rejects.toMatchObject({
       code: "SERVICE_START_TIMEOUT",
     });
-    await expect(launcher.start(paths, 250)).resolves.toBeUndefined();
+    await expect(launcher.start(createLaunchConfig(paths), 250)).resolves.toBeUndefined();
 
     expect(spawnProcess).toHaveBeenCalledTimes(2);
     expect(firstChild.send).toHaveBeenCalledTimes(1);
@@ -271,7 +303,7 @@ describe("trusted graph-service launcher", () => {
       },
     );
 
-    await expect(launcher.start(paths, 100)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 100)).rejects.toMatchObject({
       code: "SERVICE_ENDPOINT_START_FAILED",
     });
   });
@@ -295,7 +327,7 @@ describe("trusted graph-service launcher", () => {
       },
     );
 
-    await expect(launcher.start(paths, 250)).rejects.toMatchObject(safeError);
+    await expect(launcher.start(createLaunchConfig(paths), 250)).rejects.toMatchObject(safeError);
   });
 
   it("escalates termination and waits for close when startup times out", async () => {
@@ -315,7 +347,7 @@ describe("trusted graph-service launcher", () => {
       spawnProcess,
     );
 
-    await expect(launcher.start(paths, 15)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 15)).rejects.toMatchObject({
       code: "SERVICE_START_TIMEOUT",
     });
 
@@ -334,7 +366,7 @@ describe("trusted graph-service launcher", () => {
     );
     const paths = await createPaths();
 
-    await expect(launcher.start(paths, 0)).rejects.toBeInstanceOf(TypeError);
+    await expect(launcher.start(createLaunchConfig(paths), 0)).rejects.toBeInstanceOf(TypeError);
     expect(spawnProcess).not.toHaveBeenCalled();
   });
 
@@ -357,11 +389,11 @@ describe("trusted graph-service launcher", () => {
     );
 
     const startedAt = Date.now();
-    await expect(launcher.start(paths, 15)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 15)).rejects.toMatchObject({
       code: "SERVICE_START_TIMEOUT",
     });
     expect(Date.now() - startedAt).toBeLessThan(200);
-    await expect(launcher.start(paths, 100)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 100)).rejects.toMatchObject({
       code: "SERVICE_ENDPOINT_START_FAILED",
     });
     expect(spawnProcess).toHaveBeenCalledTimes(1);
@@ -397,7 +429,7 @@ describe("trusted graph-service launcher", () => {
       { readPublishedPid: async () => child.pid + 1 },
     );
 
-    await expect(launcher.start(paths, 100)).resolves.toBeUndefined();
+    await expect(launcher.start(createLaunchConfig(paths), 100)).resolves.toBeUndefined();
     expect(child.send).toHaveBeenCalledTimes(1);
   });
 
@@ -419,7 +451,7 @@ describe("trusted graph-service launcher", () => {
       { readPublishedPid: async () => new Promise<never>(() => undefined) },
     );
 
-    await expect(launcher.start(paths, 15)).rejects.toMatchObject({
+    await expect(launcher.start(createLaunchConfig(paths), 15)).rejects.toMatchObject({
       code: "SERVICE_START_TIMEOUT",
     });
     expect(child.send).toHaveBeenCalledTimes(1);

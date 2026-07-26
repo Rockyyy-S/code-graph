@@ -1,4 +1,4 @@
-import { randomBytes as nativeRandomBytes } from "node:crypto";
+import { createHash, randomBytes as nativeRandomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { ServiceEndpointKind } from "@codegraph/contracts";
@@ -23,6 +23,7 @@ export interface WorkspacePathOptions {
   environment?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   randomBytes?: (size: number) => Buffer;
+  rootBindingKey?: string;
 }
 
 /**
@@ -37,6 +38,12 @@ export function createWorkspacePaths(
   if (!/^[a-f0-9]{64}$/.test(workspaceKey)) {
     throw new TypeError("workspace-key 必须是 SHA-256 小写十六进制。");
   }
+  if (
+    options.rootBindingKey !== undefined &&
+    !/^[a-f0-9]{64}$/.test(options.rootBindingKey)
+  ) {
+    throw new TypeError("物理根绑定 key 必须是 SHA-256 小写十六进制。");
+  }
   const platform = options.platform ?? process.platform;
   const pathApi = platform === "win32" ? path.win32 : path.posix;
   const cacheRoot =
@@ -44,8 +51,14 @@ export function createWorkspacePaths(
   if (!pathApi.isAbsolute(cacheRoot)) {
     throw new TypeError("缓存根目录必须是绝对路径。");
   }
-  /** 目录名使用 144-bit key 前缀控制 UDS 长度；完整 key 仍由 metadata 校验。 */
-  const compactWorkspaceKey = Buffer.from(workspaceKey, "hex")
+  /** 私有发现 key 同时绑定公共身份与物理根，避免 NFC/NFD 或多 clone 误连。 */
+  const discoveryKey = options.rootBindingKey === undefined
+    ? workspaceKey
+    : createHash("sha256")
+      .update(`${workspaceKey}:${options.rootBindingKey}`, "utf8")
+      .digest("hex");
+  /** 目录名使用 144-bit key 前缀控制 UDS 长度；完整 workspace key 仍由 metadata 校验。 */
+  const compactWorkspaceKey = Buffer.from(discoveryKey, "hex")
     .subarray(0, 18)
     .toString("base64url");
   const workspaceDirectory = pathApi.join(

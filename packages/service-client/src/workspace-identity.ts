@@ -42,6 +42,7 @@ export interface WorkspaceIdentityOptions {
 export interface WorkspaceIdentityResult {
   identity: WorkspaceIdentityInputV1;
   indexingRoot: string;
+  physicalRootKey: string;
   workspaceKey: string;
 }
 
@@ -72,13 +73,13 @@ export async function deriveWorkspaceIdentity(
   options: WorkspaceIdentityOptions = {},
 ): Promise<WorkspaceIdentityResult> {
   const resolveRealpath = options.realpath ?? nativeRealpath;
-  const resolvedRoot = (await resolveRealpath(indexingRoot)).normalize("NFC");
+  const platform = options.platform ?? process.platform;
+  /** 物理路径保留文件系统返回的原始 Unicode 形式，只在身份输入中执行 NFC。 */
+  const resolvedRoot = await resolveRealpath(indexingRoot);
   let identity: WorkspaceIdentityInputV1;
 
   if (options.gitIdentity) {
-    const repositoryRoot = (
-      await resolveRealpath(options.gitIdentity.repositoryRoot)
-    ).normalize("NFC");
+    const repositoryRoot = await resolveRealpath(options.gitIdentity.repositoryRoot);
     const pathApi = selectPathApi(resolvedRoot, options.platform);
     const relative = pathApi.relative(repositoryRoot, resolvedRoot);
     if (
@@ -105,6 +106,12 @@ export async function deriveWorkspaceIdentity(
   return {
     identity,
     indexingRoot: resolvedRoot,
+    /** 私有发现绑定保留原始物理 Unicode 形式，不改变公共 workspace identity。 */
+    physicalRootKey: sha256CanonicalJson({
+      platform,
+      realpath: resolvedRoot,
+      version: 1,
+    }),
     workspaceKey: sha256CanonicalJson(identity),
   };
 }
@@ -138,5 +145,5 @@ function normalizeLocalFileUri(realPath: string, platform: NodeJS.Platform): str
     );
     return pathToFileURL(driveNormalized.normalize("NFC"), { windows: true }).href;
   }
-  return pathToFileURL(realPath.normalize("NFC")).href;
+  return pathToFileURL(realPath.normalize("NFC"), { windows: false }).href;
 }

@@ -5,12 +5,26 @@ import {
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
 } from "./service-control.js";
-import { SERVICE_ERROR_CODES } from "./protocol-error.js";
+import {
+  cancelledIndexJobV1Schema,
+  failedIndexJobV1Schema,
+  indexCommitSummaryV1Schema,
+  partialIndexJobV1Schema,
+  queuedIndexJobV1Schema,
+  runningIndexJobV1Schema,
+  succeededIndexJobV1Schema,
+} from "./index-job-schema.js";
+
+export { errorV1Schema } from "./protocol-error-schema.js";
 
 const positiveRevisionSchema = {
   maximum: Number.MAX_SAFE_INTEGER,
   minimum: 1,
   type: "integer",
+} as const;
+
+const nullableGraphRevisionSchema = {
+  anyOf: [{ type: "null" }, positiveRevisionSchema],
 } as const;
 
 /** TelemetryStatusV1 的 JSON Schema 2020-12 定义。 */
@@ -30,11 +44,24 @@ export const serviceStatusV1Schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   additionalProperties: false,
   properties: {
-    availability: { const: "absent" },
-    committed: { type: "null" },
-    completeness: { const: "empty" },
+    availability: { enum: ["absent", "available"] },
+    committed: { anyOf: [{ type: "null" }, indexCommitSummaryV1Schema] },
+    completeness: { enum: ["complete", "empty", "partial"] },
     configRevision: positiveRevisionSchema,
-    freshness: { type: "null" },
+    currentIndexJob: {
+      anyOf: [{ type: "null" }, queuedIndexJobV1Schema, runningIndexJobV1Schema],
+    },
+    freshness: { enum: ["current", "stale", null] },
+    graphRevision: nullableGraphRevisionSchema,
+    lastIndexJob: {
+      anyOf: [
+        { type: "null" },
+        failedIndexJobV1Schema,
+        succeededIndexJobV1Schema,
+        partialIndexJobV1Schema,
+        cancelledIndexJobV1Schema,
+      ],
+    },
     lifecycle: { const: "running" },
     serviceInstanceId: { minLength: 1, type: "string" },
     serviceStatusRevision: positiveRevisionSchema,
@@ -49,7 +76,10 @@ export const serviceStatusV1Schema = {
     "committed",
     "completeness",
     "configRevision",
+    "currentIndexJob",
     "freshness",
+    "graphRevision",
+    "lastIndexJob",
     "lifecycle",
     "serviceInstanceId",
     "serviceStatusRevision",
@@ -68,8 +98,82 @@ export const serviceStatusV1CompatibleSchema = {
   additionalProperties: true,
   properties: {
     ...serviceStatusV1Schema.properties,
+    committed: {
+      anyOf: [
+        { type: "null" },
+        {
+          ...indexCommitSummaryV1Schema,
+          additionalProperties: true,
+          required: [
+            "builtinRulesVersion",
+            "edgeCount",
+            "excludedPathCount",
+            "generatedAt",
+            "indexedFileCount",
+            "nodeCount",
+          ],
+        },
+      ],
+    },
+    currentIndexJob: {
+      anyOf: [
+        { type: "null" },
+        {
+          ...queuedIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["id", "kind", "requestedAt", "state"],
+        },
+        {
+          ...runningIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["id", "kind", "requestedAt", "startedAt", "state"],
+        },
+      ],
+    },
+    freshness: { enum: ["current", "fresh", "stale", null] },
+    lastIndexJob: {
+      anyOf: [
+        { type: "null" },
+        {
+          ...failedIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "error", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+        {
+          ...succeededIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+        {
+          ...partialIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+        {
+          ...cancelledIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+      ],
+    },
     telemetry: { ...telemetryStatusV1Schema, additionalProperties: true },
   },
+  /** 旧 v1 服务没有 Job 字段；其他已发布字段仍必须存在。 */
+  required: [
+    "availability",
+    "committed",
+    "completeness",
+    "configRevision",
+    "freshness",
+    "lifecycle",
+    "serviceInstanceId",
+    "serviceStatusRevision",
+    "statusEpoch",
+    "statusRevision",
+    "telemetry",
+    "version",
+    "viewConfigRevision",
+  ],
 } as const;
 
 const supportedVersionListSchema = {
@@ -174,31 +278,6 @@ export const initializeResultSchema = {
   type: "object",
 } as const;
 
-/** ErrorV1 的严格 JSON Schema 2020-12 定义。 */
-export const errorV1Schema = {
-  $schema: "https://json-schema.org/draft/2020-12/schema",
-  additionalProperties: false,
-  properties: {
-    category: {
-      enum: ["compatibility", "lifecycle", "protocol", "security", "transport"],
-    },
-    code: { enum: SERVICE_ERROR_CODES },
-    logId: { minLength: 1, type: "string" },
-    message: { minLength: 1, type: "string" },
-    retryable: { type: "boolean" },
-    suggestedAction: { minLength: 1, type: "string" },
-  },
-  required: [
-    "category",
-    "code",
-    "logId",
-    "message",
-    "retryable",
-    "suggestedAction",
-  ],
-  type: "object",
-} as const;
-
 /** ServiceMetadataV1 的封闭 JSON Schema 2020-12 定义。 */
 export const serviceMetadataV1Schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -235,13 +314,6 @@ export const initializeResultCompatibleSchema = {
   properties: {
     ...initializeResultSchema.properties,
     capabilities: compatibleCapabilitiesSchema,
-    serviceStatus: {
-      ...serviceStatusV1Schema,
-      additionalProperties: true,
-      properties: {
-        ...serviceStatusV1Schema.properties,
-        telemetry: { ...telemetryStatusV1Schema, additionalProperties: true },
-      },
-    },
+    serviceStatus: serviceStatusV1CompatibleSchema,
   },
 } as const;

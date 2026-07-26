@@ -1,0 +1,24 @@
+{
+  "availability": "available",
+  "committed": {
+    "builtinRulesVersion": "builtin-ignore-v1",
+    "edgeCount": 0,
+    "excludedPathCount": 0,
+    "futureSummaryField": true,
+    "generatedAt": "2026-07-25T00:00:00.000Z",
+    "indexedFileCount": 0,
+    "nodeCount": 1
+  },
+  "completeness": "empty",
+  "configRevision": 1,
+  "freshness": "fresh",
+  "futureStatusField": true,
+  "lifecycle": "running",
+  "serviceInstanceId": "instance-deterministic-status-compatible-v1",
+  "serviceStatusRevision": 4,
+  "statusEpoch": "epoch-deterministic-status-compatible-v1",
+  "statusRevision": 4,
+  "telemetry": { "effective": "off", "pending": false, "requested": "off" },
+  "version": 1,
+  "viewConfigRevision": 1
+}

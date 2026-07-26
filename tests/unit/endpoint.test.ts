@@ -45,9 +45,25 @@ describe("workspace endpoint", () => {
     );
   });
 
+  it("separates discovery paths for distinct physical roots sharing one public workspace key", () => {
+    const first = createWorkspacePaths(workspaceKey, {
+      cacheRoot: "/home/example/.cache",
+      platform: "linux",
+      rootBindingKey: "1".repeat(64),
+    });
+    const second = createWorkspacePaths(workspaceKey, {
+      cacheRoot: "/home/example/.cache",
+      platform: "linux",
+      rootBindingKey: "2".repeat(64),
+    });
+
+    expect(first.workspaceDirectory).not.toBe(second.workspaceDirectory);
+    expect(first.workspaceKey).toBe(second.workspaceKey);
+  });
+
   it("fits the CI temporary cache shape within the POSIX UDS limit", () => {
     const paths = createWorkspacePaths(workspaceKey, {
-      cacheRoot: "/tmp/codegraph-instance-123456",
+      cacheRoot: "/g/2/cg-c2-123456",
       platform: "linux",
       randomBytes: () => Buffer.from("04".repeat(16), "hex"),
     });

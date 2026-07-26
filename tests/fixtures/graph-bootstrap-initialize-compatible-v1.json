@@ -1,0 +1,25 @@
+{
+  "capabilities": ["service/shutdown", "service/status"],
+  "cliSchemaVersion": 1,
+  "futureField": true,
+  "graphSchemaVersion": 1,
+  "protocolVersion": 1,
+  "rulesSchemaVersion": 1,
+  "serviceStatus": {
+    "availability": "absent",
+    "committed": null,
+    "completeness": "empty",
+    "configRevision": 1,
+    "freshness": null,
+    "futureStatusField": true,
+    "lifecycle": "running",
+    "serviceInstanceId": "instance-initialize-compatible-v1",
+    "serviceStatusRevision": 1,
+    "statusEpoch": "epoch-initialize-compatible-v1",
+    "statusRevision": 1,
+    "telemetry": { "effective": "off", "pending": false, "requested": "off" },
+    "version": 1,
+    "viewConfigRevision": 1
+  },
+  "serviceVersion": "0.0.0-test"
+}

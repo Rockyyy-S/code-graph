@@ -32,6 +32,7 @@ describe("graph-service startup failure handling", () => {
     mocks.closeLogger.mockRejectedValue(new Error("logger close failed"));
 
     await expect(startGraphService({
+      indexingRoot: process.cwd(),
       paths: {
         endpoint: "test-endpoint",
         endpointKind: "named-pipe",
@@ -46,30 +47,23 @@ describe("graph-service startup failure handling", () => {
   });
 
   it("bounds a permanently pending logger close before rethrowing fatal cleanup", async () => {
-    vi.useFakeTimers();
     const fatalError = new GraphServiceFatalCleanupError("listener cleanup failed");
     mocks.bootstrapServiceInstance.mockRejectedValue(fatalError);
     mocks.closeLogger.mockReturnValue(new Promise<void>(() => undefined));
 
-    try {
-      const startup = startGraphService({
-        paths: {
-          endpoint: "test-endpoint",
-          endpointKind: "named-pipe",
-          lockPath: "test-lock",
-          metadataPath: "test-metadata",
-          tokenPath: "test-token",
-          workspaceDirectory: "test-workspace",
-          workspaceKey: "1".repeat(64),
-        },
-      });
-      const assertion = expect(startup).rejects.toBe(fatalError);
-
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(250);
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
+    const startedAt = Date.now();
+    await expect(startGraphService({
+      indexingRoot: process.cwd(),
+      paths: {
+        endpoint: "test-endpoint",
+        endpointKind: "named-pipe",
+        lockPath: "test-lock",
+        metadataPath: "test-metadata",
+        tokenPath: "test-token",
+        workspaceDirectory: "test-workspace",
+        workspaceKey: "1".repeat(64),
+      },
+    })).rejects.toBe(fatalError);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });

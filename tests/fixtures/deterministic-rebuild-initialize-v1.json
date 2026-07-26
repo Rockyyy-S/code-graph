@@ -1,0 +1,26 @@
+{
+  "capabilities": ["job/start", "service/shutdown", "service/status"],
+  "cliSchemaVersion": 1,
+  "graphSchemaVersion": 1,
+  "protocolVersion": 1,
+  "rulesSchemaVersion": 1,
+  "serviceStatus": {
+    "availability": "absent",
+    "committed": null,
+    "completeness": "empty",
+    "configRevision": 1,
+    "currentIndexJob": null,
+    "freshness": null,
+    "graphRevision": null,
+    "lastIndexJob": null,
+    "lifecycle": "running",
+    "serviceInstanceId": "instance-deterministic-initialize-v1",
+    "serviceStatusRevision": 1,
+    "statusEpoch": "epoch-deterministic-initialize-v1",
+    "statusRevision": 1,
+    "telemetry": { "effective": "off", "pending": false, "requested": "off" },
+    "version": 1,
+    "viewConfigRevision": 1
+  },
+  "serviceVersion": "0.0.0-test"
+}

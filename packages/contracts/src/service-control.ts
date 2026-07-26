@@ -1,4 +1,8 @@
-import type { ServiceStatusV1 } from "./service-status.js";
+import type { JobStartRequestV1, JobStartResultV1 } from "./index-job.js";
+import type {
+  CompatibleServiceStatusV1,
+  ServiceStatusV1,
+} from "./service-status.js";
 
 /** JSON-RPC 线协议主版本；同一主版本通过能力协商保持向后兼容。 */
 export const PROTOCOL_VERSION = 1 as const;
@@ -14,6 +18,7 @@ export const CLI_SCHEMA_VERSION = 1 as const;
 
 /** 本 Story 唯一允许声明的可选服务能力，按字面量稳定排序并去重。 */
 export const SERVICE_CAPABILITIES = [
+  "job/start",
   "service/shutdown",
   "service/status",
 ] as const;
@@ -49,8 +54,12 @@ export interface InitializeResult {
 }
 
 /** 兼容客户端解析的 initialize 结果；未知 capability 由旧客户端忽略。 */
-export type CompatibleInitializeResult = Omit<InitializeResult, "capabilities"> & {
+export type CompatibleInitializeResult = Omit<
+  InitializeResult,
+  "capabilities" | "serviceStatus"
+> & {
   capabilities: readonly string[];
+  serviceStatus: CompatibleServiceStatusV1;
 };
 
 /** service/status 与 service/shutdown 共享的封闭空请求对象。 */
@@ -61,9 +70,16 @@ export interface ShutdownResult {
   accepted: true;
 }
 
+/** 公共索引入口复用架构锁定的 job/start 命名。 */
+export type JobStartRequest = JobStartRequestV1;
+
+/** job/start 接受后返回的最小排队结果。 */
+export type JobStartResult = JobStartResultV1;
+
 /** JSON-RPC 控制方法名。 */
 export const SERVICE_METHODS = {
   initialize: "initialize",
+  startJob: "job/start",
   shutdown: "service/shutdown",
   status: "service/status",
 } as const;

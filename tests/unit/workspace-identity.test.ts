@@ -53,6 +53,29 @@ describe("workspace identity", () => {
       uri: "file:///C:/Work/My%20Project",
       version: 1,
     });
+    expect(result.indexingRoot).toBe("c:\\Work\\My Project");
+  });
+
+  it("preserves the physical Unicode form while normalizing only identity input", async () => {
+    const decomposedRoot = "/workspace/Cafe\u0301";
+    const composedRoot = "/workspace/Café";
+    const result = await deriveWorkspaceIdentity(decomposedRoot, {
+      platform: "linux",
+      realpath: async () => decomposedRoot,
+    });
+    const composed = await deriveWorkspaceIdentity(composedRoot, {
+      platform: "linux",
+      realpath: async () => composedRoot,
+    });
+
+    expect(result.indexingRoot).toBe(decomposedRoot);
+    expect(result.identity).toEqual({
+      kind: "local",
+      uri: "file:///workspace/Caf%C3%A9",
+      version: 1,
+    });
+    expect(result.workspaceKey).toBe(composed.workspaceKey);
+    expect(result.physicalRootKey).not.toBe(composed.physicalRootKey);
   });
 
   it("normalizes a Windows UNC root as a file URI with an authority", async () => {

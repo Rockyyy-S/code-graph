@@ -1,0 +1,11 @@
+{
+  "accepted": true,
+  "job": {
+    "baseGraphRevision": 3,
+    "id": "job-deterministic-result-v1",
+    "kind": "rebuild",
+    "requestedAt": "2026-07-25T00:00:00.000Z",
+    "resultGraphRevision": null,
+    "state": "queued"
+  }
+}

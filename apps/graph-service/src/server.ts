@@ -19,6 +19,8 @@ import {
   validateErrorV1,
   validateInitializeResult,
   validateJsonRpcV2Envelope,
+  validateJobStartRequest,
+  validateJobStartResult,
   validateServiceControlRequest,
   validateServiceStatusV1,
   validateShutdownResult,
@@ -30,7 +32,8 @@ import {
   type HandshakeOpenContext,
 } from "./instance-owner.js";
 import { type SafeLocalLogger } from "./safe-log.js";
-import { createInitialServiceState, createInitializeResult } from "./service-state.js";
+import { createInitializeResult } from "./service-state.js";
+import { GraphServiceRequestError } from "./index-job-runtime.js";
 
 const MAX_JSON_RPC_HEADER_BYTES = 8 * 1024;
 const MAX_JSON_RPC_FRAME_BYTES = 1024 * 1024;
@@ -232,7 +235,7 @@ function createConnectionSession(
     sessionToken: context.sessionToken,
     workspaceKey: context.workspaceKey,
   });
-  const state = createInitialServiceState(context);
+  const state = context.runtime;
   const input = createBoundedJsonRpcInput(socket, logger, () => guard.initialized);
   const reader = new StreamMessageReader(input);
   /** 服务关闭由握手与 socket deadline 管理，禁用会在 dispose 后续期的诊断 timer。 */
@@ -301,10 +304,31 @@ function createConnectionSession(
       }
       return result;
     }
+    if (method === SERVICE_METHODS.startJob) {
+      if (!validateJobStartRequest(params)) {
+        return invalidControlRequest();
+      }
+      try {
+        const result = context.runtime.startJob(params);
+        if (!validateJobStartResult(result)) {
+          canonicalFailure = createInvalidCanonicalError();
+          scheduleConnectionClose(connection, socket);
+          return toResponseError(canonicalFailure);
+        }
+        return result;
+      } catch (error) {
+        if (error instanceof GraphServiceRequestError) {
+          return toResponseError(error.toProtocolError());
+        }
+        return toResponseError(createErrorV1("GRAPH_WRITE_FAILED", randomUUID()));
+      }
+    }
     if (method === SERVICE_METHODS.shutdown) {
       if (!validateServiceControlRequest(params)) {
         return invalidControlRequest();
       }
+      /** shutdown 一经接受便同步关闭共享 runtime 的新 Job 门禁。 */
+      context.runtime.beginShutdown();
       const result = { accepted: true } as const;
       if (!validateShutdownResult(result)) {
         return toResponseError(createErrorV1("SERVICE_INVALID_REQUEST", randomUUID()));

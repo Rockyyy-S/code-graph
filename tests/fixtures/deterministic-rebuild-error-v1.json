@@ -1,0 +1,8 @@
+{
+  "category": "indexing",
+  "code": "GRAPH_INPUT_CHANGED_DURING_BUILD",
+  "logId": "log-input-changed-v1",
+  "message": "工作区输入在图谱构建期间持续变化。",
+  "retryable": true,
+  "suggestedAction": "等待工作区写入稳定后重新请求 rebuild。"
+}
