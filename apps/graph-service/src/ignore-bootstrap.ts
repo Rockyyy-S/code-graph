@@ -1,5 +1,4 @@
-import { lstat } from "node:fs/promises";
-import path from "node:path";
+import { readdir } from "node:fs/promises";
 import { normalizeRelativeGraphPath } from "@codegraph/application";
 import { sha256CanonicalJson } from "@codegraph/contracts";
 
@@ -47,12 +46,14 @@ export type InitialIgnoreState =
  */
 export async function createInitialIgnoreState(indexingRoot: string): Promise<InitialIgnoreState> {
   try {
-    await lstat(path.join(indexingRoot, ".codegraphignore"));
-    return Object.freeze({ kind: "unsupported-user-config" });
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT")) {
+    const hasReservedIgnoreName = (await readdir(indexingRoot)).some((name) =>
+      name.normalize("NFC").toLowerCase() === ".codegraphignore");
+    if (hasReservedIgnoreName) {
       return Object.freeze({ kind: "unsupported-user-config" });
     }
+  } catch {
+    /** 无法完整枚举根目录时不能证明保留名不存在，启动屏障按用户配置存在处理。 */
+    return Object.freeze({ kind: "unsupported-user-config" });
   }
 
   const digestInput = {
@@ -109,9 +110,4 @@ export function isBuiltinIgnoredPath(
     "__generated__",
   ]);
   return segments.some((segment) => ignoredDirectoryNames.has(segment));
-}
-
-/** 检查 Node 系统错误码。 */
-function hasErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }

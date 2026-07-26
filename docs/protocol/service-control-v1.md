@@ -104,14 +104,32 @@ Node/libuv 公共 API 无法承诺 current-SID-only Pipe DACL。V1 明确接受�
 | `freshness` | `null` |
 | `completeness` | `empty` |
 | `committed` | `null` |
+| `graphRevision` | `null` |
 | `currentIndexJob` / `lastIndexJob` | `null` / `null` |
 | telemetry | requested/effective=`off`，pending=`false` |
-| revisions | 合法单调起始值 `1` |
+| service/status revisions | 合法单调起始值 `1` |
 
-重启恢复或 `job/start` 状态转换后，`committed` 可包含生成时间、文件/节点/边/排除计数，
-`currentIndexJob` 与 `lastIndexJob` 返回最小 queued/running/succeeded/failed 状态。成功但无受支持
-文件仍是 `availability=available`、`completeness=empty` 的真实提交。响应不包含
-graphRevision、findingsRevision、绝对 indexing root、缓存路径或 SQLite rowid。
+重启恢复或 `job/start` 状态转换后，`committed` 包含生成时间、文件/节点/边/排除计数与真实
+`graphRevision`；顶层 `graphRevision` 必须与 committed summary 一致。成功但无受支持文件仍是
+`availability=available`、`completeness=empty` 的真实提交。图谱 revision 与 service/status revision
+彼此独立：状态观察变化不会推进图谱 revision，相同目标状态的 rebuild 也不会制造 revision 噪声。
+
+Job 携带 `baseGraphRevision` 与 `resultGraphRevision`。queued/running 的 result 固定为 `null`；
+succeeded 指向实际提交 revision；partial、failed、cancelled 均不提交未完成 ownership，result 保持
+logical Job 的初始 base revision。stale 重排的 attempt 可使用更新后的 CAS base，但不得改写 logical Job
+的初始 base。`freshness=current` 表示公开摘要对应当前完整 read-set；输入变化、扫描无法继续证明当前性、
+v1 旧图迁移或在途重排时为 `stale`。partial 只表达当前 Job 未覆盖完整 slice，最后已提交 revision 继续
+可读；partial/stale 证据持久化，服务重启后不得恢复为虚假 current/complete。
+
+每次 rebuild 都捕获规范 manifest/逐文件 SHA-256、完整 ignore 快照、实例内 bootstrap generation、
+status epoch 与 base revision。提交前复核完整 read-set，并在 SQLite 单事务内再次 CAS base revision 与
+持久元数据。每次成功提交把完整 read-set JSON 与 patch digest 绑定到 succeeded Job；启动恢复交叉校验
+workspace digest、revision、ownership 与该 Job。CAS 不匹配时丢弃 patch，在同一 logical Job 内最多重排
+三次；整个期间读者只能看到旧的
+完整 revision。第四次仍过期时 Job 以 `GRAPH_INPUT_CHANGED_DURING_BUILD` 失败，旧 revision 与
+ownership 保持不变。当前公共方法集合没有新增 `job/cancel` 或查询 RPC。
+
+公共响应不包含 findingsRevision、绝对 indexing root、缓存路径、SQLite rowid、源码正文或读取缓冲。
 
 服务端请求、canonical 响应、metadata 与 `ErrorV1` 使用封闭 Schema。兼容客户端仍校验
 全部已知必填字段，但忽略同一协议主版本新增的可选响应字段和未知 capability。
@@ -124,6 +142,7 @@ RPC shutdown 的每次资源清理也有硬界限，重试耗尽后强制终止�
 
 | code | category | 基线处理 |
 | --- | --- | --- |
+| `GRAPH_INPUT_CHANGED_DURING_BUILD` | `indexing` | 等待工作区写入稳定后重新请求 rebuild |
 | `GRAPH_IGNORE_CONFIG_UNSUPPORTED` | `configuration` | 移除 `.codegraphignore` 并重启，或升级到支持该配置的版本 |
 | `GRAPH_SCAN_FAILED` | `indexing` | 检查工作区读取权限与安全限制后重试 |
 | `GRAPH_SCAN_LIMIT_EXCEEDED` | `indexing` | 缩小 indexing root 或排除生成目录后重试 |

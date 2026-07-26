@@ -19,6 +19,11 @@ export const SUPPORTED_SOURCE_SUFFIXES = [
   ".tsx",
 ] as const;
 
+/** 使用 UTF-16 码元序执行与宿主区域设置无关的稳定字符串排序。 */
+export function compareCanonicalGraphText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** 判断候选路径是否属于当前切片支持的 TS/JS 文件集合。 */
 export function isSupportedSourceFile(relativePath: string): boolean {
   const normalized = normalizeRelativeGraphPath(relativePath);
@@ -36,7 +41,7 @@ export function buildHierarchyGraph(
   candidateFiles: readonly string[],
 ): HierarchyGraph {
   const normalizedFiles = [...new Set(candidateFiles.map(normalizeRelativeGraphPath))]
-    .sort((left, right) => left.localeCompare(right));
+    .sort(compareCanonicalGraphText);
   if (!normalizedFiles.every(isSupportedSourceFile)) {
     throw new TypeError("hierarchy builder 收到了不受支持的候选文件。");
   }
@@ -48,7 +53,7 @@ export function buildHierarchyGraph(
       directories.add(segments.slice(0, index).join("/"));
     }
   }
-  const sortedDirectories = [...directories].sort((left, right) => left.localeCompare(right));
+  const sortedDirectories = [...directories].sort(compareCanonicalGraphText);
   const workspaceNode: HierarchyNode = {
     id: buildGraphEntityId(workspaceKey, "workspace", ""),
     kind: "workspace",
@@ -70,7 +75,7 @@ export function buildHierarchyGraph(
     ...fileNodes.map((node) => [node.relativePath, node] as const),
   ]);
   const childNodes = [...directoryNodes, ...fileNodes].sort((left, right) =>
-    left.relativePath.localeCompare(right.relativePath));
+    compareCanonicalGraphText(left.relativePath, right.relativePath));
   const edges = childNodes.map<HierarchyEdge>((child) => {
     const parentPath = parentRelativePath(child.relativePath);
     const parent = nodeByPath.get(parentPath);

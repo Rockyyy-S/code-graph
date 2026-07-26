@@ -4,32 +4,32 @@
     { "capabilityId": "rpc:initialize", "gateId": "contract" },
     {
       "capabilityId": "rpc:job/start",
-      "gateId": "graph-bootstrap-rpc-v1",
+      "gateId": "deterministic-rebuild-rpc-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateJobStartResult"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-rpc-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-rpc-v1.mjs",
         "evidenceId": "public-capability:rpc:job/start",
-        "fixturePath": "tests/fixtures/graph-bootstrap-rpc-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-rpc-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-rpc-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-rpc-v1-capability.test.ts"
       }
     },
     { "capabilityId": "rpc:service/shutdown", "gateId": "contract" },
     { "capabilityId": "rpc:service/status", "gateId": "contract" },
     {
       "capabilityId": "schema:errorV1Schema",
-      "gateId": "graph-bootstrap-error-v1",
+      "gateId": "deterministic-rebuild-error-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateErrorV1"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-error-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-error-v1.mjs",
         "evidenceId": "public-capability:schema:errorV1Schema",
-        "fixturePath": "tests/fixtures/graph-bootstrap-error-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-error-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-error-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-error-v1-capability.test.ts"
       }
     },
     {
@@ -105,30 +105,30 @@
     { "capabilityId": "schema:initializeRequestSchema", "gateId": "contract" },
     {
       "capabilityId": "schema:initializeResultCompatibleSchema",
-      "gateId": "graph-bootstrap-initialize-compatible-v1",
+      "gateId": "deterministic-rebuild-initialize-compatible-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateInitializeResultCompatible"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-initialize-compatible-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-initialize-compatible-v1.mjs",
         "evidenceId": "public-capability:schema:initializeResultCompatibleSchema",
-        "fixturePath": "tests/fixtures/graph-bootstrap-initialize-compatible-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-initialize-compatible-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-initialize-compatible-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-initialize-compatible-v1-capability.test.ts"
       }
     },
     {
       "capabilityId": "schema:initializeResultSchema",
-      "gateId": "graph-bootstrap-initialize-v1",
+      "gateId": "deterministic-rebuild-initialize-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateInitializeResult"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-initialize-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-initialize-v1.mjs",
         "evidenceId": "public-capability:schema:initializeResultSchema",
-        "fixturePath": "tests/fixtures/graph-bootstrap-initialize-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-initialize-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-initialize-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-initialize-v1-capability.test.ts"
       }
     },
     {
@@ -147,46 +147,46 @@
     },
     {
       "capabilityId": "schema:jobStartResultV1Schema",
-      "gateId": "graph-bootstrap-job-result-v1",
+      "gateId": "deterministic-rebuild-job-result-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateJobStartResult"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-job-result-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-job-result-v1.mjs",
         "evidenceId": "public-capability:schema:jobStartResultV1Schema",
-        "fixturePath": "tests/fixtures/graph-bootstrap-job-result-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-job-result-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-job-result-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-job-result-v1-capability.test.ts"
       }
     },
     { "capabilityId": "schema:serviceControlRequestSchema", "gateId": "contract" },
     { "capabilityId": "schema:serviceMetadataV1Schema", "gateId": "contract" },
     {
       "capabilityId": "schema:serviceStatusV1CompatibleSchema",
-      "gateId": "graph-bootstrap-status-compatible-v1",
+      "gateId": "deterministic-rebuild-status-compatible-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateServiceStatusV1Compatible"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-status-compatible-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-status-compatible-v1.mjs",
         "evidenceId": "public-capability:schema:serviceStatusV1CompatibleSchema",
-        "fixturePath": "tests/fixtures/graph-bootstrap-status-compatible-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-status-compatible-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-status-compatible-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-status-compatible-v1-capability.test.ts"
       }
     },
     {
       "capabilityId": "schema:serviceStatusV1Schema",
-      "gateId": "graph-bootstrap-status-v1",
+      "gateId": "deterministic-rebuild-status-v1",
       "verification": {
         "assertionTarget": {
           "modulePath": "packages/contracts/src/index.ts",
           "exportName": "validateServiceStatusV1"
         },
-        "entryPath": "scripts/contracts/verify-graph-bootstrap-status-v1.mjs",
+        "entryPath": "scripts/contracts/verify-deterministic-rebuild-status-v1.mjs",
         "evidenceId": "public-capability:schema:serviceStatusV1Schema",
-        "fixturePath": "tests/fixtures/graph-bootstrap-status-v1.json",
-        "testPath": "tests/unit/graph-bootstrap-status-v1-capability.test.ts"
+        "fixturePath": "tests/fixtures/deterministic-rebuild-status-v1.json",
+        "testPath": "tests/unit/deterministic-rebuild-status-v1-capability.test.ts"
       }
     },
     { "capabilityId": "schema:shutdownResultCompatibleSchema", "gateId": "contract" },

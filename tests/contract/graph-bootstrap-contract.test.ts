@@ -13,9 +13,11 @@ function createQueuedResult() {
   return {
     accepted: true as const,
     job: {
+      baseGraphRevision: null,
       id: "job-contract",
       kind: "initial-index" as const,
       requestedAt: "2026-07-25T00:00:00.000Z",
+      resultGraphRevision: null,
       state: "queued" as const,
     },
   };
@@ -54,6 +56,7 @@ describe("graph bootstrap public contract", () => {
       completeness: "empty",
       currentIndexJob: null,
       freshness: null,
+      graphRevision: null,
       lastIndexJob: null,
     })).toBe(true);
     expect(validateServiceStatusV1({
@@ -64,17 +67,21 @@ describe("graph bootstrap public contract", () => {
         edgeCount: 0,
         excludedPathCount: 0,
         generatedAt: "2026-07-25T00:00:00.000Z",
+        graphRevision: 1,
         indexedFileCount: 0,
         nodeCount: 1,
       },
       completeness: "empty",
       currentIndexJob: null,
-      freshness: "fresh",
+      freshness: "current",
+      graphRevision: 1,
       lastIndexJob: {
+        baseGraphRevision: null,
         completedAt: "2026-07-25T00:00:00.000Z",
         id: "job-contract",
         kind: "initial-index",
         requestedAt: "2026-07-24T23:59:58.000Z",
+        resultGraphRevision: 1,
         startedAt: "2026-07-24T23:59:59.000Z",
         state: "succeeded",
       },
@@ -84,6 +91,7 @@ describe("graph bootstrap public contract", () => {
   it("registers semantic configuration, storage, scan, and write failures", () => {
     expect(SERVICE_ERROR_CODES).toEqual(expect.arrayContaining([
       "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+      "GRAPH_INPUT_CHANGED_DURING_BUILD",
       "GRAPH_SCAN_FAILED",
       "GRAPH_SCAN_LIMIT_EXCEEDED",
       "GRAPH_STORE_OPEN_FAILED",

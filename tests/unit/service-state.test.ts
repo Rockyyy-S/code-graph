@@ -27,12 +27,13 @@ describe("empty graph-service state", () => {
       committed: null,
       completeness: "empty",
       freshness: null,
+      graphRevision: null,
       lifecycle: "running",
       serviceStatusRevision: 1,
       statusRevision: 1,
       telemetry: { effective: "off", pending: false, requested: "off" },
     });
-    expect(status).not.toHaveProperty("graphRevision");
+    expect(status.graphRevision).toBeNull();
     expect(status).not.toHaveProperty("findingsRevision");
     expect(status.currentIndexJob).toBeNull();
     expect(status.lastIndexJob).toBeNull();

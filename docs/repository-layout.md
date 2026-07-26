@@ -93,20 +93,42 @@ root。服务在开放握手前完成 SQLite 打开/迁移、generation 0 ignore
 
 工作区不存在 `.codegraphignore` 时，服务建立 `generation=0`、`validity=valid`、
 `contentHash=null` 的 `EffectiveIgnoreSnapshotV1`，其 `effectiveRules` 固定包含完整
-`BuiltinIgnoreV1`。若同名对象存在，本切片不解析或部分应用，控制面仍可用，但首次 Job 以
-`GRAPH_IGNORE_CONFIG_UNSUPPORTED` fail closed。scanner 只消费快照并在排除后生成 TS/JS 候选，
-不跟随符号链接，也不把绝对路径或源码正文写入公开合同。
+`BuiltinIgnoreV1`。若同名对象存在，本切片不解析或部分应用，控制面仍可用，但 Job 以
+`GRAPH_IGNORE_CONFIG_UNSUPPORTED` fail closed。scanner 只消费快照，使用已打开文件句柄读取原始
+字节并计算 SHA-256；读取前后复核普通文件、realpath containment、inode/设备/长度与时间元数据，
+单文件超过 10 MiB 或扫描中被替换时稳定失败；hash 使用固定小缓冲有界读取，并把 root、目录、
+候选路径与已打开句柄的设备/文件身份交叉绑定，避免同路径替换或 Windows reparse 竞态先读取错误
+对象。manifest 使用 NFC 相对 POSIX 路径与区域无关的 UTF-16 码元序，不把绝对路径、源码正文或
+读取缓冲写入公开合同和持久摘要。
 
-SQLite migration v1 只创建 `meta`、`workspace`、`nodes`、`edges`、`evidence`、
-`facts_ownership`、`jobs` 与 `schema_migrations` 八张用户表，并回验 WAL、foreign keys、
-`synchronous=NORMAL` 与 5000 ms busy timeout。首次 hierarchy 在单个同步事务中提交；失败回滚，
-未知更高 schema 安全拒绝并保留故障副本。业务实体使用 workspace 作用域确定性 `cg://` ID，路径
-统一为 Unicode NFC 的相对 POSIX 形式，SQLite rowid 与宿主绝对路径不进入公共合同。
+`packages/application` 把稳定 hierarchy 转为 `HierarchyFactBatchV1`，ownership 固定为
+`hierarchy:<cg://.../workspace/>`。只有 complete batch 能计算 replacement `GraphPatchV1`；patch
+按 node/edge ID 排序并以目标语义状态计算 digest，不包含 Job、时间、generation 或 base revision。
+相同目标状态重算与重放是 no-op，不产生重复事实、孤立 ownership 或无意义 revision。
+
+service-instance 级 `IndexReadSetProvider` 捕获规范 manifest/hash、完整 ignore snapshot、
+`bootstrapGeneration`、`statusEpoch` 与 `baseGraphRevision`。`inputDigest/configDigest` 只绑定规范输入和
+有效 ignore/producer 语义，generation/revision 仅作为完整 CAS 栅栏。提交前重新采集 read-set；过期
+patch 被丢弃，并在同一 logical Job 内最多重排三次，旧 committed revision 全程可读。
+
+SQLite migration v1 创建的 `meta`、`workspace`、`nodes`、`edges`、`evidence`、
+`facts_ownership`、`jobs` 与 `schema_migrations` 八张用户表保持不变；migration v2 只演进现有表，
+增加 graph revision、持久 freshness/completeness、read-set/patch digest、ownership kind 与 Job
+base/result revision。旧的真实空图
+或非空图保留并初始化为 revision 1，因为缺少可证明 read-set 而标记 stale；无提交的 v1 仍保持
+absent。唯一 `commitAtomicGraphUpdate()` 在一个同步 `better-sqlite3.transaction()` 内完成 base/read-set
+CAS、节点/边/ownership patch、摘要、digest、revision 与 Job 绑定；Job 额外保存完整 read-set JSON 与
+patch digest，启动恢复会同 workspace digest、revision、真实 ownership 和绑定 succeeded Job 交叉回验。
+snapshot 读取也使用单一只读事务，任一步失败整体回滚；WAL 第二读者只能在提交前看到旧 revision、
+提交后一次看到新 revision。WAL、foreign keys、
+`synchronous=NORMAL`、5000 ms busy timeout、未知高版本拒绝和故障副本规则继续保留。
 
 “从未构建”仍为 `availability=absent`、`freshness=null`、`completeness=empty`、
-`committed=null`。一次可信但无受支持文件的构建会产生 terminal succeeded Job 与持久化空摘要，
-状态为 available/fresh/empty；首次失败则保持 `committed=null`，并返回稳定错误 code、`logId` 与
-`suggestedAction`。本切片不创建 Findings、impact、export 表，也不提前伪造 graphRevision。
+`committed=null`、`graphRevision=null`。真实提交为 available/current，partial、failed、cancelled 或
+CAS 重排不会覆盖最后完整 ownership；partial/stale 证据会持久化，重启不得恢复成虚假 current/complete。
+logical Job 的初始 base 与重排 attempt 的 CAS base 分离；旧迁移图和发现输入变化的状态为 stale。terminal Job 显式携带
+base/result revision，service/status revision 不与 graphRevision 混用。本切片不创建 Findings、impact、
+export 表，也不新增公共 cancel/query RPC。
 
 ## VS Code extension 模板来源
 

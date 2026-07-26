@@ -185,8 +185,10 @@ export function validateServiceStatusV1(value: unknown): value is ServiceStatusV
   return (
     serviceStatusValidator(value) &&
     hasLegalServiceStatusCombination(value) &&
+    hasValidJobRevisions(value) &&
     hasValidNestedJobError(value) &&
-    hasValidServiceStatusTimestamps(value)
+    hasValidServiceStatusTimestamps(value) &&
+    hasValidJobSequence(value)
   );
 }
 
@@ -197,8 +199,10 @@ export function validateServiceStatusV1Compatible(
   return (
     serviceStatusCompatibleValidator(value) &&
     hasLegalServiceStatusCombination(value) &&
+    hasValidJobRevisions(value, true) &&
     hasValidNestedJobError(value, true) &&
-    hasValidServiceStatusTimestamps(value)
+    hasValidServiceStatusTimestamps(value) &&
+    hasValidJobSequence(value)
   );
 }
 
@@ -209,10 +213,42 @@ export function normalizeServiceStatusV1Compatible(
   if (!validateServiceStatusV1Compatible(value)) {
     return null;
   }
+  const graphRevision = value.graphRevision ??
+    (value.committed === null ? null : value.committed.graphRevision ?? 1);
+  const committed = value.committed === null
+    ? null
+    : { ...value.committed, graphRevision: value.committed.graphRevision ?? graphRevision! };
+  const currentIndexJob = value.currentIndexJob === undefined || value.currentIndexJob === null
+    ? null
+    : {
+      ...value.currentIndexJob,
+      baseGraphRevision: Object.hasOwn(value.currentIndexJob, "baseGraphRevision")
+        ? value.currentIndexJob.baseGraphRevision!
+        : (value.currentIndexJob.kind === "initial-index" ? null : graphRevision),
+      resultGraphRevision: null,
+    };
+  const lastIndexJob = (value.lastIndexJob === undefined || value.lastIndexJob === null
+    ? null
+    : {
+      ...value.lastIndexJob,
+      baseGraphRevision: Object.hasOwn(value.lastIndexJob, "baseGraphRevision")
+        ? value.lastIndexJob.baseGraphRevision!
+        : (value.lastIndexJob.kind === "initial-index" ? null : graphRevision),
+      resultGraphRevision: Object.hasOwn(value.lastIndexJob, "resultGraphRevision")
+        ? value.lastIndexJob.resultGraphRevision!
+        : (value.lastIndexJob.state === "succeeded"
+          ? graphRevision
+          : (Object.hasOwn(value.lastIndexJob, "baseGraphRevision")
+            ? value.lastIndexJob.baseGraphRevision!
+            : (value.lastIndexJob.kind === "initial-index" ? null : graphRevision))),
+    }) as ServiceStatusV1["lastIndexJob"];
   return {
     ...value,
-    currentIndexJob: value.currentIndexJob ?? null,
-    lastIndexJob: value.lastIndexJob ?? null,
+    committed,
+    currentIndexJob,
+    freshness: value.freshness === "fresh" ? "current" : value.freshness,
+    graphRevision,
+    lastIndexJob,
   };
 }
 
@@ -255,15 +291,43 @@ function hasLegalServiceStatusCombination(value: unknown): boolean {
   if (typeof value !== "object" || value === null) {
     return false;
   }
-  const status = value as ServiceStatusV1;
-  if (status.availability === "absent") {
-    return status.committed === null && status.freshness === null && status.completeness === "empty";
+  const status = value as CompatibleServiceStatusV1;
+  const lastIndexJobState = status.lastIndexJob?.state;
+  // partial 只能由未成功终态维持；succeeded 会恢复 empty/complete，缺少终态也无降级证据。
+  if (
+    (lastIndexJobState === "partial" && status.completeness !== "partial") ||
+    (status.completeness === "partial" &&
+      (lastIndexJobState === undefined || lastIndexJobState === "succeeded"))
+  ) {
+    return false;
   }
-  if (status.committed === null || status.freshness !== "fresh") {
+  if (status.availability === "absent") {
+    return status.committed === null &&
+      status.freshness === null &&
+      (status.completeness === "empty" || status.completeness === "partial") &&
+      (status.graphRevision === null || status.graphRevision === undefined);
+  }
+  if (
+    status.committed === null ||
+    (status.freshness !== "current" && status.freshness !== "stale" && status.freshness !== "fresh")
+  ) {
     return false;
   }
   if (!hasLegalHierarchySummary(status.committed)) {
     return false;
+  }
+  const graphRevision = status.graphRevision ?? status.committed.graphRevision ?? 1;
+  if (
+    !Number.isSafeInteger(graphRevision) ||
+    graphRevision < 1 ||
+    (status.graphRevision !== undefined && status.graphRevision !== graphRevision) ||
+    (status.committed.graphRevision !== undefined && status.committed.graphRevision !== graphRevision)
+  ) {
+    return false;
+  }
+  if (status.completeness === "partial") {
+    // partial 表示当前 committed slice 已知不完整，只能与 stale 同时出现。
+    return status.freshness === "stale";
   }
   return status.committed.indexedFileCount === 0
     ? status.completeness === "empty"
@@ -271,12 +335,90 @@ function hasLegalServiceStatusCombination(value: unknown): boolean {
 }
 
 /** hierarchy 是一棵含 workspace 根的树，摘要计数必须保持最小结构不变量。 */
-function hasLegalHierarchySummary(summary: ServiceStatusV1["committed"]): boolean {
+function hasLegalHierarchySummary(summary: CompatibleServiceStatusV1["committed"]): boolean {
   return (
     summary !== null &&
     summary.nodeCount >= summary.indexedFileCount + 1 &&
     summary.edgeCount === summary.nodeCount - 1
   );
+}
+
+/** Job revision 矩阵锁定 queued/running null result 与 terminal 未提交回落到 base。 */
+function hasValidJobRevisions(value: unknown, allowMissing = false): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const status = value as CompatibleServiceStatusV1;
+  const graphRevision = status.graphRevision ?? status.committed?.graphRevision ??
+    (status.committed === null ? null : 1);
+  const jobs = [status.currentIndexJob, status.lastIndexJob];
+  for (const job of jobs) {
+    if (job === undefined) {
+      if (!allowMissing) {
+        return false;
+      }
+      continue;
+    }
+    if (job === null) {
+      continue;
+    }
+    const hasBase = Object.hasOwn(job, "baseGraphRevision");
+    const hasResult = Object.hasOwn(job, "resultGraphRevision");
+    if (!allowMissing && (!hasBase || !hasResult)) {
+      return false;
+    }
+    const base = hasBase
+      ? job.baseGraphRevision
+      : (job.kind === "initial-index" ? null : graphRevision);
+    if (base === undefined || (base !== null && (!Number.isSafeInteger(base) || base < 1))) {
+      return false;
+    }
+    if (
+      (job.kind === "initial-index" && base !== null) ||
+      (job.kind === "rebuild" && base === null)
+    ) {
+      return false;
+    }
+    if (job.state === "queued" || job.state === "running") {
+      if (
+        (job.kind === "initial-index" && (base !== null || graphRevision !== null)) ||
+        (job.kind === "rebuild" &&
+          (base === null || graphRevision === null || base !== graphRevision))
+      ) {
+        return false;
+      }
+      if (hasResult && job.resultGraphRevision !== null) {
+        return false;
+      }
+      continue;
+    }
+    const result = hasResult
+      ? job.resultGraphRevision
+      : (job.state === "succeeded" ? graphRevision : base);
+    if (job.state === "succeeded") {
+      // initial-index 从 absent 基线产生唯一首个提交，结果 revision 只能是 1。
+      if (
+        result === null ||
+        result !== graphRevision ||
+        (job.kind === "initial-index" && result !== 1) ||
+        (base !== null && base > result)
+      ) {
+        return false;
+      }
+    } else {
+      // 未成功的 initial-index 不能与任何已提交图谱并存；已有基线后的 Job 必须是 rebuild。
+      if (
+        (job.kind === "initial-index" && graphRevision !== null) ||
+        result !== base
+      ) {
+        return false;
+      }
+      if (base !== null && (graphRevision === null || base > graphRevision)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 /** `job/start` 的 queued Job 必须携带真实存在的 UTC 日历时间。 */
@@ -326,6 +468,30 @@ function hasValidServiceStatusTimestamps(value: unknown): boolean {
     );
   }
   return true;
+}
+
+/** 当前 Job 必须晚于上一 terminal Job，且两者不能复用同一逻辑身份。 */
+function hasValidJobSequence(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const status = value as {
+    currentIndexJob?: { id?: unknown; requestedAt?: unknown } | null;
+    lastIndexJob?: { completedAt?: unknown; id?: unknown } | null;
+  };
+  const current = status.currentIndexJob;
+  const last = status.lastIndexJob;
+  if (current === undefined || current === null || last === undefined || last === null) {
+    return true;
+  }
+  return (
+    typeof current.id === "string" &&
+    typeof last.id === "string" &&
+    current.id !== last.id &&
+    typeof current.requestedAt === "string" &&
+    typeof last.completedAt === "string" &&
+    Date.parse(current.requestedAt) >= Date.parse(last.completedAt)
+  );
 }
 
 /** 校验任意已通过 Job Schema 的时间字段，缺失字段由具体状态 Schema 决定是否合法。 */

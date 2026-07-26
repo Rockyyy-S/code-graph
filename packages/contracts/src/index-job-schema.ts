@@ -6,18 +6,29 @@ const nonNegativeCountSchema = {
   type: "integer",
 } as const;
 
+const positiveGraphRevisionSchema = {
+  maximum: Number.MAX_SAFE_INTEGER,
+  minimum: 1,
+  type: "integer",
+} as const;
+
+const nullableGraphRevisionSchema = {
+  anyOf: [{ type: "null" }, positiveGraphRevisionSchema],
+} as const;
+
 const timestampSchema = {
   pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$",
   type: "string",
 } as const;
 
 const jobIdentityProperties = {
+  baseGraphRevision: nullableGraphRevisionSchema,
   id: { minLength: 1, type: "string" },
   kind: { enum: ["initial-index", "rebuild"] },
   requestedAt: timestampSchema,
 } as const;
 
-/** 首次层级提交摘要的严格 Schema。 */
+/** 确定性层级提交摘要的严格 Schema。 */
 export const indexCommitSummaryV1Schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   additionalProperties: false,
@@ -26,6 +37,7 @@ export const indexCommitSummaryV1Schema = {
     edgeCount: nonNegativeCountSchema,
     excludedPathCount: nonNegativeCountSchema,
     generatedAt: timestampSchema,
+    graphRevision: positiveGraphRevisionSchema,
     indexedFileCount: nonNegativeCountSchema,
     nodeCount: nonNegativeCountSchema,
   },
@@ -34,6 +46,7 @@ export const indexCommitSummaryV1Schema = {
     "edgeCount",
     "excludedPathCount",
     "generatedAt",
+    "graphRevision",
     "indexedFileCount",
     "nodeCount",
   ],
@@ -45,9 +58,17 @@ export const queuedIndexJobV1Schema = {
   additionalProperties: false,
   properties: {
     ...jobIdentityProperties,
+    resultGraphRevision: { type: "null" },
     state: { const: "queued" },
   },
-  required: ["id", "kind", "requestedAt", "state"],
+  required: [
+    "baseGraphRevision",
+    "id",
+    "kind",
+    "requestedAt",
+    "resultGraphRevision",
+    "state",
+  ],
   type: "object",
 } as const;
 
@@ -56,10 +77,19 @@ export const runningIndexJobV1Schema = {
   additionalProperties: false,
   properties: {
     ...jobIdentityProperties,
+    resultGraphRevision: { type: "null" },
     startedAt: timestampSchema,
     state: { const: "running" },
   },
-  required: ["id", "kind", "requestedAt", "startedAt", "state"],
+  required: [
+    "baseGraphRevision",
+    "id",
+    "kind",
+    "requestedAt",
+    "resultGraphRevision",
+    "startedAt",
+    "state",
+  ],
   type: "object",
 } as const;
 
@@ -69,10 +99,20 @@ export const succeededIndexJobV1Schema = {
   properties: {
     ...jobIdentityProperties,
     completedAt: timestampSchema,
+    resultGraphRevision: positiveGraphRevisionSchema,
     startedAt: timestampSchema,
     state: { const: "succeeded" },
   },
-  required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+  required: [
+    "baseGraphRevision",
+    "completedAt",
+    "id",
+    "kind",
+    "requestedAt",
+    "resultGraphRevision",
+    "startedAt",
+    "state",
+  ],
   type: "object",
 } as const;
 
@@ -83,19 +123,54 @@ export const failedIndexJobV1Schema = {
     ...jobIdentityProperties,
     completedAt: timestampSchema,
     error: errorV1Schema,
+    resultGraphRevision: nullableGraphRevisionSchema,
     startedAt: timestampSchema,
     state: { const: "failed" },
   },
   required: [
+    "baseGraphRevision",
     "completedAt",
     "error",
     "id",
     "kind",
     "requestedAt",
+    "resultGraphRevision",
     "startedAt",
     "state",
   ],
   type: "object",
+} as const;
+
+/** partial Job 的严格 Schema。 */
+export const partialIndexJobV1Schema = {
+  additionalProperties: false,
+  properties: {
+    ...jobIdentityProperties,
+    completedAt: timestampSchema,
+    resultGraphRevision: nullableGraphRevisionSchema,
+    startedAt: timestampSchema,
+    state: { const: "partial" },
+  },
+  required: [
+    "baseGraphRevision",
+    "completedAt",
+    "id",
+    "kind",
+    "requestedAt",
+    "resultGraphRevision",
+    "startedAt",
+    "state",
+  ],
+  type: "object",
+} as const;
+
+/** cancelled Job 的严格 Schema。 */
+export const cancelledIndexJobV1Schema = {
+  ...partialIndexJobV1Schema,
+  properties: {
+    ...partialIndexJobV1Schema.properties,
+    state: { const: "cancelled" },
+  },
 } as const;
 
 /** 任意当前切片 Job 状态的严格联合 Schema。 */
@@ -105,6 +180,8 @@ export const indexJobStatusV1Schema = {
     runningIndexJobV1Schema,
     succeededIndexJobV1Schema,
     failedIndexJobV1Schema,
+    partialIndexJobV1Schema,
+    cancelledIndexJobV1Schema,
   ],
 } as const;
 
@@ -131,12 +208,16 @@ export const jobStartResultV1Schema = {
   type: "object",
 } as const;
 
-/** 兼容客户端允许响应及已知 Job 增加可选字段。 */
+/** 兼容客户端允许旧 Job 缺少 revision 字段并忽略新增字段。 */
 export const jobStartResultV1CompatibleSchema = {
   ...jobStartResultV1Schema,
   additionalProperties: true,
   properties: {
     ...jobStartResultV1Schema.properties,
-    job: { ...queuedIndexJobV1Schema, additionalProperties: true },
+    job: {
+      ...queuedIndexJobV1Schema,
+      additionalProperties: true,
+      required: ["id", "kind", "requestedAt", "state"],
+    },
   },
 } as const;

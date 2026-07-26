@@ -55,7 +55,8 @@ describe("connect-first discovery", () => {
         record.metadata.serviceInstanceId,
       paths,
       start,
-      timeoutMs: 500,
+      /** 并行 CI 下首次读取发现证据可能受磁盘争用影响；本用例不承担 deadline 性能断言。 */
+      timeoutMs: 2_000,
     });
 
     expect(result).toBe(owner.serviceInstanceId);

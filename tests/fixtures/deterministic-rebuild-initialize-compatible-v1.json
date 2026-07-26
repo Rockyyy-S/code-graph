@@ -1,0 +1,32 @@
+{
+  "capabilities": ["service/shutdown", "service/status"],
+  "cliSchemaVersion": 1,
+  "futureField": true,
+  "graphSchemaVersion": 1,
+  "protocolVersion": 1,
+  "rulesSchemaVersion": 1,
+  "serviceStatus": {
+    "availability": "available",
+    "committed": {
+      "builtinRulesVersion": "builtin-ignore-v1",
+      "edgeCount": 0,
+      "excludedPathCount": 0,
+      "generatedAt": "2026-07-25T00:00:00.000Z",
+      "indexedFileCount": 0,
+      "nodeCount": 1
+    },
+    "completeness": "empty",
+    "configRevision": 1,
+    "freshness": "fresh",
+    "futureStatusField": true,
+    "lifecycle": "running",
+    "serviceInstanceId": "instance-deterministic-compatible-v1",
+    "serviceStatusRevision": 1,
+    "statusEpoch": "epoch-deterministic-compatible-v1",
+    "statusRevision": 1,
+    "telemetry": { "effective": "off", "pending": false, "requested": "off" },
+    "version": 1,
+    "viewConfigRevision": 1
+  },
+  "serviceVersion": "0.0.0-test"
+}

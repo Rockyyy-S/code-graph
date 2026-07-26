@@ -18,9 +18,11 @@ describe("index job service state", () => {
     });
 
     state.publishQueuedJob({
+      baseGraphRevision: null,
       id: "job-empty",
       kind: "initial-index",
       requestedAt: "2026-07-25T00:00:00.000Z",
+      resultGraphRevision: null,
       state: "queued",
     });
     state.publishRunningJob("job-empty", "2026-07-25T00:00:01.000Z");
@@ -29,6 +31,7 @@ describe("index job service state", () => {
       edgeCount: 0,
       excludedPathCount: 2,
       generatedAt: "2026-07-25T00:00:02.000Z",
+      graphRevision: 1,
       indexedFileCount: 0,
       nodeCount: 1,
     });
@@ -37,7 +40,8 @@ describe("index job service state", () => {
       committed: { indexedFileCount: 0 },
       completeness: "empty",
       currentIndexJob: null,
-      freshness: "fresh",
+      freshness: "current",
+      graphRevision: 1,
       lastIndexJob: { id: "job-empty", state: "succeeded" },
     });
 
@@ -48,9 +52,11 @@ describe("index job service state", () => {
       statusEpoch: "epoch-failed-test",
     });
     failed.publishQueuedJob({
+      baseGraphRevision: null,
       id: "job-failed",
       kind: "initial-index",
       requestedAt: "2026-07-25T00:00:00.000Z",
+      resultGraphRevision: null,
       state: "queued",
     });
     failed.publishRunningJob("job-failed", "2026-07-25T00:00:01.000Z");
@@ -84,14 +90,16 @@ describe("index job service state", () => {
     });
     const initial = state.getStatus();
     state.publishQueuedJob({
+      baseGraphRevision: null,
       id: "job-revision",
       kind: "initial-index",
       requestedAt: "2026-07-25T00:00:00.000Z",
+      resultGraphRevision: null,
       state: "queued",
     });
     const queued = state.getStatus();
     expect(queued.statusRevision).toBe(initial.statusRevision + 1);
     expect(queued.serviceStatusRevision).toBe(initial.serviceStatusRevision + 1);
-    expect(queued).not.toHaveProperty("graphRevision");
+    expect(queued.graphRevision).toBeNull();
   });
 });

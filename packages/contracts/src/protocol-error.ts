@@ -1,5 +1,6 @@
 /** Story 1.2 稳定错误码。 */
 export const SERVICE_ERROR_CODES = [
+  "GRAPH_INPUT_CHANGED_DURING_BUILD",
   "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
   "GRAPH_SCAN_FAILED",
   "GRAPH_SCAN_LIMIT_EXCEEDED",
@@ -55,6 +56,12 @@ interface ErrorDefinition {
 export const SERVICE_ERROR_REGISTRY: Readonly<
   Record<ServiceErrorCode, ErrorDefinition>
 > = {
+  GRAPH_INPUT_CHANGED_DURING_BUILD: {
+    category: "indexing",
+    message: "工作区输入在图谱构建期间持续变化。",
+    retryable: true,
+    suggestedAction: "等待工作区写入稳定后重新请求 rebuild。",
+  },
   GRAPH_IGNORE_CONFIG_UNSUPPORTED: {
     category: "configuration",
     message: "当前版本尚不能安全应用 .codegraphignore。",

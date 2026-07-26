@@ -80,7 +80,7 @@ describe("graph-service JSON-RPC control plane", () => {
       expect(initialize.result).toMatchObject({
         serviceStatus: status.result,
       });
-      expect(status.result).not.toHaveProperty("graphRevision");
+      expect(status.result).toHaveProperty("graphRevision", null);
       expect(status.result).not.toHaveProperty("nodes");
       expect(status.result).not.toHaveProperty("edges");
       const log = await readFile(

@@ -82,6 +82,15 @@ describe("initial ignore barrier", () => {
     }
   });
 
+  it("fails closed for a case-variant reserved ignore name", async () => {
+    const root = await createRoot();
+    await writeFile(path.join(root, ".CodeGraphIgnore"), "dist/\n", "utf8");
+
+    await expect(createInitialIgnoreState(root)).resolves.toEqual({
+      kind: "unsupported-user-config",
+    });
+  });
+
   it("matches every builtin category without treating ordinary source as ignored", async () => {
     const root = await createRoot();
     const state = await createInitialIgnoreState(root);

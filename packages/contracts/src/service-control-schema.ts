@@ -6,8 +6,10 @@ import {
   SERVICE_CAPABILITIES,
 } from "./service-control.js";
 import {
+  cancelledIndexJobV1Schema,
   failedIndexJobV1Schema,
   indexCommitSummaryV1Schema,
+  partialIndexJobV1Schema,
   queuedIndexJobV1Schema,
   runningIndexJobV1Schema,
   succeededIndexJobV1Schema,
@@ -19,6 +21,10 @@ const positiveRevisionSchema = {
   maximum: Number.MAX_SAFE_INTEGER,
   minimum: 1,
   type: "integer",
+} as const;
+
+const nullableGraphRevisionSchema = {
+  anyOf: [{ type: "null" }, positiveRevisionSchema],
 } as const;
 
 /** TelemetryStatusV1 的 JSON Schema 2020-12 定义。 */
@@ -40,14 +46,21 @@ export const serviceStatusV1Schema = {
   properties: {
     availability: { enum: ["absent", "available"] },
     committed: { anyOf: [{ type: "null" }, indexCommitSummaryV1Schema] },
-    completeness: { enum: ["complete", "empty"] },
+    completeness: { enum: ["complete", "empty", "partial"] },
     configRevision: positiveRevisionSchema,
     currentIndexJob: {
       anyOf: [{ type: "null" }, queuedIndexJobV1Schema, runningIndexJobV1Schema],
     },
-    freshness: { enum: ["fresh", null] },
+    freshness: { enum: ["current", "stale", null] },
+    graphRevision: nullableGraphRevisionSchema,
     lastIndexJob: {
-      anyOf: [{ type: "null" }, failedIndexJobV1Schema, succeededIndexJobV1Schema],
+      anyOf: [
+        { type: "null" },
+        failedIndexJobV1Schema,
+        succeededIndexJobV1Schema,
+        partialIndexJobV1Schema,
+        cancelledIndexJobV1Schema,
+      ],
     },
     lifecycle: { const: "running" },
     serviceInstanceId: { minLength: 1, type: "string" },
@@ -65,6 +78,7 @@ export const serviceStatusV1Schema = {
     "configRevision",
     "currentIndexJob",
     "freshness",
+    "graphRevision",
     "lastIndexJob",
     "lifecycle",
     "serviceInstanceId",
@@ -87,21 +101,59 @@ export const serviceStatusV1CompatibleSchema = {
     committed: {
       anyOf: [
         { type: "null" },
-        { ...indexCommitSummaryV1Schema, additionalProperties: true },
+        {
+          ...indexCommitSummaryV1Schema,
+          additionalProperties: true,
+          required: [
+            "builtinRulesVersion",
+            "edgeCount",
+            "excludedPathCount",
+            "generatedAt",
+            "indexedFileCount",
+            "nodeCount",
+          ],
+        },
       ],
     },
     currentIndexJob: {
       anyOf: [
         { type: "null" },
-        { ...queuedIndexJobV1Schema, additionalProperties: true },
-        { ...runningIndexJobV1Schema, additionalProperties: true },
+        {
+          ...queuedIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["id", "kind", "requestedAt", "state"],
+        },
+        {
+          ...runningIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["id", "kind", "requestedAt", "startedAt", "state"],
+        },
       ],
     },
+    freshness: { enum: ["current", "fresh", "stale", null] },
     lastIndexJob: {
       anyOf: [
         { type: "null" },
-        { ...failedIndexJobV1Schema, additionalProperties: true },
-        { ...succeededIndexJobV1Schema, additionalProperties: true },
+        {
+          ...failedIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "error", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+        {
+          ...succeededIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+        {
+          ...partialIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
+        {
+          ...cancelledIndexJobV1Schema,
+          additionalProperties: true,
+          required: ["completedAt", "id", "kind", "requestedAt", "startedAt", "state"],
+        },
       ],
     },
     telemetry: { ...telemetryStatusV1Schema, additionalProperties: true },

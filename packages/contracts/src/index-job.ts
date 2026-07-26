@@ -9,15 +9,18 @@ export interface IndexCommitSummaryV1 {
   edgeCount: number;
   excludedPathCount: number;
   generatedAt: string;
+  graphRevision: number;
   indexedFileCount: number;
   nodeCount: number;
 }
 
 /** 已排队但尚未开始的索引 Job。 */
 export interface QueuedIndexJobV1 {
+  baseGraphRevision: number | null;
   id: string;
   kind: IndexJobKindV1;
   requestedAt: string;
+  resultGraphRevision: null;
   state: "queued";
 }
 
@@ -28,24 +31,42 @@ export interface RunningIndexJobV1 extends Omit<QueuedIndexJobV1, "state"> {
 }
 
 /** 成功完成的索引 Job。 */
-export interface SucceededIndexJobV1 extends Omit<RunningIndexJobV1, "state"> {
+export interface SucceededIndexJobV1 extends Omit<RunningIndexJobV1, "resultGraphRevision" | "state"> {
   completedAt: string;
+  resultGraphRevision: number;
   state: "succeeded";
 }
 
 /** 失败结束且携带稳定诊断的索引 Job。 */
-export interface FailedIndexJobV1 extends Omit<RunningIndexJobV1, "state"> {
+export interface FailedIndexJobV1 extends Omit<RunningIndexJobV1, "resultGraphRevision" | "state"> {
   completedAt: string;
   error: ErrorV1;
+  resultGraphRevision: number | null;
   state: "failed";
+}
+
+/** 未覆盖完整 ownership slice 的 terminal partial Job。 */
+export interface PartialIndexJobV1 extends Omit<RunningIndexJobV1, "resultGraphRevision" | "state"> {
+  completedAt: string;
+  resultGraphRevision: number | null;
+  state: "partial";
+}
+
+/** 在事务外安全点终止且未提交事实的 Job。 */
+export interface CancelledIndexJobV1 extends Omit<RunningIndexJobV1, "resultGraphRevision" | "state"> {
+  completedAt: string;
+  resultGraphRevision: number | null;
+  state: "cancelled";
 }
 
 /** 当前切片允许的全部 Job 状态。 */
 export type IndexJobStatusV1 =
+  | CancelledIndexJobV1
   | QueuedIndexJobV1
   | RunningIndexJobV1
   | SucceededIndexJobV1
-  | FailedIndexJobV1;
+  | FailedIndexJobV1
+  | PartialIndexJobV1;
 
 /** `job/start` 的封闭 rebuild 请求；服务端根据已提交基线决定实际 Job 类型。 */
 export interface JobStartRequestV1 {

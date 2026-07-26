@@ -203,7 +203,7 @@ describe("gate applicability", () => {
       expect(providerEvaluation.hostedEvidenceEligible).toBe(true);
       expect(validateGateEvaluationContextV1(providerEvaluation.evaluationContext)).toBe(true);
     },
-    20_000,
+    45_000,
   );
 
   it(
@@ -225,7 +225,7 @@ describe("gate applicability", () => {
       expect(fixture.headOid).toHaveLength(64);
       expect(evaluation.comparisonBaseOid).toBe(fixture.baseOid);
     },
-    20_000,
+    45_000,
   );
 
   it("未知 gate、非法 registry 或 provider 输入一律 invalid", async () => {

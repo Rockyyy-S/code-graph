@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
-import { createErrorV1 } from "@codegraph/contracts";
+import { createErrorV1, sha256CanonicalJson } from "@codegraph/contracts";
 import { openSqliteGraphStore } from "@codegraph/adapter-store-sqlite";
 import {
   bootstrapServiceInstance,
@@ -13,7 +13,7 @@ import { createBoundIpcEndpoint } from "./server.js";
 import { createSafeLocalLogger, type SafeLocalLogger } from "./safe-log.js";
 import type { ServiceInstancePaths } from "./instance-owner.js";
 import { createInitialIgnoreState } from "./ignore-bootstrap.js";
-import { createIndexJobRuntime } from "./index-job-runtime.js";
+import { createVerifiedIndexJobRuntime } from "./index-job-runtime.js";
 
 const STARTUP_LOGGER_CLOSE_TIMEOUT_MS = 250;
 
@@ -50,10 +50,11 @@ export async function startGraphService(
         try {
           store = await openSqliteGraphStore({
             databasePath: path.join(options.paths.workspaceDirectory, "graph.sqlite"),
+            digestPort: { digest: sha256CanonicalJson },
             workspaceKey,
           });
           const ignoreState = await createInitialIgnoreState(indexingRoot);
-          return createIndexJobRuntime({
+          return await createVerifiedIndexJobRuntime({
             ignoreState,
             indexingRoot,
             serviceInstanceId,
@@ -125,5 +126,6 @@ async function closeLoggerWithoutMaskingStartupError(
 }
 
 export * from "./instance-owner.js";
+export * from "./index-read-set.js";
 export * from "./index-job-runtime.js";
 export * from "./service-state.js";

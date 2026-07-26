@@ -4,10 +4,12 @@ import {
   PROTOCOL_VERSION,
   RULES_SCHEMA_VERSION,
   SERVICE_CAPABILITIES,
+  type CancelledIndexJobV1,
   type ErrorV1,
   type FailedIndexJobV1,
   type IndexCommitSummaryV1,
   type InitializeResult,
+  type PartialIndexJobV1,
   type QueuedIndexJobV1,
   type ServiceStatusV1,
   type SucceededIndexJobV1,
@@ -19,7 +21,9 @@ export const GRAPH_SERVICE_VERSION = "0.0.0";
 /** 服务状态初始化所需的持久化基线与实例身份。 */
 export interface InitialServiceStateOptions {
   committed?: IndexCommitSummaryV1 | null;
-  lastJob?: FailedIndexJobV1 | SucceededIndexJobV1 | null;
+  completeness?: "complete" | "empty" | "partial";
+  freshness?: "current" | "stale" | null;
+  lastJob?: CancelledIndexJobV1 | FailedIndexJobV1 | PartialIndexJobV1 | SucceededIndexJobV1 | null;
   serviceInstanceId: string;
   statusEpoch: string;
 }
@@ -27,9 +31,12 @@ export interface InitialServiceStateOptions {
 /** graph-service 共享的可变权威状态。 */
 export interface ServiceState {
   getStatus: () => ServiceStatusV1;
+  publishCancelledJob: (jobId: string, completedAt: string) => void;
   publishFailedJob: (jobId: string, completedAt: string, error: ErrorV1) => void;
+  publishPartialJob: (jobId: string, completedAt: string) => void;
   publishQueuedJob: (job: QueuedIndexJobV1) => void;
   publishRunningJob: (jobId: string, startedAt: string) => void;
+  publishStale: () => void;
   publishSucceededJob: (jobId: string, summary: IndexCommitSummaryV1) => void;
 }
 
@@ -41,10 +48,14 @@ export function createServiceState(options: InitialServiceStateOptions): Service
       ? "absent"
       : "available",
     committed: options.committed ?? null,
-    completeness: (options.committed?.indexedFileCount ?? 0) === 0 ? "empty" : "complete",
+    completeness: options.completeness ??
+      ((options.committed?.indexedFileCount ?? 0) === 0 ? "empty" : "complete"),
     configRevision: 1,
     currentIndexJob: null,
-    freshness: options.committed === null || options.committed === undefined ? null : "fresh",
+    freshness: options.committed === null || options.committed === undefined
+      ? null
+      : options.freshness ?? "current",
+    graphRevision: options.committed?.graphRevision ?? null,
     lastIndexJob: options.lastJob ?? null,
     lifecycle: "running",
     serviceInstanceId: options.serviceInstanceId,
@@ -73,16 +84,45 @@ export function createServiceState(options: InitialServiceStateOptions): Service
 
   return {
     getStatus: () => status,
+    publishCancelledJob: (jobId, completedAt) => {
+      const running = requireActiveJob(currentIndexJob, jobId, completedAt);
+      const cancelled: CancelledIndexJobV1 = Object.freeze({
+        ...running,
+        completedAt,
+        resultGraphRevision: running.baseGraphRevision,
+        state: "cancelled",
+      });
+      currentIndexJob = null;
+      publish({ ...status, currentIndexJob: null, lastIndexJob: cancelled });
+    },
     publishFailedJob: (jobId, completedAt, error) => {
       const running = requireActiveJob(currentIndexJob, jobId, completedAt);
       const failed: FailedIndexJobV1 = Object.freeze({
         ...running,
         completedAt,
         error: Object.freeze({ ...error }),
+        resultGraphRevision: running.baseGraphRevision,
         state: "failed",
       });
       currentIndexJob = null;
       publish({ ...status, currentIndexJob: null, lastIndexJob: failed });
+    },
+    publishPartialJob: (jobId, completedAt) => {
+      const running = requireRunningJob(currentIndexJob, jobId);
+      const partial: PartialIndexJobV1 = Object.freeze({
+        ...running,
+        completedAt,
+        resultGraphRevision: running.baseGraphRevision,
+        state: "partial",
+      });
+      currentIndexJob = null;
+      publish({
+        ...status,
+        completeness: "partial",
+        currentIndexJob: null,
+        freshness: status.availability === "available" ? "stale" : null,
+        lastIndexJob: partial,
+      });
     },
     publishQueuedJob: (job) => {
       if (currentIndexJob !== null) {
@@ -107,6 +147,7 @@ export function createServiceState(options: InitialServiceStateOptions): Service
       const succeeded: SucceededIndexJobV1 = Object.freeze({
         ...running,
         completedAt: summary.generatedAt,
+        resultGraphRevision: summary.graphRevision,
         state: "succeeded",
       });
       currentIndexJob = null;
@@ -116,9 +157,15 @@ export function createServiceState(options: InitialServiceStateOptions): Service
         committed: Object.freeze({ ...summary }),
         completeness: summary.indexedFileCount === 0 ? "empty" : "complete",
         currentIndexJob: null,
-        freshness: "fresh",
+        freshness: "current",
+        graphRevision: summary.graphRevision,
         lastIndexJob: succeeded,
       });
+    },
+    publishStale: () => {
+      if (status.availability === "available" && status.freshness !== "stale") {
+        publish({ ...status, freshness: "stale" });
+      }
     },
   };
 }

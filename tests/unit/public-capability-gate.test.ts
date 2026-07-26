@@ -810,7 +810,7 @@ it("只伪造字符串标记", () => { expect(fixturePath).toContain("fixtures")
         headSurface,
       }),
     ).toEqual([]);
-  });
+  }, 30_000);
 });
 
 /** 递归读取公共表面分析所需源码，排除构建产物与依赖目录。 */

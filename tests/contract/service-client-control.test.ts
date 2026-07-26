@@ -136,6 +136,7 @@ describe("shared service-client control API", () => {
     const statusEpoch = "previous-v1-epoch";
     const previousStatus = createAbsentStatus(serviceInstanceId, statusEpoch) as Record<string, unknown>;
     delete previousStatus.currentIndexJob;
+    delete previousStatus.graphRevision;
     delete previousStatus.lastIndexJob;
     const sockets = new Set<net.Socket>();
     const server = net.createServer((socket) => {
@@ -265,7 +266,8 @@ describe("shared service-client control API", () => {
         },
         "0.0.0-test",
         1_000,
-        25,
+        /** 并行 contract 负载可能阻塞 25ms 定时器；本用例只验证超时后的连接回收。 */
+        250,
       );
       await expect(client.startRebuild()).rejects.toMatchObject({
         code: "SERVICE_START_TIMEOUT",
@@ -852,6 +854,7 @@ function createAbsentStatus(serviceInstanceId: string, statusEpoch: string) {
     configRevision: 1,
     currentIndexJob: null,
     freshness: null,
+    graphRevision: null,
     lastIndexJob: null,
     lifecycle: "running" as const,
     serviceInstanceId,

@@ -1,0 +1,35 @@
+{
+  "availability": "available",
+  "committed": {
+    "builtinRulesVersion": "builtin-ignore-v1",
+    "edgeCount": 2,
+    "excludedPathCount": 3,
+    "generatedAt": "2026-07-25T00:00:00.000Z",
+    "graphRevision": 4,
+    "indexedFileCount": 1,
+    "nodeCount": 3
+  },
+  "completeness": "complete",
+  "configRevision": 1,
+  "currentIndexJob": null,
+  "freshness": "current",
+  "graphRevision": 4,
+  "lastIndexJob": {
+    "baseGraphRevision": 3,
+    "completedAt": "2026-07-25T00:00:00.000Z",
+    "id": "job-deterministic-status-v1",
+    "kind": "rebuild",
+    "requestedAt": "2026-07-24T23:59:58.000Z",
+    "resultGraphRevision": 4,
+    "startedAt": "2026-07-24T23:59:59.000Z",
+    "state": "succeeded"
+  },
+  "lifecycle": "running",
+  "serviceInstanceId": "instance-deterministic-status-v1",
+  "serviceStatusRevision": 4,
+  "statusEpoch": "epoch-deterministic-status-v1",
+  "statusRevision": 4,
+  "telemetry": { "effective": "off", "pending": false, "requested": "off" },
+  "version": 1,
+  "viewConfigRevision": 1
+}
