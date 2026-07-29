@@ -1,5 +1,7 @@
-import { createHash } from "node:crypto";
-import { lstat as nativeLstat, open as nativeOpen, realpath as nativeRealpath } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const DEFAULT_MAX_HOST_PATH_CANDIDATES = 256;
@@ -11,39 +13,24 @@ export const MAX_HOST_PATH_ABSOLUTE_BYTES = 128 * 1024;
 export const DEFAULT_MAX_HOST_PATH_BATCH_BYTES = 2 * 1024 * 1024;
 export const MAX_HOST_PATH_BATCH_BYTES = 8 * 1024 * 1024;
 
-/** 宿主状态只暴露形成 opened-object identity 与拓扑证明所需字段。 */
-export interface HostPathIdentityStat {
-  dev: bigint;
-  ino: bigint;
-  isDirectory(): boolean;
-  isFile(): boolean;
-  isSymbolicLink(): boolean;
-}
+const WINDOWS_SNAPSHOT_FENCE = "non-delete-shared-handle-lease-v1";
+const WINDOWS_CAPTURE_TIMEOUT_MS = 30_000;
+const WINDOWS_CAPTURE_OUTPUT_LIMIT = 1024 * 1024;
 
-/** 已打开句柄把 identity 绑定到实际对象，不从路径或 creation time 猜测。 */
-export interface HostPathIdentityFileHandle {
-  close(): Promise<void>;
-  stat(): Promise<HostPathIdentityStat>;
-}
-
-/** 可注入文件系统边界让竞态、缺失与权限错误可被确定性测试。 */
-export interface HostPathIdentityFileSystem {
-  lstat(input: string): Promise<HostPathIdentityStat>;
-  open(input: string): Promise<HostPathIdentityFileHandle>;
-  realpath(input: string): Promise<string>;
-}
-
-/** 已证明存在的宿主文件身份；公开字段均为 opaque digest，不泄漏绝对路径。 */
+/** 已证明存在的宿主文件身份只在同一原生句柄快照内有效。 */
 export interface PresentHostPathIdentityV1 {
   evidenceDigest: string;
   identity: string;
+  identityLifetime: "snapshot";
+  logicalMappingDigest: string;
   rootIdentity: string;
+  snapshotIdentity: string;
   status: "present";
   version: 1;
   volumeIdentity: string;
 }
 
-/** 无法取得现存身份证明时返回封闭失败状态，调用者不得从字符串猜测身份。 */
+/** 无法取得现存身份证明时返回封闭失败状态。 */
 export interface FailedHostPathIdentityV1 {
   code: string;
   retryable: boolean;
@@ -55,31 +42,32 @@ export type HostPathIdentityObservationV1 =
   | PresentHostPathIdentityV1
   | FailedHostPathIdentityV1;
 
-/** TypeScript 主进程交给 broker 的规范逻辑候选与实际宿主路径。 */
+/** TypeScript 主进程交给 broker 的规范逻辑候选与宿主路径断言。 */
 export interface HostPathIdentityCandidateV1 {
   absolutePath: string;
   logicalPath: string;
 }
 
-/** 单个逻辑候选的宿主证明；失败项只保留规范 logical path。 */
+/** 单个逻辑候选的宿主证明。 */
 export interface HostPathIdentityCandidateEntryV1 {
   logicalPath: string;
   observation: HostPathIdentityObservationV1;
 }
 
-/** 相同 opaque identity 下的 logical aliases；排序只使用精确字符串序。 */
+/** 相同快照身份下的 logical aliases。 */
 export interface HostPathAliasGroupV1 {
   identity: string;
   logicalPaths: string[];
 }
 
-/** 完成或整批失败的候选证明，readSetDigest 绑定两次一致观察。 */
+/** 完成或整批失败的候选证明。 */
 export interface HostPathCandidateProofV1 {
   aliasGroups: HostPathAliasGroupV1[];
   entries: HostPathIdentityCandidateEntryV1[];
   generation: number;
   proofDigest: string;
   readSetDigest: string;
+  snapshotIdentity: string | null;
   status: "complete" | "failed";
   version: 1;
 }
@@ -91,12 +79,11 @@ export type RejectedHostPathCandidateCode =
   | "HOST_PATH_CANDIDATE_INVALID"
   | "HOST_PATH_CANDIDATE_LIMIT_EXCEEDED"
   | "HOST_PATH_DEVICE_PATH"
-  | "HOST_PATH_LOGICAL_ALIAS_CONFLICT"
   | "HOST_PATH_LOGICAL_PATH_LIMIT_EXCEEDED"
-  | "HOST_PATH_OUTSIDE_INDEXING_ROOT"
+  | "HOST_PATH_NETWORK_PATH"
   | "HOST_PATH_RELATIVE_PATH";
 
-/** 输入边界不可信时拒绝整批请求，且绝不返回截断后的伪完整 map。 */
+/** 输入边界不可信时拒绝整批请求。 */
 export interface RejectedHostPathCandidateProofV1 {
   aliasGroups: [];
   code: RejectedHostPathCandidateCode;
@@ -104,6 +91,7 @@ export interface RejectedHostPathCandidateProofV1 {
   generation: number;
   proofDigest: string;
   readSetDigest: null;
+  snapshotIdentity: null;
   status: "rejected";
   version: 1;
 }
@@ -112,11 +100,64 @@ export type HostPathCandidateResolutionV1 =
   | HostPathCandidateProofV1
   | RejectedHostPathCandidateProofV1;
 
-/** 单路径观察显式绑定 indexing root，不允许无根路径证明。 */
+/** 原生快照必须声明明确的卷与句柄栅栏能力。 */
+export interface HostPathSnapshotCapabilityV1 {
+  fileIdInfo: boolean;
+  fileSystemType: string;
+  fixedVolume: boolean;
+  snapshotFence: string;
+}
+
+/** 传给受信任原生边界的单项请求。 */
+export interface HostPathSnapshotCandidateV1 {
+  absolutePath: string;
+  candidateIndex: number;
+  logicalPath: string;
+  trustedPath: string;
+}
+
+/** 原生边界返回的单项对象身份不包含任何路径。 */
+export interface HostPathSnapshotItemV1 {
+  candidateIndex: number;
+  objectId: string;
+}
+
+/** 同一批句柄同时存活期间形成的原生快照。 */
+export interface CompleteHostPathSnapshotV1 {
+  capability: HostPathSnapshotCapabilityV1;
+  captureNonce: string;
+  items: HostPathSnapshotItemV1[];
+  rootObjectId: string;
+  status: "complete";
+  volumeId: string;
+}
+
+/** 原生边界失败必须携带封闭、可重试分类。 */
+export interface FailedHostPathSnapshotV1 {
+  code: string;
+  retryable: boolean;
+  status: "missing" | "unreadable" | "changed" | "unsupported" | "error";
+}
+
+export type HostPathSnapshotCaptureV1 =
+  | CompleteHostPathSnapshotV1
+  | FailedHostPathSnapshotV1;
+
+/** 可替换的受信任宿主边界用于确定性注入竞态与能力缺失。 */
+export interface HostPathIdentitySnapshotProvider {
+  capture(request: {
+    candidates: readonly HostPathSnapshotCandidateV1[];
+    captureNonce: string;
+    indexingRoot: string;
+    platform: NodeJS.Platform;
+  }): Promise<HostPathSnapshotCaptureV1>;
+}
+
+/** 单路径观察显式绑定 indexing root。 */
 export interface ObserveHostPathIdentityOptions {
-  fileSystem?: HostPathIdentityFileSystem;
   indexingRoot: string;
   platform?: NodeJS.Platform;
+  snapshotProvider?: HostPathIdentitySnapshotProvider;
 }
 
 /** broker 配置固定 root、宿主能力和所有输入预算。 */
@@ -127,12 +168,13 @@ export interface HostPathIdentityBrokerOptions extends ObserveHostPathIdentityOp
   maxLogicalPathBytes?: number;
 }
 
-/** 单路径证明同时暴露 generation 与 read-set fence，但不暴露绝对路径。 */
+/** 单路径证明显式说明 generation 不是文件系统 epoch。 */
 export interface HostPathIdentitySingleProofV1 {
   generation: number;
   observation: HostPathIdentityObservationV1;
   proofDigest: string;
   readSetDigest: string;
+  snapshotIdentity: string | null;
   version: 1;
 }
 
@@ -143,53 +185,36 @@ interface HostPathInputBudgets {
   maxLogicalPathBytes: number;
 }
 
-interface RootProof {
-  canonicalPath: string;
-  dev: bigint;
-  ino: bigint;
-  rootIdentity: string;
-  volumeIdentity: string;
+interface PreparedCandidate extends HostPathIdentityCandidateV1 {
+  candidateIndex: number;
+  trustedPath: string;
 }
-
-interface CapturedPresentFile {
-  observation: PresentHostPathIdentityV1;
-  status: "present";
-}
-
-interface CapturedFailedFile {
-  observation: FailedHostPathIdentityV1;
-  status: "failed";
-}
-
-type CapturedFile = CapturedPresentFile | CapturedFailedFile;
-
-interface PreparedCandidate extends HostPathIdentityCandidateV1 {}
 
 type PreparedCandidatesResult =
   | { candidates: PreparedCandidate[]; status: "ready" }
   | { code: RejectedHostPathCandidateCode; status: "rejected" };
 
-type RootProofResult =
-  | { proof: RootProof; status: "present" }
-  | { observation: FailedHostPathIdentityV1; status: "failed" };
+interface CapturedIdentityContext {
+  rootIdentity: string;
+  snapshotIdentity: string;
+  volumeIdentity: string;
+}
 
-/** Node 默认适配器统一请求 bigint 状态，避免 inode 或设备号经过 number 精度损失。 */
-const nodeHostPathIdentityFileSystem: HostPathIdentityFileSystem = {
-  lstat: async (input) => toHostPathIdentityStat(await nativeLstat(input, { bigint: true })),
-  open: async (input) => {
-    const handle = await nativeOpen(input, "r");
-    return {
-      close: async () => handle.close(),
-      stat: async () => toHostPathIdentityStat(await handle.stat({ bigint: true })),
-    };
+/** 默认宿主边界只在真实 Win32 上提供 FILE_ID_INFO 与非删除共享句柄快照。 */
+const nativeSnapshotProvider: HostPathIdentitySnapshotProvider = {
+  capture: async (request) => {
+    if (request.platform !== "win32" || process.platform !== "win32") {
+      return createSnapshotFailure(
+        "unsupported",
+        "HOST_PATH_IDENTITY_UNSUPPORTED",
+        false,
+      );
+    }
+    return captureWindowsHandleSnapshot(request);
   },
-  realpath: nativeRealpath,
 };
 
-/**
- * 通过已证明 indexing root、opened handle、realpath containment 和双读 read-set
- * 观察单个文件；任何不一致都 fail closed，且不向调用方返回宿主绝对路径。
- */
+/** 观察单个文件，并返回只在该原生句柄快照内有效的 opaque identity。 */
 export async function observeHostPathIdentity(
   requestedPath: string,
   options: ObserveHostPathIdentityOptions,
@@ -198,12 +223,12 @@ export async function observeHostPathIdentity(
   return (await broker.observe(requestedPath)).observation;
 }
 
-/** 为主进程候选建立 root-bound、预算有界、排序唯一且可 CAS 的证明序列。 */
+/** 为主进程候选建立预算有界、root-derived mapping 与句柄快照证明。 */
 export class HostPathIdentityBroker {
   readonly #budgets: HostPathInputBudgets;
-  readonly #fileSystem: HostPathIdentityFileSystem;
   readonly #indexingRoot: string;
   readonly #platform: NodeJS.Platform;
+  readonly #snapshotProvider: HostPathIdentitySnapshotProvider;
   #generation = 0;
 
   public constructor(options: HostPathIdentityBrokerOptions) {
@@ -237,71 +262,64 @@ export class HostPathIdentityBroker {
         "maxLogicalPathBytes",
       ),
     };
-    this.#fileSystem = options.fileSystem ?? nodeHostPathIdentityFileSystem;
     this.#indexingRoot = options.indexingRoot;
     this.#platform = platform;
+    this.#snapshotProvider = options.snapshotProvider ?? nativeSnapshotProvider;
   }
 
-  /** 观察单个路径并绑定 broker 的单调 generation、root proof 与 read-set digest。 */
+  /** 单路径只把 requested path 当作断言，containment 由原生 root ancestry 证明。 */
   public async observe(requestedPath: string): Promise<HostPathIdentitySingleProofV1> {
     const generation = this.#nextGeneration();
     const invalidCode = typeof requestedPath === "string" &&
-      Buffer.byteLength(requestedPath, "utf8") > this.#budgets.maxAbsolutePathBytes
+        Buffer.byteLength(requestedPath, "utf8") > this.#budgets.maxAbsolutePathBytes
       ? "HOST_PATH_ABSOLUTE_PATH_LIMIT_EXCEEDED"
-      : validateAbsoluteHostPath(requestedPath, this.#platform) ??
-        (isLexicallyContained(this.#indexingRoot, requestedPath, this.#platform)
-          ? null
-          : "HOST_PATH_OUTSIDE_INDEXING_ROOT");
+      : validateAbsoluteHostPath(requestedPath, this.#platform);
     if (invalidCode !== null) {
       return createSingleProof(
         generation,
         createFailure("unsupported", invalidCode, false),
+        null,
       );
     }
 
-    const rootBefore = await captureRootProof(
-      this.#indexingRoot,
-      this.#fileSystem,
-      this.#platform,
-    );
-    if (rootBefore.status === "failed") {
-      return createSingleProof(generation, rootBefore.observation);
+    const captureNonce = createCaptureNonce();
+    const capture = await this.#snapshotProvider.capture({
+      candidates: [{
+        absolutePath: requestedPath,
+        candidateIndex: 0,
+        logicalPath: "single-observation",
+        trustedPath: requestedPath,
+      }],
+      captureNonce,
+      indexingRoot: this.#indexingRoot,
+      platform: this.#platform,
+    });
+    if (capture.status !== "complete") {
+      return createSingleProof(generation, toObservationFailure(capture), null);
     }
-    const first = await captureFileProof(
-      requestedPath,
-      rootBefore.proof,
-      this.#fileSystem,
-      this.#platform,
-    );
-    if (first.status === "failed") {
-      return createSingleProof(generation, first.observation);
+    const validation = validateCompleteCapture(capture, captureNonce, 1);
+    if (validation !== null) {
+      return createSingleProof(generation, validation, null);
     }
-    const validation = await captureFileProof(
-      requestedPath,
-      rootBefore.proof,
-      this.#fileSystem,
-      this.#platform,
-    );
-    const rootAfter = await captureRootProof(
-      this.#indexingRoot,
-      this.#fileSystem,
-      this.#platform,
-    );
-    if (
-      validation.status === "failed" ||
-      rootAfter.status === "failed" ||
-      !sameRootProof(rootBefore.proof, rootAfter.proof) ||
-      validation.observation.evidenceDigest !== first.observation.evidenceDigest
-    ) {
+    const item = capture.items[0];
+    if (item === undefined || item.candidateIndex !== 0) {
       return createSingleProof(
         generation,
-        createFailure("changed", "HOST_PATH_CHANGED", true),
+        createFailure("error", "HOST_PATH_SNAPSHOT_INVALID", false),
+        null,
       );
     }
-    return createSingleProof(generation, first.observation);
+    const context = createCapturedIdentityContext(capture, this.#platform);
+    const observation = createPresentObservation(
+      context,
+      item.objectId,
+      "single-observation",
+      this.#platform,
+    );
+    return createSingleProof(generation, observation, context.snapshotIdentity);
   }
 
-  /** 解析 logical path 到 opaque opened-object identity 的整批证明。 */
+  /** logical path 先派生 trusted host path，再由同批原生句柄核验 absolutePath 断言。 */
   public async resolveCandidates(
     candidates: readonly HostPathIdentityCandidateV1[],
   ): Promise<HostPathCandidateResolutionV1> {
@@ -316,430 +334,181 @@ export class HostPathIdentityBroker {
       return createRejectedProof(generation, prepared.code);
     }
 
-    const rootBefore = await captureRootProof(
-      this.#indexingRoot,
-      this.#fileSystem,
-      this.#platform,
+    const captureNonce = createCaptureNonce();
+    const capture = await this.#snapshotProvider.capture({
+      candidates: prepared.candidates,
+      captureNonce,
+      indexingRoot: this.#indexingRoot,
+      platform: this.#platform,
+    });
+    if (capture.status !== "complete") {
+      return createFailedProof(generation, prepared.candidates, toObservationFailure(capture));
+    }
+    const validation = validateCompleteCapture(
+      capture,
+      captureNonce,
+      prepared.candidates.length,
     );
-    if (rootBefore.status === "failed") {
-      return createFailedProof(
-        generation,
-        prepared.candidates,
-        rootBefore.observation,
-      );
+    if (validation !== null) {
+      return createFailedProof(generation, prepared.candidates, validation);
     }
 
-    const firstCaptures = await captureCandidates(
-      prepared.candidates,
-      rootBefore.proof,
-      this.#fileSystem,
-      this.#platform,
-    );
-    const firstEntries = toCandidateEntries(prepared.candidates, firstCaptures);
-    if (firstEntries.some(({ observation }) => observation.status !== "present")) {
-      return createProof(generation, firstEntries, [], "failed");
+    const objectByCandidate = new Map<number, string>();
+    for (const item of capture.items) {
+      if (
+        !Number.isSafeInteger(item.candidateIndex) ||
+        item.candidateIndex < 0 ||
+        item.candidateIndex >= prepared.candidates.length ||
+        objectByCandidate.has(item.candidateIndex) ||
+        !isOpaqueNativeIdentifier(item.objectId)
+      ) {
+        return createFailedProof(
+          generation,
+          prepared.candidates,
+          createFailure("error", "HOST_PATH_SNAPSHOT_INVALID", false),
+        );
+      }
+      objectByCandidate.set(item.candidateIndex, item.objectId);
     }
 
-    const validationCaptures = await captureCandidates(
-      prepared.candidates,
-      rootBefore.proof,
-      this.#fileSystem,
-      this.#platform,
-    );
-    const validationEntries = toCandidateEntries(prepared.candidates, validationCaptures);
-    const rootAfter = await captureRootProof(
-      this.#indexingRoot,
-      this.#fileSystem,
-      this.#platform,
-    );
-    if (
-      rootAfter.status === "failed" ||
-      !sameRootProof(rootBefore.proof, rootAfter.proof) ||
-      !samePresentReadSet(firstEntries, validationEntries)
-    ) {
-      const changedEntries = prepared.candidates.map(({ logicalPath }) => ({
+    const objectByLogicalPath = new Map<string, string>();
+    for (const candidate of prepared.candidates) {
+      const objectId = objectByCandidate.get(candidate.candidateIndex);
+      if (objectId === undefined) {
+        return createFailedProof(
+          generation,
+          prepared.candidates,
+          createFailure("error", "HOST_PATH_SNAPSHOT_INVALID", false),
+        );
+      }
+      const existing = objectByLogicalPath.get(candidate.logicalPath);
+      if (existing !== undefined && existing !== objectId) {
+        return createFailedProof(
+          generation,
+          prepared.candidates,
+          createFailure(
+            "unsupported",
+            "HOST_PATH_LOGICAL_ALIAS_CONFLICT",
+            false,
+          ),
+        );
+      }
+      objectByLogicalPath.set(candidate.logicalPath, objectId);
+    }
+
+    const context = createCapturedIdentityContext(capture, this.#platform);
+    const entries = [...objectByLogicalPath]
+      .sort(([left], [right]) => compareOrdinal(left, right))
+      .map(([logicalPath, objectId]) => ({
         logicalPath,
-        observation: createFailure(
-          "changed",
-          "HOST_PATH_BATCH_CHANGED",
-          true,
+        observation: createPresentObservation(
+          context,
+          objectId,
+          logicalPath,
+          this.#platform,
         ),
       }));
-      return createProof(generation, changedEntries, [], "failed", {
-        firstEntries,
-        validationEntries,
-      });
-    }
-
     return createProof(
       generation,
-      firstEntries,
-      buildAliasGroups(firstEntries),
+      entries,
+      buildAliasGroups(entries),
       "complete",
+      context.snapshotIdentity,
     );
   }
 
-  /** generation 只在当前 broker 实例内单调，不伪装成跨进程持久 revision。 */
+  /** generation 只表示当前 broker 请求顺序，不参与宿主身份或快照语义。 */
   #nextGeneration(): number {
     this.#generation += 1;
     return this.#generation;
   }
 }
 
-/** 把 Node BigIntStats 缩减为可替换的宿主身份状态。 */
-function toHostPathIdentityStat(status: {
-  dev: bigint;
-  ino: bigint;
-  isDirectory(): boolean;
-  isFile(): boolean;
-  isSymbolicLink(): boolean;
-}): HostPathIdentityStat {
-  return {
-    dev: status.dev,
-    ino: status.ino,
-    isDirectory: () => status.isDirectory(),
-    isFile: () => status.isFile(),
-    isSymbolicLink: () => status.isSymbolicLink(),
-  };
+/** 原生 complete 结果必须满足封闭 Win32 能力合同。 */
+function validateCompleteCapture(
+  capture: CompleteHostPathSnapshotV1,
+  captureNonce: string,
+  expectedItems: number,
+): FailedHostPathIdentityV1 | null {
+  if (
+    capture.captureNonce !== captureNonce ||
+    capture.items.length !== expectedItems ||
+    !isOpaqueNativeIdentifier(capture.rootObjectId) ||
+    !isOpaqueNativeIdentifier(capture.volumeId)
+  ) {
+    return createFailure("error", "HOST_PATH_SNAPSHOT_INVALID", false);
+  }
+  if (
+    capture.capability.fileSystemType !== "NTFS" ||
+    capture.capability.fileIdInfo !== true ||
+    capture.capability.fixedVolume !== true ||
+    capture.capability.snapshotFence !== WINDOWS_SNAPSHOT_FENCE
+  ) {
+    return createFailure(
+      "unsupported",
+      "HOST_PATH_IDENTITY_UNSUPPORTED",
+      false,
+    );
+  }
+  return null;
 }
 
-/** 捕获 indexing root 的 canonical directory tuple，并拒绝 root symlink 或不完整 tuple。 */
-async function captureRootProof(
-  indexingRoot: string,
-  fileSystem: HostPathIdentityFileSystem,
+/** 从可信原生材料生成只在当前 captureNonce 内有效的身份上下文。 */
+function createCapturedIdentityContext(
+  capture: CompleteHostPathSnapshotV1,
   platform: NodeJS.Platform,
-): Promise<RootProofResult> {
-  let pathWasPresent = false;
-  try {
-    const before = await fileSystem.lstat(indexingRoot);
-    pathWasPresent = true;
-    if (!isSupportedDirectory(before)) {
-      return {
-        observation: createFailure(
-          "unsupported",
-          before.isSymbolicLink()
-            ? "HOST_PATH_INDEXING_ROOT_SYMBOLIC_LINK"
-            : "HOST_PATH_INDEXING_ROOT_NOT_DIRECTORY",
-          false,
-        ),
-        status: "failed",
-      };
-    }
-    if (!hasStableObjectIdentity(before)) {
-      return {
-        observation: createFailure(
-          "unsupported",
-          "HOST_PATH_IDENTITY_UNSUPPORTED",
-          false,
-        ),
-        status: "failed",
-      };
-    }
-    const canonicalPath = await fileSystem.realpath(indexingRoot);
-    const canonical = await fileSystem.lstat(canonicalPath);
-    const after = await fileSystem.lstat(indexingRoot);
-    if (
-      !isSupportedDirectory(canonical) ||
-      !isSupportedDirectory(after) ||
-      !hasStableObjectIdentity(canonical) ||
-      !hasStableObjectIdentity(after) ||
-      !sameObjectIdentity(before, canonical) ||
-      !sameObjectIdentity(canonical, after)
-    ) {
-      return {
-        observation: createFailure("changed", "HOST_PATH_CHANGED", true),
-        status: "failed",
-      };
-    }
-    const volumeIdentity = createVolumeIdentity(platform, before.dev);
-    return {
-      proof: {
-        canonicalPath,
-        dev: before.dev,
-        ino: before.ino,
-        rootIdentity: `host-root-v1:${digestJson([
-          "host-root-v1",
-          platform,
-          before.dev.toString(),
-          before.ino.toString(),
-        ])}`,
-        volumeIdentity,
-      },
-      status: "present",
-    };
-  } catch (error) {
-    return {
-      observation: classifyFileSystemFailure(error, pathWasPresent),
-      status: "failed",
-    };
-  }
+): CapturedIdentityContext {
+  const volumeIdentity = `host-volume-v2:${digestJson([
+    "host-volume-v2",
+    platform,
+    capture.volumeId,
+    capture.capability.fileSystemType,
+  ])}`;
+  const snapshotIdentity = `host-snapshot-v1:${digestJson([
+    "host-snapshot-v1",
+    platform,
+    capture.captureNonce,
+    capture.rootObjectId,
+    volumeIdentity,
+    capture.items
+      .map(({ candidateIndex, objectId }) => [candidateIndex, objectId])
+      .sort(([left], [right]) => Number(left) - Number(right)),
+  ])}`;
+  const rootIdentity = `host-root-v2:${digestJson([
+    "host-root-v2",
+    snapshotIdentity,
+    capture.rootObjectId,
+  ])}`;
+  return { rootIdentity, snapshotIdentity, volumeIdentity };
 }
 
-/** 捕获文件的 opened-object tuple，并在同一闭环验证 canonical containment。 */
-async function captureFileProof(
-  requestedPath: string,
-  root: RootProof,
-  fileSystem: HostPathIdentityFileSystem,
-  platform: NodeJS.Platform,
-): Promise<CapturedFile> {
-  let handle: HostPathIdentityFileHandle | undefined;
-  let pathWasPresent = false;
-  let result: CapturedFile;
-  try {
-    const before = await fileSystem.lstat(requestedPath);
-    pathWasPresent = true;
-    if (!isSupportedRegularFile(before)) {
-      result = {
-        observation: createFailure(
-          "unsupported",
-          before.isSymbolicLink() ? "HOST_PATH_SYMBOLIC_LINK" : "HOST_PATH_NOT_REGULAR_FILE",
-          false,
-        ),
-        status: "failed",
-      };
-    } else if (!hasStableObjectIdentity(before)) {
-      result = {
-        observation: createFailure(
-          "unsupported",
-          "HOST_PATH_IDENTITY_UNSUPPORTED",
-          false,
-        ),
-        status: "failed",
-      };
-    } else {
-      handle = await fileSystem.open(requestedPath);
-      const opened = await handle.stat();
-      if (!isSupportedRegularFile(opened)) {
-        result = {
-          observation: createFailure("changed", "HOST_PATH_CHANGED", true),
-          status: "failed",
-        };
-      } else if (!hasStableObjectIdentity(opened)) {
-        result = {
-          observation: createFailure(
-            "unsupported",
-            "HOST_PATH_IDENTITY_UNSUPPORTED",
-            false,
-          ),
-          status: "failed",
-        };
-      } else {
-        const canonicalPath = await fileSystem.realpath(requestedPath);
-        if (!isCanonicalContained(root.canonicalPath, canonicalPath, platform)) {
-          result = {
-            observation: createFailure(
-              "unsupported",
-              "HOST_PATH_OUTSIDE_INDEXING_ROOT",
-              false,
-            ),
-            status: "failed",
-          };
-        } else {
-          const canonical = await fileSystem.lstat(canonicalPath);
-          const after = await fileSystem.lstat(requestedPath);
-          if (opened.dev !== root.dev) {
-            result = {
-              observation: createFailure(
-                "unsupported",
-                "HOST_PATH_VOLUME_MISMATCH",
-                false,
-              ),
-              status: "failed",
-            };
-          } else if (
-            !isSupportedRegularFile(canonical) ||
-            !isSupportedRegularFile(after) ||
-            !hasStableObjectIdentity(canonical) ||
-            !hasStableObjectIdentity(after) ||
-            !sameObjectIdentity(before, opened) ||
-            !sameObjectIdentity(opened, canonical) ||
-            !sameObjectIdentity(canonical, after)
-          ) {
-            result = {
-              observation: createFailure("changed", "HOST_PATH_CHANGED", true),
-              status: "failed",
-            };
-          } else {
-            result = {
-              observation: createPresentObservation(
-                root,
-                canonicalPath,
-                opened,
-                platform,
-              ),
-              status: "present",
-            };
-          }
-        }
-      }
-    }
-  } catch (error) {
-    result = {
-      observation: classifyFileSystemFailure(error, pathWasPresent),
-      status: "failed",
-    };
-  }
-
-  if (handle !== undefined) {
-    try {
-      await handle.close();
-    } catch {
-      return {
-        observation: createFailure("error", "HOST_PATH_CLOSE_FAILED", true),
-        status: "failed",
-      };
-    }
-  }
-  return result;
-}
-
-/** 对同一绝对路径只捕获一次，多个 logical alias 复用同一 opened-object 结果。 */
-async function captureCandidates(
-  candidates: readonly PreparedCandidate[],
-  root: RootProof,
-  fileSystem: HostPathIdentityFileSystem,
-  platform: NodeJS.Platform,
-): Promise<Map<string, CapturedFile>> {
-  const captures = new Map<string, CapturedFile>();
-  for (const candidate of candidates) {
-    if (!captures.has(candidate.absolutePath)) {
-      captures.set(
-        candidate.absolutePath,
-        await captureFileProof(candidate.absolutePath, root, fileSystem, platform),
-      );
-    }
-  }
-  return captures;
-}
-
-/** 把内部绝对路径映射投影为只含 logical path 与 opaque observation 的公开条目。 */
-function toCandidateEntries(
-  candidates: readonly PreparedCandidate[],
-  captures: ReadonlyMap<string, CapturedFile>,
-): HostPathIdentityCandidateEntryV1[] {
-  return candidates.map(({ absolutePath, logicalPath }) => ({
-    logicalPath,
-    observation: captures.get(absolutePath)?.observation ??
-      createFailure("error", "HOST_PATH_IO_ERROR", true),
-  }));
-}
-
-/** 只有非符号链接普通文件可进入身份证明。 */
-function isSupportedRegularFile(status: HostPathIdentityStat): boolean {
-  return status.isFile() && !status.isSymbolicLink();
-}
-
-/** indexing root 必须是非符号链接目录。 */
-function isSupportedDirectory(status: HostPathIdentityStat): boolean {
-  return status.isDirectory() && !status.isSymbolicLink();
-}
-
-/** dev 与 ino 必须都是正 bigint；缺失或零值不得降级为路径身份。 */
-function hasStableObjectIdentity(status: HostPathIdentityStat): boolean {
-  return typeof status.dev === "bigint" &&
-    typeof status.ino === "bigint" &&
-    status.dev > 0n &&
-    status.ino > 0n;
-}
-
-/** 路径状态与 opened handle 必须指向同一完整 volume/file tuple。 */
-function sameObjectIdentity(left: HostPathIdentityStat, right: HostPathIdentityStat): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
-/** 两次 root proof 必须保持 canonical location 与 opaque root identity 一致。 */
-function sameRootProof(left: RootProof, right: RootProof): boolean {
-  return left.canonicalPath === right.canonicalPath &&
-    left.rootIdentity === right.rootIdentity &&
-    left.volumeIdentity === right.volumeIdentity;
-}
-
-/** 从 opened handle tuple 生成 identity，并仅以 digest 绑定 canonical 相对位置。 */
+/** 对象 identity 绑定句柄租约快照，避免 File ID 跨生命周期复用。 */
 function createPresentObservation(
-  root: RootProof,
-  canonicalPath: string,
-  status: HostPathIdentityStat,
+  context: CapturedIdentityContext,
+  objectId: string,
+  logicalPath: string,
   platform: NodeJS.Platform,
 ): PresentHostPathIdentityV1 {
-  const identity = `host-file-v1:${digestJson([
-    "host-file-v1",
+  const identity = `host-file-v2:${digestJson([
+    "host-file-v2",
     platform,
-    status.dev.toString(),
-    status.ino.toString(),
+    context.snapshotIdentity,
+    objectId,
   ])}`;
-  const canonicalRelativePathDigest = digestJson([
-    "host-canonical-relative-v1",
-    toCanonicalRelativePath(root.canonicalPath, canonicalPath, platform),
-  ]);
   const evidence = {
-    canonicalRelativePathDigest,
     identity,
-    rootIdentity: root.rootIdentity,
+    identityLifetime: "snapshot" as const,
+    logicalMappingDigest: digestJson(["host-logical-mapping-v1", logicalPath]),
+    rootIdentity: context.rootIdentity,
+    snapshotIdentity: context.snapshotIdentity,
     version: 1 as const,
-    volumeIdentity: root.volumeIdentity,
+    volumeIdentity: context.volumeIdentity,
   };
   return {
     evidenceDigest: digestJson(evidence),
-    identity,
-    rootIdentity: root.rootIdentity,
+    ...evidence,
     status: "present",
-    version: 1,
-    volumeIdentity: root.volumeIdentity,
   };
-}
-
-/** volume identity 只来自宿主平台与 opened/root dev，不接收路径或时间字段。 */
-function createVolumeIdentity(platform: NodeJS.Platform, dev: bigint): string {
-  return `host-volume-v1:${digestJson([
-    "host-volume-v1",
-    platform,
-    dev.toString(),
-  ])}`;
-}
-
-/** 把宿主 errno 收敛为消费者可穷举的失败联合。 */
-function classifyFileSystemFailure(
-  error: unknown,
-  pathWasPresent: boolean,
-): FailedHostPathIdentityV1 {
-  const code = readErrorCode(error);
-  if (code === "ENOENT" || code === "ENOTDIR") {
-    return pathWasPresent
-      ? createFailure("changed", "HOST_PATH_CHANGED", true)
-      : createFailure("missing", code, true);
-  }
-  if (code === "EACCES" || code === "EPERM") {
-    return createFailure("unreadable", code, false);
-  }
-  if (code === "ELOOP" || code === "EISDIR") {
-    return pathWasPresent
-      ? createFailure("changed", "HOST_PATH_CHANGED", true)
-      : createFailure("unsupported", code, false);
-  }
-  return createFailure("error", code, true);
-}
-
-/** 未提供 errno 时使用稳定通用错误码，避免把不受控 message 作为协议字段。 */
-function readErrorCode(error: unknown): string {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    error.code.length > 0
-  ) {
-    return error.code;
-  }
-  return "HOST_PATH_IO_ERROR";
-}
-
-/** 创建不携带任何路径或猜测 identity 的失败结果。 */
-function createFailure(
-  status: FailedHostPathIdentityV1["status"],
-  code: string,
-  retryable: boolean,
-): FailedHostPathIdentityV1 {
-  return { code, retryable, status, version: 1 };
 }
 
 /** 在读取任何元素前校验原始数组长度，再逐项执行路径与 UTF-8 预算 admission。 */
@@ -756,12 +525,9 @@ function prepareCandidates(
     return { code: "HOST_PATH_CANDIDATE_LIMIT_EXCEEDED", status: "rejected" };
   }
 
-  const unique = new Map<string, string>();
+  const prepared: PreparedCandidate[] = [];
   let batchBytes = 0;
   for (let index = 0; index < candidates.length; index += 1) {
-    if (index >= budgets.maxCandidates) {
-      return { code: "HOST_PATH_CANDIDATE_LIMIT_EXCEEDED", status: "rejected" };
-    }
     const candidate = candidates[index];
     if (typeof candidate !== "object" || candidate === null) {
       return { code: "HOST_PATH_CANDIDATE_INVALID", status: "rejected" };
@@ -778,10 +544,7 @@ function prepareCandidates(
     }
     const logicalBytes = Buffer.byteLength(logicalPath, "utf8");
     if (logicalBytes > budgets.maxLogicalPathBytes) {
-      return {
-        code: "HOST_PATH_LOGICAL_PATH_LIMIT_EXCEEDED",
-        status: "rejected",
-      };
+      return { code: "HOST_PATH_LOGICAL_PATH_LIMIT_EXCEEDED", status: "rejected" };
     }
     batchBytes += logicalBytes;
     if (batchBytes > budgets.maxBatchBytes) {
@@ -802,10 +565,7 @@ function prepareCandidates(
     }
     const absoluteBytes = Buffer.byteLength(absolutePath, "utf8");
     if (absoluteBytes > budgets.maxAbsolutePathBytes) {
-      return {
-        code: "HOST_PATH_ABSOLUTE_PATH_LIMIT_EXCEEDED",
-        status: "rejected",
-      };
+      return { code: "HOST_PATH_ABSOLUTE_PATH_LIMIT_EXCEEDED", status: "rejected" };
     }
     batchBytes += absoluteBytes;
     if (batchBytes > budgets.maxBatchBytes) {
@@ -815,22 +575,26 @@ function prepareCandidates(
     if (absoluteValidation !== null) {
       return { code: absoluteValidation, status: "rejected" };
     }
-    if (!isLexicallyContained(indexingRoot, absolutePath, platform)) {
-      return { code: "HOST_PATH_OUTSIDE_INDEXING_ROOT", status: "rejected" };
-    }
 
-    const existing = unique.get(logicalPath);
-    if (existing !== undefined && existing !== absolutePath) {
-      return { code: "HOST_PATH_LOGICAL_ALIAS_CONFLICT", status: "rejected" };
+    const trustedPath = createTrustedPath(indexingRoot, logicalPath, platform);
+    if (Buffer.byteLength(trustedPath, "utf8") > budgets.maxAbsolutePathBytes) {
+      return { code: "HOST_PATH_ABSOLUTE_PATH_LIMIT_EXCEEDED", status: "rejected" };
     }
-    unique.set(logicalPath, absolutePath);
+    prepared.push({
+      absolutePath,
+      candidateIndex: index,
+      logicalPath,
+      trustedPath,
+    });
   }
-
-  const prepared = [...unique].map(([logicalPath, absolutePath]) => ({
-    absolutePath,
-    logicalPath,
-  }));
-  prepared.sort((left, right) => compareOrdinal(left.logicalPath, right.logicalPath));
+  prepared.sort((left, right) =>
+    compareOrdinal(left.logicalPath, right.logicalPath) ||
+    compareOrdinal(left.absolutePath, right.absolutePath) ||
+    left.candidateIndex - right.candidateIndex
+  );
+  prepared.forEach((candidate, index) => {
+    candidate.candidateIndex = index;
+  });
   return { candidates: prepared, status: "ready" };
 }
 
@@ -847,7 +611,17 @@ function isCanonicalLogicalPath(input: string): boolean {
     path.posix.normalize(input) === input;
 }
 
-/** 校验宿主绝对路径，并在任何 I/O 前拒绝 Win32 device namespace 与 ADS。 */
+/** trusted path 只能从 authority root 与 canonical logical path 派生。 */
+function createTrustedPath(
+  indexingRoot: string,
+  logicalPath: string,
+  platform: NodeJS.Platform,
+): string {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  return pathApi.join(indexingRoot, ...logicalPath.split("/"));
+}
+
+/** 校验宿主绝对路径，并在任何 I/O 前拒绝 device namespace、UNC 与 ADS。 */
 function validateAbsoluteHostPath(
   input: unknown,
   platform: NodeJS.Platform,
@@ -868,10 +642,11 @@ function validateAbsoluteHostPath(
   ) {
     return "HOST_PATH_DEVICE_PATH";
   }
+  if (normalizedSeparators.startsWith("\\\\")) {
+    return "HOST_PATH_NETWORK_PATH";
+  }
   const parsedRoot = path.win32.parse(normalizedSeparators).root;
-  const isDriveAbsolute = /^[A-Za-z]:\\/u.test(normalizedSeparators);
-  const isUncAbsolute = normalizedSeparators.startsWith("\\\\") && parsedRoot.length > 2;
-  if (!isDriveAbsolute && !isUncAbsolute) {
+  if (!/^[A-Za-z]:\\$/u.test(parsedRoot) || !/^[A-Za-z]:\\/u.test(normalizedSeparators)) {
     return "HOST_PATH_RELATIVE_PATH";
   }
   if (normalizedSeparators.slice(parsedRoot.length).includes(":")) {
@@ -880,48 +655,117 @@ function validateAbsoluteHostPath(
   return null;
 }
 
-/** 用规范化后的精确前缀做 I/O 前 containment；不引入第二套大小写身份算法。 */
-function isLexicallyContained(
-  indexingRoot: string,
-  candidatePath: string,
-  platform: NodeJS.Platform,
-): boolean {
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const normalizedRoot = pathApi.normalize(indexingRoot);
-  const normalizedCandidate = pathApi.normalize(candidatePath);
-  const separator = platform === "win32" ? "\\" : "/";
-  const rootPrefix = normalizedRoot.endsWith(separator)
-    ? normalizedRoot
-    : `${normalizedRoot}${separator}`;
-  return normalizedCandidate.startsWith(rootPrefix);
+/** 把原生失败投影为公共失败联合。 */
+function toObservationFailure(capture: FailedHostPathSnapshotV1): FailedHostPathIdentityV1 {
+  return createFailure(capture.status, capture.code, capture.retryable);
 }
 
-/** canonical containment 只比较 realpath 返回的规范前缀，不使用 locale/Unicode folding。 */
-function isCanonicalContained(
-  canonicalRoot: string,
-  canonicalCandidate: string,
-  platform: NodeJS.Platform,
-): boolean {
-  return isLexicallyContained(canonicalRoot, canonicalCandidate, platform);
+/** 创建原生边界失败。 */
+function createSnapshotFailure(
+  status: FailedHostPathSnapshotV1["status"],
+  code: string,
+  retryable: boolean,
+): FailedHostPathSnapshotV1 {
+  return { code, retryable, status };
 }
 
-/** 从已验证 containment 的 canonical 路径提取相对 POSIX 形式，仅进入 evidence digest。 */
-function toCanonicalRelativePath(
-  canonicalRoot: string,
-  canonicalCandidate: string,
-  platform: NodeJS.Platform,
-): string {
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const normalizedRoot = pathApi.normalize(canonicalRoot);
-  const normalizedCandidate = pathApi.normalize(canonicalCandidate);
-  const separator = platform === "win32" ? "\\" : "/";
-  const rootPrefix = normalizedRoot.endsWith(separator)
-    ? normalizedRoot
-    : `${normalizedRoot}${separator}`;
-  return normalizedCandidate.slice(rootPrefix.length).replaceAll("\\", "/").normalize("NFC");
+/** 永久宿主错误必须 non-retryable unsupported。 */
+function classifyNativeFailure(code: string): FailedHostPathSnapshotV1 {
+  if (["ENAMETOOLONG", "EINVAL", "ENOSYS", "ENOTSUP"].includes(code)) {
+    return createSnapshotFailure("unsupported", code, false);
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    return createSnapshotFailure("unreadable", code, false);
+  }
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return createSnapshotFailure("missing", code, true);
+  }
+  return createSnapshotFailure("error", code, true);
 }
 
-/** 只对成功项按 opaque identity 分组；失败 proof 永不产生 aliasGroups。 */
+/** 创建不携带路径或猜测 identity 的失败结果。 */
+function createFailure(
+  status: FailedHostPathIdentityV1["status"],
+  code: string,
+  retryable: boolean,
+): FailedHostPathIdentityV1 {
+  return { code, retryable, status, version: 1 };
+}
+
+/** 单路径 proof 只绑定 observation 与可选原生快照。 */
+function createSingleProof(
+  generation: number,
+  observation: HostPathIdentityObservationV1,
+  snapshotIdentity: string | null,
+): HostPathIdentitySingleProofV1 {
+  const readSetDigest = digestJson({ observation, snapshotIdentity, version: 1 });
+  const body = {
+    generation,
+    observation,
+    readSetDigest,
+    snapshotIdentity,
+    version: 1 as const,
+  };
+  return { ...body, proofDigest: digestJson(body) };
+}
+
+/** 生成批次 proof。 */
+function createProof(
+  generation: number,
+  entries: HostPathIdentityCandidateEntryV1[],
+  aliasGroups: HostPathAliasGroupV1[],
+  status: HostPathCandidateProofV1["status"],
+  snapshotIdentity: string | null,
+): HostPathCandidateProofV1 {
+  const readSetDigest = digestJson({ entries, snapshotIdentity, version: 1 });
+  const body = {
+    aliasGroups,
+    entries,
+    generation,
+    readSetDigest,
+    snapshotIdentity,
+    status,
+    version: 1 as const,
+  };
+  return { ...body, proofDigest: digestJson(body) };
+}
+
+/** 原生快照失败时整批 logical entries 使用相同封闭失败。 */
+function createFailedProof(
+  generation: number,
+  candidates: readonly PreparedCandidate[],
+  observation: FailedHostPathIdentityV1,
+): HostPathCandidateProofV1 {
+  const logicalPaths = [...new Set(candidates.map(({ logicalPath }) => logicalPath))]
+    .sort(compareOrdinal);
+  return createProof(
+    generation,
+    logicalPaths.map((logicalPath) => ({ logicalPath, observation })),
+    [],
+    "failed",
+    null,
+  );
+}
+
+/** 生成拒绝结果时 generation 只防止调用方误用旧 admission。 */
+function createRejectedProof(
+  generation: number,
+  code: RejectedHostPathCandidateCode,
+): RejectedHostPathCandidateProofV1 {
+  const body = {
+    aliasGroups: [] as [],
+    code,
+    entries: [] as [],
+    generation,
+    readSetDigest: null,
+    snapshotIdentity: null,
+    status: "rejected" as const,
+    version: 1 as const,
+  };
+  return { ...body, proofDigest: digestJson(body) };
+}
+
+/** 只对成功项按快照 identity 分组。 */
 function buildAliasGroups(
   entries: readonly HostPathIdentityCandidateEntryV1[],
 ): HostPathAliasGroupV1[] {
@@ -942,91 +786,7 @@ function buildAliasGroups(
     .sort((left, right) => compareOrdinal(left.identity, right.identity));
 }
 
-/** 两次验证必须覆盖相同 logical path 且得到相同 opaque evidence。 */
-function samePresentReadSet(
-  first: readonly HostPathIdentityCandidateEntryV1[],
-  validation: readonly HostPathIdentityCandidateEntryV1[],
-): boolean {
-  if (first.length !== validation.length) {
-    return false;
-  }
-  return first.every((entry, index) => {
-    const validated = validation[index];
-    return validated !== undefined &&
-      validated.logicalPath === entry.logicalPath &&
-      entry.observation.status === "present" &&
-      validated.observation.status === "present" &&
-      validated.observation.evidenceDigest === entry.observation.evidenceDigest;
-  });
-}
-
-/** 生成单路径 proof，readSetDigest 只绑定 opaque observation。 */
-function createSingleProof(
-  generation: number,
-  observation: HostPathIdentityObservationV1,
-): HostPathIdentitySingleProofV1 {
-  const readSetDigest = digestJson({ observation, version: 1 });
-  const body = { generation, observation, readSetDigest, version: 1 as const };
-  return { ...body, proofDigest: digestJson(body) };
-}
-
-/** 生成批次 proof，并允许 changed 结果绑定初次与复查 read-set。 */
-function createProof(
-  generation: number,
-  entries: HostPathIdentityCandidateEntryV1[],
-  aliasGroups: HostPathAliasGroupV1[],
-  status: HostPathCandidateProofV1["status"],
-  changedReadSets?: {
-    firstEntries: HostPathIdentityCandidateEntryV1[];
-    validationEntries: HostPathIdentityCandidateEntryV1[];
-  },
-): HostPathCandidateProofV1 {
-  const readSetDigest = digestJson(
-    changedReadSets ?? { entries, version: 1 },
-  );
-  const body = {
-    aliasGroups,
-    entries,
-    generation,
-    readSetDigest,
-    status,
-    version: 1 as const,
-  };
-  return { ...body, proofDigest: digestJson(body) };
-}
-
-/** root 无法证明时把整批 logical entries 投影为相同 fail-closed observation。 */
-function createFailedProof(
-  generation: number,
-  candidates: readonly PreparedCandidate[],
-  observation: FailedHostPathIdentityV1,
-): HostPathCandidateProofV1 {
-  return createProof(
-    generation,
-    candidates.map(({ logicalPath }) => ({ logicalPath, observation })),
-    [],
-    "failed",
-  );
-}
-
-/** 生成拒绝结果时同样绑定 generation，防止调用方复用较旧 admission 判断。 */
-function createRejectedProof(
-  generation: number,
-  code: RejectedHostPathCandidateCode,
-): RejectedHostPathCandidateProofV1 {
-  const body = {
-    aliasGroups: [] as [],
-    code,
-    entries: [] as [],
-    generation,
-    readSetDigest: null,
-    status: "rejected" as const,
-    version: 1 as const,
-  };
-  return { ...body, proofDigest: digestJson(body) };
-}
-
-/** 校验所有数量与字节预算，禁止使用不安全整数或越过平台硬上限。 */
+/** 校验所有数量与字节预算。 */
 function validateBudget(value: number, maximum: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
     throw new RangeError(`${label} 必须是 1 到 ${maximum} 的安全整数。`);
@@ -1034,18 +794,498 @@ function validateBudget(value: number, maximum: number, label: string): number {
   return value;
 }
 
-/** 使用与 locale 无关的 UTF-16 code-unit 序，保持不同 Unicode 名称彼此独立。 */
-function compareOrdinal(left: string, right: string): number {
-  if (left < right) {
-    return -1;
-  }
-  if (left > right) {
-    return 1;
-  }
-  return 0;
+/** 只接受固定长度十六进制或受控 ASCII 原生标识。 */
+function isOpaqueNativeIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9:._-]{8,256}$/u.test(value);
 }
 
-/** 输入对象均由本模块按稳定字段顺序构造，因此 JSON 字节可用于本地证明摘要。 */
+/** 每次原生句柄租约使用独立随机 nonce，禁止跨快照复用 File ID。 */
+function createCaptureNonce(): string {
+  return randomBytes(32).toString("hex");
+}
+
+/** 使用与 locale 无关的 UTF-16 code-unit 序。 */
+function compareOrdinal(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** 稳定字段顺序的本地证明摘要。 */
 function digestJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+/** PowerShell/C# 原生边界固定使用 FILE_ID_INFO 与不共享删除的全路径句柄链。 */
+export const WINDOWS_HOST_IDENTITY_SNAPSHOT_SCRIPT = String.raw`
+param([string]$RequestPath)
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class CodeGraphHostIdentityNative {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct FILE_ID_128 {
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+    public byte[] Identifier;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct FILE_ID_INFO {
+    public ulong VolumeSerialNumber;
+    public FILE_ID_128 FileId;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct FILE_ATTRIBUTE_TAG_INFO {
+    public uint FileAttributes;
+    public uint ReparseTag;
+  }
+
+  public sealed class HandleInfo {
+    public bool Directory;
+    public string Id;
+    public bool Reparse;
+    public ulong VolumeSerialNumber;
+  }
+
+  public sealed class VolumeInfo {
+    public uint FileSystemFlags;
+    public string FileSystemName;
+    public uint SerialNumber;
+  }
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern SafeFileHandle CreateFileW(
+    string name,
+    uint access,
+    uint share,
+    IntPtr security,
+    uint creation,
+    uint flags,
+    IntPtr template
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetFileInformationByHandleEx(
+    SafeFileHandle handle,
+    int infoClass,
+    out FILE_ID_INFO info,
+    uint size
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetFileInformationByHandleEx(
+    SafeFileHandle handle,
+    int infoClass,
+    out FILE_ATTRIBUTE_TAG_INFO info,
+    uint size
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool GetVolumeInformationW(
+    string rootPath,
+    StringBuilder volumeName,
+    uint volumeNameSize,
+    out uint serialNumber,
+    out uint maximumComponentLength,
+    out uint fileSystemFlags,
+    StringBuilder fileSystemName,
+    uint fileSystemNameSize
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+  private static extern uint GetDriveTypeW(string rootPath);
+
+  public static SafeFileHandle OpenPinned(string input) {
+    SafeFileHandle handle = CreateFileW(
+      input,
+      0x80,
+      0x1 | 0x2,
+      IntPtr.Zero,
+      3,
+      0x02000000 | 0x00200000,
+      IntPtr.Zero
+    );
+    if (handle.IsInvalid) {
+      int code = Marshal.GetLastWin32Error();
+      handle.Dispose();
+      throw new Win32Exception(code, "CG_WIN32:" + code);
+    }
+    return handle;
+  }
+
+  public static HandleInfo ReadHandle(SafeFileHandle handle) {
+    FILE_ID_INFO identity;
+    if (!GetFileInformationByHandleEx(
+      handle,
+      18,
+      out identity,
+      (uint)Marshal.SizeOf(typeof(FILE_ID_INFO))
+    )) {
+      int code = Marshal.GetLastWin32Error();
+      throw new Win32Exception(code, "CG_WIN32:" + code);
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes;
+    if (!GetFileInformationByHandleEx(
+      handle,
+      9,
+      out attributes,
+      (uint)Marshal.SizeOf(typeof(FILE_ATTRIBUTE_TAG_INFO))
+    )) {
+      int code = Marshal.GetLastWin32Error();
+      throw new Win32Exception(code, "CG_WIN32:" + code);
+    }
+    return new HandleInfo {
+      Directory = (attributes.FileAttributes & 0x10) != 0,
+      Id = BitConverter.ToString(identity.FileId.Identifier).Replace("-", "").ToLowerInvariant(),
+      Reparse = (attributes.FileAttributes & 0x400) != 0,
+      VolumeSerialNumber = identity.VolumeSerialNumber
+    };
+  }
+
+  public static VolumeInfo ReadVolume(string rootPath) {
+    if (GetDriveTypeW(rootPath) != 3) {
+      throw new InvalidOperationException("CG_UNSUPPORTED:HOST_PATH_VOLUME_UNSUPPORTED");
+    }
+    StringBuilder volumeName = new StringBuilder(261);
+    StringBuilder fileSystemName = new StringBuilder(261);
+    uint serialNumber;
+    uint maximumComponentLength;
+    uint fileSystemFlags;
+    if (!GetVolumeInformationW(
+      rootPath,
+      volumeName,
+      (uint)volumeName.Capacity,
+      out serialNumber,
+      out maximumComponentLength,
+      out fileSystemFlags,
+      fileSystemName,
+      (uint)fileSystemName.Capacity
+    )) {
+      int code = Marshal.GetLastWin32Error();
+      throw new Win32Exception(code, "CG_WIN32:" + code);
+    }
+    return new VolumeInfo {
+      FileSystemFlags = fileSystemFlags,
+      FileSystemName = fileSystemName.ToString(),
+      SerialNumber = serialNumber
+    };
+  }
+}
+"@
+
+function Throw-Unsupported([string]$Code) {
+  throw [System.InvalidOperationException]::new("CG_UNSUPPORTED:" + $Code)
+}
+
+function Get-PathChain([string]$InputPath) {
+  $fullPath = [System.IO.Path]::GetFullPath($InputPath)
+  $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+  if ($rootPath -notmatch '^[A-Za-z]:\\$') {
+    Throw-Unsupported "HOST_PATH_VOLUME_UNSUPPORTED"
+  }
+  $result = [System.Collections.Generic.List[string]]::new()
+  $result.Add($rootPath)
+  $current = $rootPath
+  $relative = $fullPath.Substring($rootPath.Length)
+  foreach ($segment in $relative.Split([char]'\', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+    $current = [System.IO.Path]::Combine($current, $segment)
+    $result.Add($current)
+  }
+  return $result.ToArray()
+}
+
+$handles = [System.Collections.Generic.List[object]]::new()
+$opened = [System.Collections.Generic.Dictionary[string,object]]::new(
+  [System.StringComparer]::Ordinal
+)
+
+function Open-Tracked([string]$InputPath, [bool]$Directory) {
+  if ($opened.ContainsKey($InputPath)) {
+    $existing = $opened[$InputPath]
+    if ($existing.Directory -ne $Directory) {
+      Throw-Unsupported "HOST_PATH_TOPOLOGY_UNSUPPORTED"
+    }
+    return $existing
+  }
+  $handle = [CodeGraphHostIdentityNative]::OpenPinned($InputPath)
+  $handles.Add($handle)
+  $info = [CodeGraphHostIdentityNative]::ReadHandle($handle)
+  if ($info.Reparse) {
+    Throw-Unsupported "HOST_PATH_REPARSE_POINT"
+  }
+  if ($info.Directory -ne $Directory) {
+    Throw-Unsupported $(if ($Directory) {
+      "HOST_PATH_NOT_DIRECTORY"
+    } else {
+      "HOST_PATH_NOT_REGULAR_FILE"
+    })
+  }
+  $opened.Add($InputPath, $info)
+  return $info
+}
+
+function Open-Chain([string]$InputPath, [bool]$FinalDirectory) {
+  $chain = @(Get-PathChain $InputPath)
+  for ($index = 0; $index -lt $chain.Count; $index += 1) {
+    $isDirectory = $index -lt ($chain.Count - 1) -or $FinalDirectory
+    Open-Tracked $chain[$index] $isDirectory | Out-Null
+  }
+  return $opened[$chain[$chain.Count - 1]]
+}
+
+try {
+  $request = (Get-Content -Raw -Encoding UTF8 -LiteralPath $RequestPath | ConvertFrom-Json)
+  $rootPath = [System.IO.Path]::GetFullPath([string]$request.indexingRoot)
+  $driveRoot = [System.IO.Path]::GetPathRoot($rootPath)
+  $volume = [CodeGraphHostIdentityNative]::ReadVolume($driveRoot)
+  $requiredFlags = 0x00010000 -bor 0x01000000 -bor 0x02000000
+  if ($volume.FileSystemName -cne "NTFS" -or ($volume.FileSystemFlags -band $requiredFlags) -ne $requiredFlags) {
+    Throw-Unsupported "HOST_PATH_IDENTITY_UNSUPPORTED"
+  }
+
+  $rootInfo = Open-Chain $rootPath $true
+  $items = [System.Collections.Generic.List[object]]::new()
+  foreach ($candidate in @($request.candidates)) {
+    $trustedInfo = Open-Chain ([string]$candidate.trustedPath) $false
+    $assertedInfo = Open-Chain ([string]$candidate.absolutePath) $false
+    if ($trustedInfo.VolumeSerialNumber -ne $rootInfo.VolumeSerialNumber) {
+      Throw-Unsupported "HOST_PATH_VOLUME_MISMATCH"
+    }
+    if ($assertedInfo.VolumeSerialNumber -ne $rootInfo.VolumeSerialNumber) {
+      Throw-Unsupported "HOST_PATH_VOLUME_MISMATCH"
+    }
+    if ($trustedInfo.Id -cne $assertedInfo.Id) {
+      Throw-Unsupported "HOST_PATH_LOGICAL_MAPPING_MISMATCH"
+    }
+    foreach ($candidatePath in @(
+      [string]$candidate.trustedPath,
+      [string]$candidate.absolutePath
+    )) {
+      $candidateChain = @(Get-PathChain $candidatePath)
+      $rootSeen = $false
+      foreach ($component in $candidateChain) {
+        $componentInfo = $opened[$component]
+        if (
+          $componentInfo.VolumeSerialNumber -eq $rootInfo.VolumeSerialNumber -and
+          $componentInfo.Id -ceq $rootInfo.Id
+        ) {
+          $rootSeen = $true
+        }
+      }
+      if (-not $rootSeen) {
+        Throw-Unsupported "HOST_PATH_OUTSIDE_INDEXING_ROOT"
+      }
+    }
+    $items.Add([pscustomobject]@{
+      candidateIndex = [int]$candidate.candidateIndex
+      objectId = $trustedInfo.Id
+    })
+  }
+
+  [pscustomobject]@{
+    capability = [pscustomobject]@{
+      fileIdInfo = $true
+      fileSystemType = "NTFS"
+      fixedVolume = $true
+      snapshotFence = "non-delete-shared-handle-lease-v1"
+    }
+    captureNonce = [string]$request.captureNonce
+    items = $items
+    rootObjectId = $rootInfo.Id
+    status = "complete"
+    volumeId = (
+      $rootInfo.VolumeSerialNumber.ToString("x16") + ":" +
+      $volume.SerialNumber.ToString("x8") + ":" +
+      $volume.FileSystemFlags.ToString("x8")
+    )
+  } | ConvertTo-Json -Compress -Depth 8
+} catch {
+  $details = $_.Exception.ToString()
+  $code = "HOST_PATH_IO_ERROR"
+  $status = "error"
+  $retryable = $true
+  if ($details -match 'CG_UNSUPPORTED:([A-Z0-9_]+)') {
+    $code = $Matches[1]
+    $status = "unsupported"
+    $retryable = $false
+  } elseif ($details -match 'CG_WIN32:(\d+)') {
+    $nativeCode = [int]$Matches[1]
+    switch ($nativeCode) {
+      2 { $code = "ENOENT"; $status = "missing"; $retryable = $true }
+      3 { $code = "ENOTDIR"; $status = "missing"; $retryable = $true }
+      5 { $code = "EACCES"; $status = "unreadable"; $retryable = $false }
+      32 { $code = "HOST_PATH_CHANGED"; $status = "changed"; $retryable = $true }
+      1 { $code = "ENOSYS"; $status = "unsupported"; $retryable = $false }
+      50 { $code = "ENOTSUP"; $status = "unsupported"; $retryable = $false }
+      87 { $code = "EINVAL"; $status = "unsupported"; $retryable = $false }
+      120 { $code = "ENOSYS"; $status = "unsupported"; $retryable = $false }
+      123 { $code = "EINVAL"; $status = "unsupported"; $retryable = $false }
+      206 { $code = "ENAMETOOLONG"; $status = "unsupported"; $retryable = $false }
+      default { $code = "WIN32_ERROR_" + $nativeCode }
+    }
+  }
+  [pscustomobject]@{
+    code = $code
+    retryable = $retryable
+    status = $status
+  } | ConvertTo-Json -Compress
+} finally {
+  foreach ($handle in $handles) {
+    $handle.Dispose()
+  }
+}
+`;
+
+/** 执行固定原生脚本，并限制时间、输出与可执行参数。 */
+async function captureWindowsHandleSnapshot(request: {
+  candidates: readonly HostPathSnapshotCandidateV1[];
+  captureNonce: string;
+  indexingRoot: string;
+  platform: NodeJS.Platform;
+}): Promise<HostPathSnapshotCaptureV1> {
+  const payload = JSON.stringify({
+    candidates: request.candidates,
+    captureNonce: request.captureNonce,
+    indexingRoot: request.indexingRoot,
+  });
+  const captureRoot = await mkdtemp(path.join(tmpdir(), "codegraph-host-identity-"));
+  const scriptPath = path.join(captureRoot, "capture.ps1");
+  const requestPath = path.join(captureRoot, "request.json");
+
+  try {
+    await Promise.all([
+      writeFile(scriptPath, WINDOWS_HOST_IDENTITY_SNAPSHOT_SCRIPT, {
+        encoding: "utf8",
+        flag: "wx",
+      }),
+      writeFile(requestPath, payload, { encoding: "utf8", flag: "wx" }),
+    ]);
+    const output = await runBoundedProcess(
+      "powershell.exe",
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", scriptPath, requestPath],
+    );
+    const parsed = JSON.parse(output) as unknown;
+    if (!isSnapshotCapture(parsed)) {
+      return createSnapshotFailure("error", "HOST_PATH_SNAPSHOT_INVALID", false);
+    }
+    return parsed;
+  } catch (error) {
+    return classifyNativeFailure(readErrorCode(error));
+  } finally {
+    await rm(captureRoot, { force: true, recursive: true });
+  }
+}
+
+/** 子进程只接收固定 argv，stdout/stderr 均有界。 */
+function runBoundedProcess(
+  executable: string,
+  args: readonly string[],
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let finished = false;
+
+    /** 统一完成路径，避免 timeout、error 与 close 重复结算。 */
+    const finish = (error?: Error, value?: string) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeout);
+      if (error !== undefined) {
+        reject(error);
+      } else {
+        resolve(value ?? "");
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(Object.assign(new Error("Windows host identity capture timeout"), {
+        code: "HOST_PATH_CAPTURE_TIMEOUT",
+      }));
+    }, WINDOWS_CAPTURE_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > WINDOWS_CAPTURE_OUTPUT_LIMIT) {
+        child.kill();
+        finish(Object.assign(new Error("Windows host identity stdout overflow"), {
+          code: "HOST_PATH_CAPTURE_OUTPUT_LIMIT",
+        }));
+        return;
+      }
+      stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= WINDOWS_CAPTURE_OUTPUT_LIMIT) {
+        stderr.push(chunk);
+      }
+    });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        finish(Object.assign(new Error(Buffer.concat(stderr).toString("utf8")), {
+          code: "HOST_PATH_CAPTURE_PROCESS_FAILED",
+        }));
+        return;
+      }
+      finish(undefined, Buffer.concat(stdout).toString("utf8").trim());
+    });
+    child.stdin.end();
+  });
+}
+
+/** 运行时只接受封闭快照联合，不信任 PowerShell JSON 形状。 */
+function isSnapshotCapture(value: unknown): value is HostPathSnapshotCaptureV1 {
+  if (typeof value !== "object" || value === null || !("status" in value)) {
+    return false;
+  }
+  if (value.status === "complete") {
+    return "capability" in value &&
+      typeof value.capability === "object" &&
+      value.capability !== null &&
+      "captureNonce" in value &&
+      typeof value.captureNonce === "string" &&
+      "items" in value &&
+      Array.isArray(value.items) &&
+      "rootObjectId" in value &&
+      typeof value.rootObjectId === "string" &&
+      "volumeId" in value &&
+      typeof value.volumeId === "string";
+  }
+  return ["missing", "unreadable", "changed", "unsupported", "error"].includes(
+    String(value.status),
+  ) &&
+    "code" in value &&
+    typeof value.code === "string" &&
+    "retryable" in value &&
+    typeof value.retryable === "boolean";
+}
+
+/** 未提供 errno 时使用稳定通用错误码。 */
+function readErrorCode(error: unknown): string {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    error.code.length > 0
+  ) {
+    return error.code;
+  }
+  return "HOST_PATH_IO_ERROR";
 }

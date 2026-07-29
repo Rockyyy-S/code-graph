@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { loadQualityGateRegistry } from "./load-quality-gates.mjs";
 import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
@@ -21,30 +22,49 @@ const triggerPaths = [
   manifestTestPath,
   unitTestPath,
 ];
-const forbiddenMemberNames = new Set([
-  "birthtime",
-  "birthtimeMs",
-  "birthtimeNs",
-  "caseFold",
-  "casefold",
-  "localeCompare",
-  "toLocaleLowerCase",
-  "toLocaleUpperCase",
-  "toLowerCase",
-  "toUpperCase",
-  "unicodeCaseFold",
+const allowedProductionImports = new Set([
+  "node:child_process",
+  "node:crypto",
+  "node:fs/promises",
+  "node:os",
+  "node:path",
 ]);
-const forbiddenUnicodeLiterals = new Set(["ẞ", "ß", "İ", "ı"]);
+const expectedProductionSourceDigest = "50dada1a79599a8f38d2ec099a6fd7934c0199d4454e3dfe37e47d988825e452";
+const expectedWindowsSnapshotScriptDigest = "67cea8cc0483baca6f2f226850a8c0b6b7cf0d2dac28047dbfe2fd13d226c863";
+const requiredProductionCalls = new Map([
+  ["HostPathIdentityBroker.resolveCandidates", [
+    "prepareCandidates",
+    "createCaptureNonce",
+    "capture",
+    "validateCompleteCapture",
+    "createCapturedIdentityContext",
+    "createPresentObservation",
+    "buildAliasGroups",
+    "createProof",
+  ]],
+  ["nativeSnapshotProvider.capture", [
+    "createSnapshotFailure",
+    "captureWindowsHandleSnapshot",
+  ]],
+  ["prepareCandidates", ["validateAbsoluteHostPath", "createTrustedPath"]],
+  ["captureWindowsHandleSnapshot", [
+    "mkdtemp",
+    "writeFile",
+    "runBoundedProcess",
+    "parse",
+    "isSnapshotCapture",
+    "classifyNativeFailure",
+    "rm",
+  ]],
+  ["createCapturedIdentityContext", ["digestJson"]],
+  ["createPresentObservation", ["digestJson"]],
+]);
 
-/**
- * 独立校验 Win32 host identity 平台合同，并运行固定的黑盒 unit/contract 回归集。
- *
- * AST 检查只作为禁止第二套字符串算法与 helper 绕过的辅助防线；能力证明来自真实 API
- * 负向/变异测试与 NTFS 合同，不依赖注释、死代码或 source 字符串标记。
- */
+/** 独立校验完整生产闭包与固定原生脚本，执行 mutation oracle 后运行黑盒回归。 */
 export async function verifyHostPathIdentityV1() {
   const source = await readRepositoryFile(sourcePath);
   validateHostPathIdentitySource(source, sourcePath);
+  validateMutationOracle(source);
   await validateGateRegistration();
 
   const unitStatus = runVitest("vitest.config.ts", [unitTestPath]);
@@ -55,7 +75,7 @@ export async function verifyHostPathIdentityV1() {
 }
 
 /**
- * 用 TypeScript AST 拒绝字符串 case-fold、birthtime fallback、计算属性与 helper import。
+ * 正向封闭完整生产源码、依赖边与关键调用图，不依赖有限语法或字符串黑名单。
  *
  * @param {string} source 待检查的 TypeScript 模块源码。
  * @param {string} modulePath 用于稳定诊断的仓库相对路径。
@@ -69,88 +89,182 @@ export function validateHostPathIdentitySource(source, modulePath = sourcePath) 
     ts.ScriptKind.TS,
   );
   const violations = [];
+  const imports = new Set();
+  const observedProductionCalls = new Map();
+  let windowsSnapshotScript;
 
-  /** 遍历全部 AST，包括不可达分支，避免死代码承载第二套 identity 算法。 */
-  function visit(node) {
-    if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier !== undefined &&
-      ts.isStringLiteral(node.moduleSpecifier)
-    ) {
-      const specifier = node.moduleSpecifier.text;
-      if (!specifier.startsWith("node:")) {
-        violations.push(`禁止从 '${specifier}' 导入可隐藏 identity 算法的 helper。`);
+  /** 记录指定函数或方法体内实际存在的直接与回调调用目标。 */
+  function recordCalls(callableName, body) {
+    const calls = new Set();
+
+    /** 收集调用表达式的静态目标名称。 */
+    function collect(node) {
+      if (ts.isCallExpression(node)) {
+        if (ts.isIdentifier(node.expression)) {
+          calls.add(node.expression.text);
+        } else if (ts.isPropertyAccessExpression(node.expression)) {
+          calls.add(node.expression.name.text);
+        }
       }
+      ts.forEachChild(node, collect);
+    }
+
+    collect(body);
+    observedProductionCalls.set(callableName, calls);
+  }
+
+  /** 遍历完整 AST，建立封闭依赖集合和生产调用图证据。 */
+  function visit(node) {
+    if (ts.isImportEqualsDeclaration(node)) {
+      violations.push("生产依赖闭包只允许五条固定静态 import。");
+    }
+    if (ts.isImportDeclaration(node)) {
+      if (!ts.isStringLiteral(node.moduleSpecifier)) {
+        violations.push("生产 import 必须使用静态字符串 specifier。");
+      } else {
+        const specifier = node.moduleSpecifier.text;
+        imports.add(specifier);
+        if (!allowedProductionImports.has(specifier)) {
+          violations.push(`生产依赖闭包不允许 '${specifier}'。`);
+        }
+      }
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      violations.push("生产依赖闭包不允许 export-from 边。");
     }
     if (
       ts.isCallExpression(node) &&
       node.expression.kind === ts.SyntaxKind.ImportKeyword
     ) {
-      const specifier = evaluateStaticString(node.arguments[0]);
-      if (specifier === undefined || !specifier.startsWith("node:")) {
-        violations.push("禁止 dynamic import 隐藏 identity helper。");
-      }
+      violations.push("生产依赖闭包不允许 dynamic import 边。");
     }
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
-      violations.push("禁止 require 隐藏 identity helper。");
-    }
-    if (ts.isIdentifier(node) && forbiddenMemberNames.has(node.text)) {
-      violations.push(`禁止标识符 '${node.text}'。`);
-    }
-    if (ts.isStringLiteralLike(node)) {
-      if (forbiddenMemberNames.has(node.text)) {
-        violations.push(`禁止字符串成员 '${node.text}'。`);
-      }
-      for (const forbidden of forbiddenUnicodeLiterals) {
-        if (node.text.indexOf(forbidden) >= 0) {
-          violations.push(`禁止硬编码 Unicode 例外 '${forbidden}'。`);
+    if (
+      ts.isClassDeclaration(node) &&
+      node.name?.text === "HostPathIdentityBroker"
+    ) {
+      for (const member of node.members) {
+        if (
+          ts.isMethodDeclaration(member) &&
+          ts.isIdentifier(member.name) &&
+          member.name.text === "resolveCandidates" &&
+          member.body !== undefined
+        ) {
+          recordCalls("HostPathIdentityBroker.resolveCandidates", member.body);
         }
       }
     }
-    if (ts.isElementAccessExpression(node)) {
-      const propertyName = evaluateStaticString(node.argumentExpression);
-      if (propertyName !== undefined && forbiddenMemberNames.has(propertyName)) {
-        violations.push(`禁止计算属性 '${propertyName}'。`);
+    if (
+      ts.isFunctionDeclaration(node) &&
+      node.name !== undefined &&
+      node.body !== undefined &&
+      requiredProductionCalls.has(node.name.text)
+    ) {
+      recordCalls(node.name.text, node.body);
+    }
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "nativeSnapshotProvider" &&
+      node.initializer !== undefined &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      const captureProperty = node.initializer.properties.find((property) =>
+        ts.isPropertyAssignment(property) &&
+        ts.isIdentifier(property.name) &&
+        property.name.text === "capture"
+      );
+      if (
+        captureProperty !== undefined &&
+        ts.isPropertyAssignment(captureProperty) &&
+        (ts.isArrowFunction(captureProperty.initializer) ||
+          ts.isFunctionExpression(captureProperty.initializer))
+      ) {
+        recordCalls("nativeSnapshotProvider.capture", captureProperty.initializer.body);
+      }
+    }
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "WINDOWS_HOST_IDENTITY_SNAPSHOT_SCRIPT" &&
+      node.initializer !== undefined
+    ) {
+      const initializer = node.initializer;
+      if (
+        ts.isTaggedTemplateExpression(initializer) &&
+        ts.isNoSubstitutionTemplateLiteral(initializer.template)
+      ) {
+        windowsSnapshotScript = initializer.template.rawText ?? initializer.template.text;
       }
     }
     ts.forEachChild(node, visit);
   }
 
   visit(sourceFile);
+  const sourceDigest = createHash("sha256").update(source, "utf8").digest("hex");
+  if (sourceDigest !== expectedProductionSourceDigest) {
+    violations.push("生产模块完整源码摘要漂移，存在未审计的第二套身份语义。");
+  }
+  for (const required of allowedProductionImports) {
+    if (!imports.has(required)) {
+      violations.push(`生产依赖闭包缺少 '${required}'。`);
+    }
+  }
+  if (imports.size !== allowedProductionImports.size) {
+    violations.push("生产依赖闭包必须精确等于五个 Node 内建模块。");
+  }
+  for (const [callableName, requiredCalls] of requiredProductionCalls) {
+    const calls = observedProductionCalls.get(callableName);
+    if (calls === undefined) {
+      violations.push(`生产调用图缺少 '${callableName}'。`);
+      continue;
+    }
+    for (const requiredCall of requiredCalls) {
+      if (!calls.has(requiredCall)) {
+        violations.push(`生产调用图 '${callableName}' 缺少 '${requiredCall}'。`);
+      }
+    }
+  }
+  if (windowsSnapshotScript === undefined) {
+    violations.push("生产模块缺少固定 Windows 原生句柄快照脚本。");
+  } else {
+    const digest = createHash("sha256").update(windowsSnapshotScript, "utf8").digest("hex");
+    if (digest !== expectedWindowsSnapshotScriptDigest) {
+      violations.push("Windows 原生句柄快照脚本摘要漂移。");
+    }
+  }
   if (violations.length > 0) {
     throw new Error(
-      `${modulePath}: host identity AST 合同失败。Fix: 仅使用 root-bound opened-handle identity。\n${[
+      `${modulePath}: host identity 正向合同失败。Fix: 保持完整源码闭包、root-derived mapping、FILE_ID_INFO 与句柄租约调用图。\n${[
         ...new Set(violations),
       ].join("\n")}`,
     );
   }
 }
 
-/**
- * 对字符串字面量、无替换模板和 `+` 连接求静态值，覆盖计算属性绕过。
- *
- * @param {import("typescript").Expression | undefined} expression AST 表达式。
- * @returns {string | undefined} 可静态证明时的字符串值。
- */
-function evaluateStaticString(expression) {
-  if (expression === undefined) {
-    return undefined;
+/** 固定变异集注入完整生产源码，必须全部破坏正向源码闭包而被拒绝。 */
+function validateMutationOracle(source) {
+  const mutations = [
+    `const mutationMember=["to","LowerCase"].join(""); export const mutationValue="A"[mutationMember]();`,
+    `import { createRequire as mutationCreateRequire } from "node:module"; mutationCreateRequire(import.meta.url)("./helper.cjs");`,
+    `export const mutationReflect=Reflect.apply(String.prototype.toLowerCase,"A",[]);`,
+    `import mutationHelper = require("./helper.cjs"); export { mutationHelper };`,
+    `import mutationVm from "node:vm"; export const mutationVmValue=mutationVm.runInNewContext("identity()");`,
+    `export const mutationEval=eval("identity()");`,
+    `export const mutationFunction=Function("return identity()")();`,
+    `import { identity as mutationIdentity } from "./helper.js"; export { mutationIdentity };`,
+    `export const mutationBirthtime=(value)=>value.birthtimeNs;`,
+  ];
+  for (const [index, mutation] of mutations.entries()) {
+    let rejected = false;
+    try {
+      validateHostPathIdentitySource(`${source}\n${mutation}\n`, `mutation-oracle-${index}.ts`);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) {
+      throw new Error(`mutation-oracle-${index}: verifier 未拒绝固定绕过样本。`);
+    }
   }
-  if (ts.isStringLiteralLike(expression)) {
-    return expression.text;
-  }
-  if (ts.isParenthesizedExpression(expression)) {
-    return evaluateStaticString(expression.expression);
-  }
-  if (
-    ts.isBinaryExpression(expression) &&
-    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
-  ) {
-    const left = evaluateStaticString(expression.left);
-    const right = evaluateStaticString(expression.right);
-    return left === undefined || right === undefined ? undefined : `${left}${right}`;
-  }
-  return undefined;
 }
 
 /** Gate 必须阻断、固定执行本 verifier，并覆盖全部六条平台 owned path。 */
@@ -176,7 +290,7 @@ async function validateGateRegistration() {
   }
 }
 
-/** 从仓库固定相对路径读取 UTF-8 文本，不接受调用参数缩小检查范围。 */
+/** 从仓库固定相对路径读取 UTF-8 文本。 */
 async function readRepositoryFile(relativePath) {
   return readFile(path.join(repositoryRoot, ...relativePath.split("/")), "utf8");
 }

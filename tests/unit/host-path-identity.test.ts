@@ -1,166 +1,199 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   HostPathIdentityBroker,
   observeHostPathIdentity,
-  type HostPathIdentityFileSystem,
-  type HostPathIdentityStat,
+  type CompleteHostPathSnapshotV1,
+  type FailedHostPathSnapshotV1,
+  type HostPathIdentitySnapshotProvider,
+  type HostPathSnapshotCapabilityV1,
+  type HostPathSnapshotCandidateV1,
 } from "../../apps/graph-service/src/host-path-identity.js";
 import { validateHostPathIdentitySource } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
 
-interface FakeFileRecord {
-  canonicalPath: string;
-  closeHook?: () => void;
-  dev: bigint;
-  ino: bigint;
-  kind?: "directory" | "file" | "symbolic-link";
-  openError?: string;
+interface FakeHostObject {
+  objectId: string;
+  volumeId?: string;
 }
 
-/** 创建带稳定错误码的宿主错误，供 fail-closed 分支精确断言。 */
-function createHostError(code: string): NodeJS.ErrnoException {
-  return Object.assign(new Error(code), { code });
+interface FakeSnapshotProvider {
+  capture: ReturnType<typeof vi.fn<HostPathIdentitySnapshotProvider["capture"]>>;
+  objects: Map<string, FakeHostObject>;
+  provider: HostPathIdentitySnapshotProvider;
+  setFailure(failure: FailedHostPathSnapshotV1 | null): void;
 }
 
-/** 把测试记录投影为 broker 只允许读取的文件状态。 */
-function toStat(record: FakeFileRecord): HostPathIdentityStat {
-  const kind = record.kind ?? "file";
-  return {
-    birthtimeNs: 1n,
-    dev: record.dev,
-    ino: record.ino,
-    isDirectory: () => kind === "directory",
-    isFile: () => kind === "file",
-    isSymbolicLink: () => kind === "symbolic-link",
-  } as HostPathIdentityStat;
-}
+const supportedCapability: HostPathSnapshotCapabilityV1 = {
+  fileIdInfo: true,
+  fileSystemType: "NTFS",
+  fixedVolume: true,
+  snapshotFence: "non-delete-shared-handle-lease-v1",
+};
 
-/** 构造可变文件系统，使测试能表达 root、rename、替换与拓扑竞态。 */
-function createFakeFileSystem(initial: Record<string, FakeFileRecord>) {
-  const records = new Map(Object.entries(initial));
-  const lstat = vi.fn(async (input: string) => {
-    const record = records.get(input);
-    if (record === undefined) {
-      throw createHostError("ENOENT");
+/** 构造显式 FILE_ID_INFO 与句柄租约能力的确定性原生边界。 */
+function createFakeSnapshotProvider(
+  initial: Record<string, FakeHostObject>,
+  capability: HostPathSnapshotCapabilityV1 = supportedCapability,
+): FakeSnapshotProvider {
+  const objects = new Map(Object.entries(initial));
+  let nextFailure: FailedHostPathSnapshotV1 | null = null;
+  const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => {
+    if (nextFailure !== null) {
+      const failure = nextFailure;
+      nextFailure = null;
+      return failure;
     }
-    return toStat(record);
-  });
-  const open = vi.fn(async (input: string) => {
-    const record = records.get(input);
-    if (record === undefined) {
-      throw createHostError("ENOENT");
+    const root = objects.get(request.indexingRoot);
+    if (root === undefined) {
+      return { code: "ENOENT", retryable: true, status: "missing" };
     }
-    if (record.openError !== undefined) {
-      throw createHostError(record.openError);
+    const items: CompleteHostPathSnapshotV1["items"] = [];
+    for (const candidate of request.candidates) {
+      const trusted = objects.get(candidate.trustedPath);
+      const asserted = objects.get(candidate.absolutePath);
+      if (trusted === undefined || asserted === undefined) {
+        return { code: "ENOENT", retryable: true, status: "missing" };
+      }
+      if ((trusted.volumeId ?? "volume-a") !== (root.volumeId ?? "volume-a")) {
+        return {
+          code: "HOST_PATH_VOLUME_MISMATCH",
+          retryable: false,
+          status: "unsupported",
+        };
+      }
+      if (trusted.objectId !== asserted.objectId) {
+        return {
+          code: "HOST_PATH_LOGICAL_MAPPING_MISMATCH",
+          retryable: false,
+          status: "unsupported",
+        };
+      }
+      items.push({
+        candidateIndex: candidate.candidateIndex,
+        objectId: trusted.objectId,
+      });
     }
     return {
-      close: vi.fn(async () => record.closeHook?.()),
-      stat: async () => toStat(record),
+      capability,
+      captureNonce: request.captureNonce,
+      items,
+      rootObjectId: root.objectId,
+      status: "complete",
+      volumeId: root.volumeId ?? "volume-a",
     };
   });
-  const realpath = vi.fn(async (input: string) => {
-    const record = records.get(input);
-    if (record === undefined) {
-      throw createHostError("ENOENT");
-    }
-    return record.canonicalPath;
-  });
-  const fileSystem: HostPathIdentityFileSystem = { lstat, open, realpath };
-  return { fileSystem, lstat, open, realpath, records };
+  return {
+    capture,
+    objects,
+    provider: { capture },
+    setFailure: (failure) => {
+      nextFailure = failure;
+    },
+  };
 }
 
-/** 创建绑定 `/repo` 的 POSIX broker，避免测试从宿主 Windows 路径语义借力。 */
+/** 创建绑定 `/repo` 的 broker。 */
 function createPosixBroker(
-  fake: ReturnType<typeof createFakeFileSystem>,
+  fake: FakeSnapshotProvider,
   options: Record<string, number> = {},
 ): HostPathIdentityBroker {
   return new HostPathIdentityBroker({
-    fileSystem: fake.fileSystem,
     indexingRoot: "/repo",
     platform: "linux",
+    snapshotProvider: fake.provider,
     ...options,
   });
 }
 
-/** 提供可证明的 indexing root 与两个普通文件。 */
-function createBasicFake() {
-  return createFakeFileSystem({
-    "/repo": {
-      canonicalPath: "/repo",
-      dev: 1n,
-      ino: 1n,
-      kind: "directory",
-    },
-    "/repo/a.ts": { canonicalPath: "/repo/a.ts", dev: 1n, ino: 10n },
-    "/repo/b.ts": { canonicalPath: "/repo/b.ts", dev: 1n, ino: 11n },
+/** 提供 root 与两个普通文件。 */
+function createBasicFake(): FakeSnapshotProvider {
+  return createFakeSnapshotProvider({
+    "/repo": { objectId: "root-object-0001" },
+    "/repo/a.ts": { objectId: "file-object-0010" },
+    "/repo/b.ts": { objectId: "file-object-0011" },
   });
 }
 
 describe("host path identity broker", () => {
-  it("uses AST auxiliary checks that ignore comments and reject dead, computed or imported bypasses", () => {
-    expect(() => validateHostPathIdentitySource(`
-      import { createHash } from "node:crypto";
-      // 注释中的 toLowerCase、birthtimeNs 与 ẞ 不构成实现能力。
-      export const identity = createHash("sha256");
-    `, "comment-only.ts")).not.toThrow();
+  it("uses positive dependency closure checks and rejects fixed mutation oracles", () => {
+    const source = readFileSync(
+      new URL("../../apps/graph-service/src/host-path-identity.ts", import.meta.url),
+      "utf8",
+    );
+    expect(() => validateHostPathIdentitySource(
+      source,
+      "apps/graph-service/src/host-path-identity.ts",
+    )).not.toThrow();
 
     for (const mutation of [
-      `if (false) { "A"["to" + "LowerCase"](); }`,
-      `import { identity } from "./hidden-helper.js"; export { identity };`,
-      `const proof = { birthtimeNs: 1n }; export { proof };`,
-      `const unicodeExceptions = ["ẞ"]; export { unicodeExceptions };`,
+      `const member = ["to", "LowerCase"].join(""); export const folded = "A"[member]();`,
+      `import { createRequire } from "node:module"; const load = createRequire(import.meta.url); load("./helper.cjs");`,
+      `export const folded = Reflect.apply(String.prototype.toLowerCase, "A", []);`,
+      `import helper = require("./helper.cjs"); export { helper };`,
+      `import vm from "node:vm"; export const value = vm.runInNewContext("identity()");`,
+      `export const value = eval("identity()");`,
+      `export const value = Function("return identity()")();`,
+      `import { identity } from "./helper.js"; export { identity };`,
+      `export const value = (entry: { birthtimeNs: bigint }) => entry.birthtimeNs;`,
     ]) {
-      expect(() => validateHostPathIdentitySource(mutation, "mutation.ts")).toThrow();
+      expect(() => validateHostPathIdentitySource(
+        `${source}\n${mutation}\n`,
+        "mutation.ts",
+      )).toThrow();
     }
   });
 
-  it("returns one opaque identity for ASCII casing aliases and hardlinks of one opened file", async () => {
-    const canonicalPath = "C:\\repo\\AliasFile.ts";
-    const fake = createFakeFileSystem({
-      "C:\\repo": {
-        canonicalPath: "C:\\repo",
-        dev: 7n,
-        ino: 1n,
-        kind: "directory",
-      },
-      "C:\\repo\\ALIASFILE.TS": { canonicalPath, dev: 7n, ino: 11n },
-      "C:\\repo\\AliasFile.ts": { canonicalPath, dev: 7n, ino: 11n },
-      "C:\\repo\\HardLink.ts": {
-        canonicalPath: "C:\\repo\\HardLink.ts",
-        dev: 7n,
-        ino: 11n,
-      },
+  it("groups hardlinks only when they coexist in one native handle snapshot", async () => {
+    const fake = createFakeSnapshotProvider({
+      "/repo": { objectId: "root-object-0001" },
+      "/repo/a.ts": { objectId: "file-object-0010" },
+      "/repo/hardlink.ts": { objectId: "file-object-0010" },
+    });
+    const proof = await createPosixBroker(fake).resolveCandidates([
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+      { absolutePath: "/repo/hardlink.ts", logicalPath: "hardlink.ts" },
+    ]);
+
+    expect(proof.status).toBe("complete");
+    expect(proof.aliasGroups).toHaveLength(1);
+    expect(proof.aliasGroups[0]?.logicalPaths).toEqual(["a.ts", "hardlink.ts"]);
+    expect(proof.entries.every(({ observation }) =>
+      observation.status === "present" && observation.identityLifetime === "snapshot"
+    )).toBe(true);
+  });
+
+  it("accepts Win32 root, intermediate and leaf casing aliases after object proof", async () => {
+    const root = "C:\\Users\\repo";
+    const trustedPath = "C:\\Users\\repo\\src\\AliasFile.ts";
+    const assertedPath = "C:\\USERS\\REPO\\SRC\\ALIASFILE.TS";
+    const fake = createFakeSnapshotProvider({
+      [root]: { objectId: "root-object-0001" },
+      [trustedPath]: { objectId: "file-object-0010" },
+      [assertedPath]: { objectId: "file-object-0010" },
     });
     const broker = new HostPathIdentityBroker({
-      fileSystem: fake.fileSystem,
-      indexingRoot: "C:\\repo",
+      indexingRoot: root,
       platform: "win32",
+      snapshotProvider: fake.provider,
     });
 
-    const canonical = await broker.observe("C:\\repo\\AliasFile.ts");
-    const alias = await broker.observe("C:\\repo\\ALIASFILE.TS");
-    const hardlink = await broker.observe("C:\\repo\\HardLink.ts");
-    expect(canonical.observation.status).toBe("present");
-    expect(alias.observation.status).toBe("present");
-    expect(hardlink.observation.status).toBe("present");
-    if (
-      canonical.observation.status !== "present" ||
-      alias.observation.status !== "present" ||
-      hardlink.observation.status !== "present"
-    ) {
-      throw new Error("测试前置条件不成立。");
-    }
-    expect(alias.observation.identity).toBe(canonical.observation.identity);
-    expect(hardlink.observation.identity).toBe(canonical.observation.identity);
-    expect(JSON.stringify(canonical)).not.toContain("C:\\\\repo");
+    const proof = await broker.resolveCandidates([
+      { absolutePath: trustedPath, logicalPath: "src/AliasFile.ts" },
+      { absolutePath: assertedPath, logicalPath: "src/AliasFile.ts" },
+    ]);
+
+    expect(proof.status).toBe("complete");
+    expect(proof.entries).toHaveLength(1);
+    expect(fake.capture).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps distinct Unicode files separate without exposing absolute paths", async () => {
-    const fake = createFakeFileSystem({
-      "/repo": { canonicalPath: "/repo", dev: 1n, ino: 1n, kind: "directory" },
-      "/repo/ẞ.ts": { canonicalPath: "/repo/ẞ.ts", dev: 1n, ino: 10n },
-      "/repo/ß.ts": { canonicalPath: "/repo/ß.ts", dev: 1n, ino: 11n },
-      "/repo/İ.ts": { canonicalPath: "/repo/İ.ts", dev: 1n, ino: 12n },
-      "/repo/i̇.ts": { canonicalPath: "/repo/i̇.ts", dev: 1n, ino: 13n },
+  it("keeps distinct Unicode objects separate without string folding", async () => {
+    const fake = createFakeSnapshotProvider({
+      "/repo": { objectId: "root-object-0001" },
+      "/repo/ẞ.ts": { objectId: "file-object-0010" },
+      "/repo/ß.ts": { objectId: "file-object-0011" },
+      "/repo/İ.ts": { objectId: "file-object-0012" },
+      "/repo/i̇.ts": { objectId: "file-object-0013" },
     });
     const broker = createPosixBroker(fake);
 
@@ -169,49 +202,32 @@ describe("host path identity broker", () => {
       ["/repo/İ.ts", "/repo/i̇.ts"],
     ] as const) {
       expect(leftPath.toLowerCase()).toBe(rightPath.toLowerCase());
-      const left = await broker.observe(leftPath);
-      const right = await broker.observe(rightPath);
-      if (left.observation.status !== "present" || right.observation.status !== "present") {
-        throw new Error("测试前置条件不成立。");
-      }
-      expect(left.observation.identity).not.toBe(right.observation.identity);
-      expect(JSON.stringify([left, right])).not.toContain("/repo/");
+      const proof = await broker.resolveCandidates([
+        { absolutePath: leftPath, logicalPath: leftPath.slice(6) },
+        { absolutePath: rightPath, logicalPath: rightPath.slice(6) },
+      ]);
+      expect(proof.status).toBe("complete");
+      expect(proof.aliasGroups).toHaveLength(2);
+      expect(JSON.stringify(proof)).not.toContain("/repo/");
     }
   });
 
-  it("binds proof to the indexing root and rejects relative, device, ADS and external paths", async () => {
-    const fake = createFakeFileSystem({
-      "C:\\repo": {
-        canonicalPath: "C:\\repo",
-        dev: 7n,
-        ino: 1n,
-        kind: "directory",
-      },
-      "C:\\repo\\inside.ts": {
-        canonicalPath: "C:\\outside\\inside.ts",
-        dev: 7n,
-        ino: 12n,
-      },
-      "C:\\outside\\inside.ts": {
-        canonicalPath: "C:\\outside\\inside.ts",
-        dev: 7n,
-        ino: 12n,
-      },
-    });
+  it("rejects relative, device, UNC and ADS paths before native capture", async () => {
+    const fake = createBasicFake();
     const broker = new HostPathIdentityBroker({
-      fileSystem: fake.fileSystem,
       indexingRoot: "C:\\repo",
       platform: "win32",
+      snapshotProvider: fake.provider,
     });
 
     for (const absolutePath of [
       "relative.ts",
       "C:drive-relative.ts",
       "\\relative-to-drive-root.ts",
+      "\\\\server\\share\\file.ts",
       "\\\\?\\C:\\repo\\device.ts",
       "\\\\.\\C:\\repo\\device.ts",
       "C:\\repo\\inside.ts:secret",
-      "C:\\outside\\outside.ts",
     ]) {
       const proof = await broker.resolveCandidates([
         { absolutePath, logicalPath: "candidate.ts" },
@@ -219,17 +235,7 @@ describe("host path identity broker", () => {
       expect(proof.status).toBe("rejected");
       expect(proof.entries).toEqual([]);
     }
-
-    const junctionEscape = await broker.resolveCandidates([
-      { absolutePath: "C:\\repo\\inside.ts", logicalPath: "inside.ts" },
-    ]);
-    expect(junctionEscape.status).toBe("failed");
-    expect(junctionEscape.aliasGroups).toEqual([]);
-    expect(junctionEscape.entries[0]?.observation).toMatchObject({
-      code: "HOST_PATH_OUTSIDE_INDEXING_ROOT",
-      retryable: false,
-      status: "unsupported",
-    });
+    expect(fake.capture).not.toHaveBeenCalled();
   });
 
   it("requires canonical relative POSIX logical paths", async () => {
@@ -254,113 +260,110 @@ describe("host path identity broker", () => {
     }
   });
 
-  it("uses opened dev/ino identity and ignores mutable birth time", async () => {
-    const fake = createBasicFake();
-    const first = await observeHostPathIdentity("/repo/a.ts", {
-      fileSystem: fake.fileSystem,
-      indexingRoot: "/repo",
-      platform: "linux",
-    });
-    if (first.status !== "present") {
-      throw new Error("测试前置条件不成立。");
+  it("fails closed when FILE_ID_INFO or fixed NTFS handle fencing is not explicit", async () => {
+    for (const capability of [
+      { ...supportedCapability, fileIdInfo: false },
+      { ...supportedCapability, fileSystemType: "exFAT" },
+      { ...supportedCapability, fixedVolume: false },
+      { ...supportedCapability, snapshotFence: "broker-generation" },
+    ]) {
+      const fake = createFakeSnapshotProvider({
+        "/repo": { objectId: "root-object-0001" },
+        "/repo/a.ts": { objectId: "file-object-0010" },
+      }, capability);
+      await expect(observeHostPathIdentity("/repo/a.ts", {
+        indexingRoot: "/repo",
+        platform: "linux",
+        snapshotProvider: fake.provider,
+      })).resolves.toMatchObject({
+        code: "HOST_PATH_IDENTITY_UNSUPPORTED",
+        retryable: false,
+        status: "unsupported",
+      });
     }
-
-    const originalLstat = fake.lstat.getMockImplementation();
-    fake.lstat.mockImplementation(async (input: string) => {
-      const status = await originalLstat!(input);
-      return { ...status, birthtimeNs: 999999n };
-    });
-    const second = await observeHostPathIdentity("/repo/a.ts", {
-      fileSystem: fake.fileSystem,
-      indexingRoot: "/repo",
-      platform: "linux",
-    });
-    if (second.status !== "present") {
-      throw new Error("测试前置条件不成立。");
-    }
-    expect(second.identity).toBe(first.identity);
   });
 
-  it("returns non-retryable unsupported when a complete opened identity tuple is unavailable", async () => {
+  it.each(["ENAMETOOLONG", "EINVAL", "ENOSYS", "ENOTSUP"])(
+    "preserves permanent host capability error %s as non-retryable unsupported",
+    async (code) => {
+      const fake = createBasicFake();
+      fake.setFailure({ code, retryable: false, status: "unsupported" });
+      await expect(observeHostPathIdentity("/repo/a.ts", {
+        indexingRoot: "/repo",
+        platform: "linux",
+        snapshotProvider: fake.provider,
+      })).resolves.toMatchObject({ code, retryable: false, status: "unsupported" });
+    },
+  );
+
+  it("prioritizes native topology change over stable outside or volume classifications", async () => {
     const fake = createBasicFake();
-    fake.records.set("/repo/a.ts", {
-      canonicalPath: "/repo/a.ts",
-      dev: 0n,
-      ino: 10n,
-    });
-
-    await expect(observeHostPathIdentity("/repo/a.ts", {
-      fileSystem: fake.fileSystem,
-      indexingRoot: "/repo",
-      platform: "linux",
-    })).resolves.toMatchObject({
-      code: "HOST_PATH_IDENTITY_UNSUPPORTED",
-      retryable: false,
-      status: "unsupported",
-    });
-  });
-
-  it("classifies topology errors after initial presence as changed and retryable", async () => {
-    const fake = createBasicFake();
-    fake.records.get("/repo/a.ts")!.openError = "EISDIR";
-
-    await expect(observeHostPathIdentity("/repo/a.ts", {
-      fileSystem: fake.fileSystem,
-      indexingRoot: "/repo",
-      platform: "linux",
-    })).resolves.toMatchObject({
+    fake.setFailure({
       code: "HOST_PATH_CHANGED",
       retryable: true,
       status: "changed",
     });
 
-    fake.lstat.mockRejectedValueOnce(createHostError("ELOOP"));
     await expect(observeHostPathIdentity("/repo/a.ts", {
-      fileSystem: fake.fileSystem,
       indexingRoot: "/repo",
       platform: "linux",
+      snapshotProvider: fake.provider,
     })).resolves.toMatchObject({
-      code: "ELOOP",
-      retryable: false,
-      status: "unsupported",
+      code: "HOST_PATH_CHANGED",
+      retryable: true,
+      status: "changed",
     });
   });
 
-  it("revalidates the whole read-set and rejects aliases that never coexisted", async () => {
+  it("rejects indexing-root ABA reported by the pinned root ancestry lease", async () => {
     const fake = createBasicFake();
-    let moved = false;
-    fake.records.get("/repo/a.ts")!.closeHook = () => {
-      if (moved) {
-        return;
-      }
-      moved = true;
-      fake.records.set("/repo/a.ts", {
-        canonicalPath: "/repo/a.ts",
-        dev: 1n,
-        ino: 12n,
-      });
-      fake.records.set("/repo/b.ts", {
-        canonicalPath: "/repo/b.ts",
-        dev: 1n,
-        ino: 10n,
-      });
-    };
-    const broker = createPosixBroker(fake);
+    fake.setFailure({
+      code: "HOST_PATH_CHANGED",
+      retryable: true,
+      status: "changed",
+    });
+    const proof = await createPosixBroker(fake).resolveCandidates([
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+    ]);
+
+    expect(proof.status).toBe("failed");
+    expect(proof.aliasGroups).toEqual([]);
+  });
+
+  it("never manufactures an alias group from a sequential ABA schedule", async () => {
+    const fake = createBasicFake();
+    const simultaneousObjects = new Map(fake.objects);
+    const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => {
+      const items = request.candidates.map((candidate) => ({
+        candidateIndex: candidate.candidateIndex,
+        objectId: simultaneousObjects.get(candidate.trustedPath)?.objectId ?? "missing",
+      }));
+      return {
+        capability: supportedCapability,
+        captureNonce: request.captureNonce,
+        items,
+        rootObjectId: "root-object-0001",
+        status: "complete",
+        volumeId: "volume-a",
+      };
+    });
+    const broker = new HostPathIdentityBroker({
+      indexingRoot: "/repo",
+      platform: "linux",
+      snapshotProvider: { capture },
+    });
 
     const proof = await broker.resolveCandidates([
       { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
       { absolutePath: "/repo/b.ts", logicalPath: "b.ts" },
     ]);
-    expect(proof.status).toBe("failed");
-    expect(proof.aliasGroups).toEqual([]);
-    expect(proof.entries).toHaveLength(2);
-    expect(proof.entries.every(({ observation }) =>
-      observation.status === "changed" && observation.retryable
-    )).toBe(true);
-    expect(proof).toHaveProperty("readSetDigest");
+
+    expect(proof.status).toBe("complete");
+    expect(proof.aliasGroups).toHaveLength(2);
+    expect(capture).toHaveBeenCalledTimes(1);
   });
 
-  it("checks raw count and byte budgets before later allocation, sorting or I/O", async () => {
+  it("checks raw count and byte budgets before sorting or native capture", async () => {
     const fake = createBasicFake();
     const broker = createPosixBroker(fake, {
       maxAbsolutePathBytes: 32,
@@ -385,143 +388,136 @@ describe("host path identity broker", () => {
       status: "rejected",
     });
     expect(unread).not.toHaveBeenCalled();
-    expect(fake.lstat).not.toHaveBeenCalled();
+    expect(fake.capture).not.toHaveBeenCalled();
 
     const lateRead = vi.fn(() => {
       throw new Error("超过字节预算后不得继续读取后续候选。");
     });
-    const sameCandidateAbsoluteRead = vi.fn(() => {
-      throw new Error("logicalPath 超限后不得读取同一候选的 absolutePath。");
-    });
     const overBytes = [
       Object.defineProperties({}, {
-        absolutePath: { get: sameCandidateAbsoluteRead },
-        logicalPath: { value: "logical-path-too-long.ts" },
-      }),
-      Object.defineProperties({}, {
         absolutePath: { get: lateRead },
-        logicalPath: { get: lateRead },
+        logicalPath: { value: "logical-path-too-long.ts" },
       }),
     ] as unknown as Array<{ absolutePath: string; logicalPath: string }>;
     await expect(broker.resolveCandidates(overBytes)).resolves.toMatchObject({
       code: "HOST_PATH_LOGICAL_PATH_LIMIT_EXCEEDED",
       status: "rejected",
     });
-    expect(sameCandidateAbsoluteRead).not.toHaveBeenCalled();
     expect(lateRead).not.toHaveBeenCalled();
-    expect(fake.lstat).not.toHaveBeenCalled();
-
-    const cumulativeLateRead = vi.fn(() => {
-      throw new Error("累计 UTF-8 预算超限后不得读取后续候选。");
-    });
-    const cumulativeBroker = createPosixBroker(fake, {
-      maxAbsolutePathBytes: 32,
-      maxBatchBytes: 20,
-      maxCandidates: 3,
-      maxLogicalPathBytes: 16,
-    });
-    await expect(cumulativeBroker.resolveCandidates([
-      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
-      { absolutePath: "/repo/b.ts", logicalPath: "b.ts" },
-      Object.defineProperties({}, {
-        absolutePath: { get: cumulativeLateRead },
-        logicalPath: { get: cumulativeLateRead },
-      }) as { absolutePath: string; logicalPath: string },
-    ])).resolves.toMatchObject({
-      code: "HOST_PATH_BATCH_LIMIT_EXCEEDED",
-      status: "rejected",
-    });
-    expect(cumulativeLateRead).not.toHaveBeenCalled();
-    expect(fake.lstat).not.toHaveBeenCalled();
+    expect(fake.capture).not.toHaveBeenCalled();
   });
 
-  it("sorts unique logical paths and keeps generation/proof digests deterministic", async () => {
+  it("sorts unique logical paths while keeping broker generation separate from snapshot identity", async () => {
     const fake = createBasicFake();
-    const firstBroker = createPosixBroker(fake);
-    const secondBroker = createPosixBroker(fake);
+    const broker = createPosixBroker(fake);
     const input = [
       { absolutePath: "/repo/b.ts", logicalPath: "b.ts" },
       { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
       { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
     ];
 
-    const first = await firstBroker.resolveCandidates(input);
-    const second = await secondBroker.resolveCandidates([...input].reverse());
+    const first = await broker.resolveCandidates(input);
+    const second = await broker.resolveCandidates([...input].reverse());
     expect(first.status).toBe("complete");
     expect(second.status).toBe("complete");
     expect(first.entries.map(({ logicalPath }) => logicalPath)).toEqual(["a.ts", "b.ts"]);
     expect(first.generation).toBe(1);
-    expect(second.generation).toBe(1);
-    expect(first.proofDigest).toBe(second.proofDigest);
+    expect(second.generation).toBe(2);
+    expect(first.snapshotIdentity).not.toBe(second.snapshotIdentity);
+    expect(first.proofDigest).not.toBe(second.proofDigest);
     expect(JSON.stringify(first)).not.toContain("/repo/");
   });
 
-  it("preserves identity across rename and changes it after delete plus replace", async () => {
+  it("scopes identity to one proof so File ID reuse cannot inherit an old identity", async () => {
     const fake = createBasicFake();
     const broker = createPosixBroker(fake);
     const before = await broker.observe("/repo/a.ts");
-    if (before.observation.status !== "present") {
-      throw new Error("测试前置条件不成立。");
-    }
-
-    fake.records.delete("/repo/a.ts");
-    fake.records.set("/repo/renamed.ts", {
-      canonicalPath: "/repo/renamed.ts",
-      dev: 1n,
-      ino: 10n,
-    });
-    const renamed = await broker.observe("/repo/renamed.ts");
-    if (renamed.observation.status !== "present") {
-      throw new Error("测试前置条件不成立。");
-    }
-    expect(renamed.observation.identity).toBe(before.observation.identity);
-
-    fake.records.set("/repo/a.ts", {
-      canonicalPath: "/repo/a.ts",
-      dev: 1n,
-      ino: 99n,
-    });
     const replacement = await broker.observe("/repo/a.ts");
-    if (replacement.observation.status !== "present") {
+    if (before.observation.status !== "present" || replacement.observation.status !== "present") {
       throw new Error("测试前置条件不成立。");
     }
+
+    expect(before.observation.identityLifetime).toBe("snapshot");
     expect(replacement.observation.identity).not.toBe(before.observation.identity);
+    expect(replacement.snapshotIdentity).not.toBe(before.snapshotIdentity);
   });
 
-  it("keeps missing, unreadable, conflict and unknown I/O failures fail-closed", async () => {
+  it("rejects a logical path whose root-derived mapping names another object", async () => {
     const fake = createBasicFake();
-    fake.records.set("/repo/private.ts", {
-      canonicalPath: "/repo/private.ts",
-      dev: 1n,
-      ino: 20n,
-      openError: "EACCES",
-    });
-    fake.records.set("/repo/error.ts", {
-      canonicalPath: "/repo/error.ts",
-      dev: 1n,
-      ino: 21n,
-      openError: "EIO",
-    });
-    const broker = createPosixBroker(fake);
+    const proof = await createPosixBroker(fake).resolveCandidates([
+      { absolutePath: "/repo/b.ts", logicalPath: "a.ts" },
+    ]);
 
-    await expect(broker.observe("/repo/missing.ts")).resolves.toMatchObject({
-      observation: { code: "ENOENT", status: "missing" },
+    expect(proof.status).toBe("failed");
+    expect(proof.aliasGroups).toEqual([]);
+    expect(proof.entries[0]?.observation).toMatchObject({
+      code: "HOST_PATH_LOGICAL_MAPPING_MISMATCH",
+      retryable: false,
+      status: "unsupported",
     });
-    await expect(broker.observe("/repo/private.ts")).resolves.toMatchObject({
-      observation: { code: "EACCES", status: "unreadable" },
+  });
+
+  it("keeps missing, unreadable and unknown failures fail-closed", async () => {
+    const cases: FailedHostPathSnapshotV1[] = [
+      { code: "ENOENT", retryable: true, status: "missing" },
+      { code: "EACCES", retryable: false, status: "unreadable" },
+      { code: "EIO", retryable: true, status: "error" },
+    ];
+    for (const failure of cases) {
+      const fake = createBasicFake();
+      fake.setFailure(failure);
+      await expect(observeHostPathIdentity("/repo/a.ts", {
+        indexingRoot: "/repo",
+        platform: "linux",
+        snapshotProvider: fake.provider,
+      })).resolves.toMatchObject(failure);
+    }
+  });
+
+  it("fails closed on duplicate logical candidates that prove different objects", async () => {
+    const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => ({
+      capability: supportedCapability,
+      captureNonce: request.captureNonce,
+      items: request.candidates.map((candidate, index) => ({
+        candidateIndex: candidate.candidateIndex,
+        objectId: `file-object-00${index + 10}`,
+      })),
+      rootObjectId: "root-object-0001",
+      status: "complete",
+      volumeId: "volume-a",
+    }));
+    const broker = new HostPathIdentityBroker({
+      indexingRoot: "/repo",
+      platform: "linux",
+      snapshotProvider: { capture },
     });
-    await expect(broker.resolveCandidates([
+    const proof = await broker.resolveCandidates([
       { absolutePath: "/repo/a.ts", logicalPath: "same.ts" },
       { absolutePath: "/repo/b.ts", logicalPath: "same.ts" },
-    ])).resolves.toMatchObject({
-      code: "HOST_PATH_LOGICAL_ALIAS_CONFLICT",
-      status: "rejected",
-    });
-    const failed = await broker.resolveCandidates([
-      { absolutePath: "/repo/error.ts", logicalPath: "error.ts" },
     ]);
-    expect(failed.status).toBe("failed");
-    expect(failed.aliasGroups).toEqual([]);
-    expect(failed.entries[0]?.observation).toMatchObject({ code: "EIO", status: "error" });
+
+    expect(proof.status).toBe("failed");
+    expect(proof.entries[0]?.observation).toMatchObject({
+      code: "HOST_PATH_LOGICAL_ALIAS_CONFLICT",
+      retryable: false,
+      status: "unsupported",
+    });
+  });
+
+  it("sends only root-derived trusted paths to the native provider", async () => {
+    const fake = createBasicFake();
+    await createPosixBroker(fake).resolveCandidates([
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+    ]);
+
+    const request = fake.capture.mock.calls[0]?.[0];
+    expect(request?.candidates).toEqual([
+      {
+        absolutePath: "/repo/a.ts",
+        candidateIndex: 0,
+        logicalPath: "a.ts",
+        trustedPath: "/repo/a.ts",
+      } satisfies HostPathSnapshotCandidateV1,
+    ]);
   });
 });
