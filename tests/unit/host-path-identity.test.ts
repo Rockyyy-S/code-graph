@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -9,7 +10,10 @@ import {
   type HostPathSnapshotCapabilityV1,
   type HostPathSnapshotCandidateV1,
 } from "../../apps/graph-service/src/host-path-identity.js";
-import { validateHostPathIdentitySource } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
+import {
+  validateCandidateSourceIdentity,
+  validateHostPathIdentitySource,
+} from "../../scripts/ci/verify-host-path-identity-v1.mjs";
 
 interface FakeHostObject {
   objectId: string;
@@ -115,6 +119,46 @@ function createBasicFake(): FakeSnapshotProvider {
 }
 
 describe("host path identity broker", () => {
+  it("treats LF and CRLF worktree representations as the same exact candidate source", () => {
+    const lf = Buffer.from("export const identity = true;\n", "utf8");
+    const crlf = Buffer.from("export const identity = true;\r\n", "utf8");
+    const expectedDigest = createHash("sha256").update(lf).digest("hex");
+
+    expect(validateCandidateSourceIdentity({
+      expectedDigest,
+      gitBlobBytes: lf,
+      workingTreeBytes: crlf,
+    })).toBe("export const identity = true;\n");
+    expect(validateCandidateSourceIdentity({
+      expectedDigest,
+      gitBlobBytes: crlf,
+      workingTreeBytes: lf,
+    })).toBe("export const identity = true;\n");
+  });
+
+  it("rejects dirty real content and illegal UTF-8 representations", () => {
+    const clean = Buffer.from("export const identity = true;\n", "utf8");
+    const expectedDigest = createHash("sha256").update(clean).digest("hex");
+    expect(() => validateCandidateSourceIdentity({
+      expectedDigest,
+      gitBlobBytes: clean,
+      workingTreeBytes: Buffer.from("export const identity = false;\n", "utf8"),
+    })).toThrow(/digest/u);
+
+    for (const invalid of [
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), clean]),
+      Buffer.concat([clean, Buffer.from([0])]),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from("export const identity = true;\r", "utf8"),
+    ]) {
+      expect(() => validateCandidateSourceIdentity({
+        expectedDigest,
+        gitBlobBytes: clean,
+        workingTreeBytes: invalid,
+      })).toThrow();
+    }
+  });
+
   it("uses positive dependency closure checks and rejects fixed mutation oracles", () => {
     const source = readFileSync(
       new URL("../../apps/graph-service/src/host-path-identity.ts", import.meta.url),

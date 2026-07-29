@@ -12,6 +12,7 @@ const gateId = "host-path-identity-win32-v1";
 const sourcePath = "apps/graph-service/src/host-path-identity.ts";
 const unitTestPath = "tests/unit/host-path-identity.test.ts";
 const contractTestPath = "tests/contract/host-path-identity-win32.test.ts";
+const dedicatedContractConfigPath = "vitest.contract.win32.config.ts";
 const manifestTestPath = "tests/contract/quality-gates-manifest.test.ts";
 const verifierPath = "scripts/ci/verify-host-path-identity-v1.mjs";
 const triggerPaths = [
@@ -62,7 +63,7 @@ const requiredProductionCalls = new Map([
 
 /** 独立校验完整生产闭包与固定原生脚本，执行 mutation oracle 后运行黑盒回归。 */
 export async function verifyHostPathIdentityV1() {
-  const source = await readRepositoryFile(sourcePath);
+  const source = await readVerifiedCandidateSource();
   validateHostPathIdentitySource(source, sourcePath);
   validateMutationOracle(source);
   await validateGateRegistration();
@@ -71,7 +72,122 @@ export async function verifyHostPathIdentityV1() {
   if (unitStatus !== 0) {
     return unitStatus;
   }
-  return runVitest("vitest.contract.config.ts", [contractTestPath, manifestTestPath]);
+  return runVitestWithRequiredCounts(dedicatedContractConfigPath, contractTestPath);
+}
+
+/**
+ * 读取实际工作树文件与 exact candidate Git blob，并要求二者只经 CRLF→LF 后绑定固定摘要。
+ *
+ * @param {{
+ *   candidateRevision?: string;
+ *   expectedDigest?: string;
+ *   relativePath?: string;
+ *   repositoryRoot?: string;
+ * }} [options] 候选读取参数。
+ * @returns {Promise<string>} 经唯一合法换行规范化后的生产源码。
+ */
+export async function readVerifiedCandidateSource(options = {}) {
+  const root = options.repositoryRoot ?? repositoryRoot;
+  const relativePath = options.relativePath ?? sourcePath;
+  const expectedDigest = options.expectedDigest ?? expectedProductionSourceDigest;
+  const candidateRevision = options.candidateRevision ?? "HEAD";
+  if (
+    path.isAbsolute(relativePath) ||
+    relativePath.includes("\\") ||
+    relativePath.includes("\0") ||
+    relativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    throw new Error("host identity 源码路径必须是规范仓库相对 POSIX path。");
+  }
+  const workingTreeBytes = await readFile(path.join(root, ...relativePath.split("/")));
+  const candidate = spawnSync(
+    "git",
+    ["rev-parse", "--verify", `${candidateRevision}^{commit}`],
+    { cwd: root, encoding: "utf8", windowsHide: true },
+  );
+  const candidateSha = candidate.stdout?.trim();
+  if (
+    candidate.error !== undefined ||
+    candidate.status !== 0 ||
+    candidateSha === undefined ||
+    !/^[a-f0-9]{40}$/u.test(candidateSha)
+  ) {
+    throw new Error("host identity exact candidate commit 无法解析。");
+  }
+  const blob = spawnSync(
+    "git",
+    ["cat-file", "blob", `${candidateSha}:${relativePath}`],
+    { cwd: root, encoding: null, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+  );
+  if (blob.error !== undefined || blob.status !== 0 || !Buffer.isBuffer(blob.stdout)) {
+    throw new Error("host identity exact candidate Git blob 缺失或无法读取。");
+  }
+  return validateCandidateSourceIdentity({
+    expectedDigest,
+    gitBlobBytes: blob.stdout,
+    relativePath,
+    workingTreeBytes,
+  });
+}
+
+/**
+ * 严格校验工作树与 Git blob 的 UTF-8 表示、唯一换行规范化和三方摘要闭合。
+ *
+ * @param {{
+ *   expectedDigest: string;
+ *   gitBlobBytes: Buffer;
+ *   relativePath?: string;
+ *   workingTreeBytes: Buffer;
+ * }} input 待闭合的两份候选字节。
+ * @returns {string} 工作树规范文本。
+ */
+export function validateCandidateSourceIdentity(input) {
+  if (!/^[a-f0-9]{64}$/u.test(input.expectedDigest)) {
+    throw new Error("host identity 固定期望摘要格式非法。");
+  }
+  const label = input.relativePath ?? sourcePath;
+  const workingTreeSource = canonicalizeStrictUtf8(input.workingTreeBytes, `${label} 工作树`);
+  const gitBlobSource = canonicalizeStrictUtf8(input.gitBlobBytes, `${label} Git blob`);
+  const workingTreeDigest = createHash("sha256")
+    .update(workingTreeSource, "utf8")
+    .digest("hex");
+  const gitBlobDigest = createHash("sha256").update(gitBlobSource, "utf8").digest("hex");
+  if (
+    workingTreeDigest !== gitBlobDigest ||
+    workingTreeDigest !== input.expectedDigest ||
+    gitBlobDigest !== input.expectedDigest
+  ) {
+    throw new Error(
+      `${label}: 工作树 canonical digest、exact candidate Git blob digest 与固定期望 digest 未闭合。`,
+    );
+  }
+  return workingTreeSource;
+}
+
+/**
+ * 只接受无 BOM/NUL、合法 UTF-8 且换行仅为 LF 或 CRLF 的字节，并规范化 CRLF。
+ *
+ * @param {Buffer} bytes 原始文件字节。
+ * @param {string} label 诊断标签。
+ * @returns {string} 规范 UTF-8 文本。
+ */
+function canonicalizeStrictUtf8(bytes, label) {
+  if (
+    bytes.includes(0) ||
+    (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
+  ) {
+    throw new Error(`${label}: BOM 或 NUL 表示不受信任。`);
+  }
+  let source;
+  try {
+    source = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(`${label}: 文件不是严格合法 UTF-8。`);
+  }
+  if (source.includes("\uFEFF") || /\r(?!\n)/u.test(source)) {
+    throw new Error(`${label}: BOM 或 lone CR 表示不受信任。`);
+  }
+  return source.replaceAll("\r\n", "\n");
 }
 
 /**
@@ -81,6 +197,10 @@ export async function verifyHostPathIdentityV1() {
  * @param {string} modulePath 用于稳定诊断的仓库相对路径。
  */
 export function validateHostPathIdentitySource(source, modulePath = sourcePath) {
+  if (/\r(?!\n)/u.test(source)) {
+    throw new Error(`${modulePath}: host identity 源码包含不受信任的 lone CR。`);
+  }
+  source = source.replaceAll("\r\n", "\n");
   const sourceFile = ts.createSourceFile(
     modulePath,
     source,
@@ -290,11 +410,6 @@ async function validateGateRegistration() {
   }
 }
 
-/** 从仓库固定相对路径读取 UTF-8 文本。 */
-async function readRepositoryFile(relativePath) {
-  return readFile(path.join(repositoryRoot, ...relativePath.split("/")), "utf8");
-}
-
 /** 使用固定配置与路径运行不可由 Gate 参数缩小的 Vitest 黑盒测试。 */
 function runVitest(configPath, paths) {
   const invocation = createPnpmInvocation(process.env.npm_execpath, [
@@ -316,6 +431,61 @@ function runVitest(configPath, paths) {
     return 1;
   }
   return result.status ?? 1;
+}
+
+/** 使用独立配置精确运行 Win32 suite，并证明文件数、测试数非零且没有 skip/todo。 */
+function runVitestWithRequiredCounts(configPath, exactPath) {
+  const invocation = createPnpmInvocation(process.env.npm_execpath, [
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    configPath,
+    exactPath,
+    "--reporter=json",
+  ]);
+  const result = spawnSync(invocation.executable, invocation.args, {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: process.env,
+    maxBuffer: 16 * 1024 * 1024,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+  });
+  if (result.stdout.length > 0) {
+    process.stdout.write(result.stdout);
+  }
+  if (result.stderr.length > 0) {
+    process.stderr.write(result.stderr);
+  }
+  if (result.error !== undefined || result.status !== 0) {
+    console.error("Win32 host identity dedicated contract 未通过。");
+    return 1;
+  }
+  try {
+    const jsonLine = result.stdout
+      .trim()
+      .split(/\r?\n/u)
+      .findLast((line) => line.trimStart().startsWith("{"));
+    const report = JSON.parse(jsonLine ?? "null");
+    const normalizedResultPath = report?.testResults?.[0]?.name?.replaceAll("\\", "/");
+    if (
+      report?.success !== true ||
+      report.testResults.length !== 1 ||
+      !normalizedResultPath?.endsWith(`/${exactPath}`) ||
+      report.numTotalTestSuites <= 0 ||
+      report.numTotalTests <= 0 ||
+      report.numPassedTests !== report.numTotalTests ||
+      report.numFailedTests !== 0 ||
+      report.numPendingTests !== 0 ||
+      report.numTodoTests !== 0
+    ) {
+      throw new Error("dedicated contract 计数或精确路径不闭合。");
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "dedicated contract JSON 无法解析。");
+    return 1;
+  }
+  return 0;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

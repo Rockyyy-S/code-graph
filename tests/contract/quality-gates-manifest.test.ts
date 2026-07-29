@@ -12,7 +12,6 @@ import {
 } from "../../scripts/ci/run-architecture-required.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
-const workflowSha = "1576f74da9e4985502c4baef95c21113900db456";
 const temporaryRoots: string[] = [];
 
 const expectedGates = [
@@ -128,6 +127,19 @@ describe("quality-gates.v1 registry", () => {
   it("登记唯一、升序且由本地 runner 始终执行的二十四项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
     const expectedGateIds = expectedGates.map(([gateId]) => gateId);
+    const workflowShas = new Set<string>(loaded.registry.gates.map(({
+      gateDefinition,
+    }: {
+      gateDefinition: { evidenceProducerId: string; gateId: string };
+    }) => {
+      const match = /@([a-f0-9]{40})#/u.exec(gateDefinition.evidenceProducerId);
+      if (match === null) {
+        throw new Error(`gate ${gateDefinition.gateId} producer SHA 无法解析。`);
+      }
+      return match[1]!;
+    }));
+    expect(workflowShas.size).toBe(1);
+    const workflowSha = [...workflowShas][0]!;
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(loaded.registry.gates).toHaveLength(expectedGates.length);

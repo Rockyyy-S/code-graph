@@ -1,13 +1,35 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { loadQualityGateRegistry } from "../../scripts/ci/load-quality-gates.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const workflowPath = path.join(
   repositoryRoot,
   ".github/workflows/architecture-required.yml",
 );
-const producerSha = "0981130a71a3960aa374a82829d42aa9d9f15012";
+const producerIdentityPattern =
+  /^gha-oidc:\/\/1303415307\/Rockyyy-S\/code-graph-gate-controller\/\.github\/workflows\/produce-gate-evidence\.yml@([a-f0-9]{40})#([a-z][a-z0-9-]*)$/u;
+
+/** 从全部 gate evidenceProducerId 解析唯一 producer SHA，清单是唯一机器权威。 */
+async function loadManifestProducerSha(): Promise<string> {
+  const loaded = await loadQualityGateRegistry(repositoryRoot);
+  const producerShas = new Set<string>(loaded.registry.gates.map(({
+    gateDefinition,
+  }: {
+    gateDefinition: { evidenceProducerId: string; gateId: string };
+  }) => {
+    const match = producerIdentityPattern.exec(gateDefinition.evidenceProducerId);
+    if (match === null || match[2] !== gateDefinition.gateId) {
+      throw new Error(`gate ${gateDefinition.gateId} producer identity 无法解析。`);
+    }
+    return match[1]!;
+  }));
+  if (producerShas.size !== 1) {
+    throw new Error("ci/quality-gates.v1.yaml 必须绑定唯一 producer SHA。");
+  }
+  return [...producerShas][0]!;
+}
 
 describe("child gate evidence workflow", () => {
   it("runs on every pull request and protected default-branch push", async () => {
@@ -21,6 +43,7 @@ describe("child gate evidence workflow", () => {
 
   it("delegates to the immutable external producer with provider OID inputs", async () => {
     const workflow = await readFile(workflowPath, "utf8");
+    const producerSha = await loadManifestProducerSha();
 
     expect(workflow).toContain(
       `uses: Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@${producerSha}`,
