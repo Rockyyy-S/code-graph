@@ -1,11 +1,15 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   loadQualityGateRegistry,
   validateQualityGateRegistry,
 } from "../../scripts/ci/load-quality-gates.mjs";
+import {
+  QUALITY_GATES,
+  runArchitectureRequired,
+} from "../../scripts/ci/run-architecture-required.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const workflowSha = "0981130a71a3960aa374a82829d42aa9d9f15012";
@@ -61,6 +65,22 @@ const expectedGates = [
     ["node", "scripts/contracts/verify-graph-bootstrap-job-request-v1.mjs", "--capability", "schema:jobStartRequestV1Schema", "--test", "tests/unit/graph-bootstrap-job-request-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-request-v1.json", "--evidence-id", "public-capability:schema:jobStartRequestV1Schema"],
     "qa",
   ],
+  /**
+   * 第 24 个 gate 保留平台实现的五条触发元数据，不把本合同测试自身加入生产触发边界；
+   * triggerPaths 只描述影响面，本地 architecture-required 仍必须始终执行该 blocking gate。
+   */
+  [
+    "host-path-identity-win32-v1",
+    ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
+    "qa",
+    [
+      "apps/graph-service/src/host-path-identity.ts",
+      "ci/quality-gates.v1.yaml",
+      "scripts/ci/verify-host-path-identity-v1.mjs",
+      "tests/contract/host-path-identity-win32.test.ts",
+      "tests/unit/host-path-identity.test.ts",
+    ],
+  ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
   ["planning-traceability", ["pnpm", "planning-trace"], "architecture-po"],
   [
@@ -104,12 +124,13 @@ afterEach(async () => {
 });
 
 describe("quality-gates.v1 registry", () => {
-  it("登记唯一、升序、always-applicable 的二十三项 blocking gate", async () => {
+  it("登记唯一、升序且由本地 runner 始终执行的二十四项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
+    const expectedGateIds = expectedGates.map(([gateId]) => gateId);
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(loaded.registry.gates).toHaveLength(expectedGates.length);
-    expectedGates.forEach(([gateId, command, capabilityOwner], index) => {
+    expectedGates.forEach(([gateId, command, capabilityOwner, triggerPaths], index) => {
       const entry = loaded.registry.gates[index]!;
       expect(entry.gateDefinition).toEqual({
         blocking: true,
@@ -118,10 +139,33 @@ describe("quality-gates.v1 registry", () => {
         command,
         evidenceProducerId: `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@${workflowSha}#${gateId}`,
         gateId,
+        ...(triggerPaths === undefined ? {} : { triggerPaths }),
       });
       expect(entry.gateDefinitionDigest).toMatch(/^[a-f0-9]{64}$/);
-      expect(Object.hasOwn(entry.gateDefinition, "triggerPaths")).toBe(false);
+      expect(Object.hasOwn(entry.gateDefinition, "triggerPaths")).toBe(
+        triggerPaths !== undefined,
+      );
     });
+
+    expect(QUALITY_GATES).toEqual(expectedGateIds);
+    const execute = vi.fn(async () => ({
+      status: "pass" as const,
+      stderr: Buffer.alloc(0),
+      stderrTruncated: false,
+      stdout: Buffer.alloc(0),
+      stdoutTruncated: false,
+      termination: { code: 0, kind: "exit" as const },
+    }));
+    const result = await runArchitectureRequired({
+      execute,
+      registry: loaded.registry,
+      writeArtifacts: false,
+    });
+
+    expect(execute).toHaveBeenCalledTimes(expectedGates.length);
+    expect(result.gates.map(({ gateId, status }) => ({ gateId, status }))).toEqual(
+      expectedGateIds.map((gateId) => ({ gateId, status: "pass" })),
+    );
   });
 
   it.each([
