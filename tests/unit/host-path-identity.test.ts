@@ -5,12 +5,14 @@ import {
   type HostPathIdentityFileSystem,
   type HostPathIdentityStat,
 } from "../../apps/graph-service/src/host-path-identity.js";
+import { validateHostPathIdentitySource } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
 
 interface FakeFileRecord {
-  birthtimeNs?: bigint;
   canonicalPath: string;
+  closeHook?: () => void;
   dev: bigint;
   ino: bigint;
+  kind?: "directory" | "file" | "symbolic-link";
   openError?: string;
 }
 
@@ -21,16 +23,18 @@ function createHostError(code: string): NodeJS.ErrnoException {
 
 /** 把测试记录投影为 broker 只允许读取的文件状态。 */
 function toStat(record: FakeFileRecord): HostPathIdentityStat {
+  const kind = record.kind ?? "file";
   return {
-    birthtimeNs: record.birthtimeNs ?? 1n,
+    birthtimeNs: 1n,
     dev: record.dev,
     ino: record.ino,
-    isFile: () => true,
-    isSymbolicLink: () => false,
-  };
+    isDirectory: () => kind === "directory",
+    isFile: () => kind === "file",
+    isSymbolicLink: () => kind === "symbolic-link",
+  } as HostPathIdentityStat;
 }
 
-/** 构造可变文件系统，使测试能表达 rename、替换与读取错误。 */
+/** 构造可变文件系统，使测试能表达 root、rename、替换与拓扑竞态。 */
 function createFakeFileSystem(initial: Record<string, FakeFileRecord>) {
   const records = new Map(Object.entries(initial));
   const lstat = vi.fn(async (input: string) => {
@@ -49,7 +53,7 @@ function createFakeFileSystem(initial: Record<string, FakeFileRecord>) {
       throw createHostError(record.openError);
     }
     return {
-      close: vi.fn(async () => undefined),
+      close: vi.fn(async () => record.closeHook?.()),
       stat: async () => toStat(record),
     };
   });
@@ -64,190 +68,460 @@ function createFakeFileSystem(initial: Record<string, FakeFileRecord>) {
   return { fileSystem, lstat, open, realpath, records };
 }
 
+/** 创建绑定 `/repo` 的 POSIX broker，避免测试从宿主 Windows 路径语义借力。 */
+function createPosixBroker(
+  fake: ReturnType<typeof createFakeFileSystem>,
+  options: Record<string, number> = {},
+): HostPathIdentityBroker {
+  return new HostPathIdentityBroker({
+    fileSystem: fake.fileSystem,
+    indexingRoot: "/repo",
+    platform: "linux",
+    ...options,
+  });
+}
+
+/** 提供可证明的 indexing root 与两个普通文件。 */
+function createBasicFake() {
+  return createFakeFileSystem({
+    "/repo": {
+      canonicalPath: "/repo",
+      dev: 1n,
+      ino: 1n,
+      kind: "directory",
+    },
+    "/repo/a.ts": { canonicalPath: "/repo/a.ts", dev: 1n, ino: 10n },
+    "/repo/b.ts": { canonicalPath: "/repo/b.ts", dev: 1n, ino: 11n },
+  });
+}
+
 describe("host path identity broker", () => {
-  it("returns one opaque identity for ASCII casing aliases of the same opened file", async () => {
-    const canonicalPath = "C:\\repo\\AliasFile.ts";
-    const fake = createFakeFileSystem({
-      "C:\\repo\\ALIASFILE.TS": { canonicalPath, dev: 7n, ino: 11n },
-      "C:\\repo\\AliasFile.ts": { canonicalPath, dev: 7n, ino: 11n },
-    });
+  it("uses AST auxiliary checks that ignore comments and reject dead, computed or imported bypasses", () => {
+    expect(() => validateHostPathIdentitySource(`
+      import { createHash } from "node:crypto";
+      // 注释中的 toLowerCase、birthtimeNs 与 ẞ 不构成实现能力。
+      export const identity = createHash("sha256");
+    `, "comment-only.ts")).not.toThrow();
 
-    const first = await observeHostPathIdentity("C:\\repo\\AliasFile.ts", {
-      fileSystem: fake.fileSystem,
-      platform: "win32",
-    });
-    const alias = await observeHostPathIdentity("C:\\repo\\ALIASFILE.TS", {
-      fileSystem: fake.fileSystem,
-      platform: "win32",
-    });
-
-    expect(first).toMatchObject({ status: "present", canonicalPath });
-    expect(alias).toMatchObject({ status: "present", canonicalPath });
-    if (first.status !== "present" || alias.status !== "present") {
-      throw new Error("测试前置条件不成立。");
+    for (const mutation of [
+      `if (false) { "A"["to" + "LowerCase"](); }`,
+      `import { identity } from "./hidden-helper.js"; export { identity };`,
+      `const proof = { birthtimeNs: 1n }; export { proof };`,
+      `const unicodeExceptions = ["ẞ"]; export { unicodeExceptions };`,
+    ]) {
+      expect(() => validateHostPathIdentitySource(mutation, "mutation.ts")).toThrow();
     }
-    expect(alias.identity).toBe(first.identity);
-    expect(alias.volumeIdentity).toBe(first.volumeIdentity);
   });
 
-  it("keeps distinct Unicode files separate even when JavaScript lowercase collides", async () => {
+  it("returns one opaque identity for ASCII casing aliases and hardlinks of one opened file", async () => {
+    const canonicalPath = "C:\\repo\\AliasFile.ts";
     const fake = createFakeFileSystem({
+      "C:\\repo": {
+        canonicalPath: "C:\\repo",
+        dev: 7n,
+        ino: 1n,
+        kind: "directory",
+      },
+      "C:\\repo\\ALIASFILE.TS": { canonicalPath, dev: 7n, ino: 11n },
+      "C:\\repo\\AliasFile.ts": { canonicalPath, dev: 7n, ino: 11n },
+      "C:\\repo\\HardLink.ts": {
+        canonicalPath: "C:\\repo\\HardLink.ts",
+        dev: 7n,
+        ino: 11n,
+      },
+    });
+    const broker = new HostPathIdentityBroker({
+      fileSystem: fake.fileSystem,
+      indexingRoot: "C:\\repo",
+      platform: "win32",
+    });
+
+    const canonical = await broker.observe("C:\\repo\\AliasFile.ts");
+    const alias = await broker.observe("C:\\repo\\ALIASFILE.TS");
+    const hardlink = await broker.observe("C:\\repo\\HardLink.ts");
+    expect(canonical.observation.status).toBe("present");
+    expect(alias.observation.status).toBe("present");
+    expect(hardlink.observation.status).toBe("present");
+    if (
+      canonical.observation.status !== "present" ||
+      alias.observation.status !== "present" ||
+      hardlink.observation.status !== "present"
+    ) {
+      throw new Error("测试前置条件不成立。");
+    }
+    expect(alias.observation.identity).toBe(canonical.observation.identity);
+    expect(hardlink.observation.identity).toBe(canonical.observation.identity);
+    expect(JSON.stringify(canonical)).not.toContain("C:\\\\repo");
+  });
+
+  it("keeps distinct Unicode files separate without exposing absolute paths", async () => {
+    const fake = createFakeFileSystem({
+      "/repo": { canonicalPath: "/repo", dev: 1n, ino: 1n, kind: "directory" },
       "/repo/ẞ.ts": { canonicalPath: "/repo/ẞ.ts", dev: 1n, ino: 10n },
       "/repo/ß.ts": { canonicalPath: "/repo/ß.ts", dev: 1n, ino: 11n },
       "/repo/İ.ts": { canonicalPath: "/repo/İ.ts", dev: 1n, ino: 12n },
       "/repo/i̇.ts": { canonicalPath: "/repo/i̇.ts", dev: 1n, ino: 13n },
     });
+    const broker = createPosixBroker(fake);
 
     for (const [leftPath, rightPath] of [
       ["/repo/ẞ.ts", "/repo/ß.ts"],
       ["/repo/İ.ts", "/repo/i̇.ts"],
     ] as const) {
       expect(leftPath.toLowerCase()).toBe(rightPath.toLowerCase());
-      const left = await observeHostPathIdentity(leftPath, { fileSystem: fake.fileSystem });
-      const right = await observeHostPathIdentity(rightPath, { fileSystem: fake.fileSystem });
-      if (left.status !== "present" || right.status !== "present") {
+      const left = await broker.observe(leftPath);
+      const right = await broker.observe(rightPath);
+      if (left.observation.status !== "present" || right.observation.status !== "present") {
         throw new Error("测试前置条件不成立。");
       }
-      expect(left.identity).not.toBe(right.identity);
+      expect(left.observation.identity).not.toBe(right.observation.identity);
+      expect(JSON.stringify([left, right])).not.toContain("/repo/");
     }
   });
 
-  it("returns explicit missing and unreadable results without fabricating identity", async () => {
+  it("binds proof to the indexing root and rejects relative, device, ADS and external paths", async () => {
     const fake = createFakeFileSystem({
-      "/repo/private.ts": {
-        canonicalPath: "/repo/private.ts",
-        dev: 1n,
-        ino: 2n,
-        openError: "EACCES",
+      "C:\\repo": {
+        canonicalPath: "C:\\repo",
+        dev: 7n,
+        ino: 1n,
+        kind: "directory",
       },
-    });
-
-    await expect(observeHostPathIdentity("/repo/missing.ts", {
-      fileSystem: fake.fileSystem,
-    })).resolves.toMatchObject({ code: "ENOENT", status: "missing" });
-    await expect(observeHostPathIdentity("/repo/private.ts", {
-      fileSystem: fake.fileSystem,
-    })).resolves.toMatchObject({ code: "EACCES", status: "unreadable" });
-  });
-
-  it("preserves identity across rename and changes identity after path replacement", async () => {
-    const fake = createFakeFileSystem({
-      "/repo/before.ts": { canonicalPath: "/repo/before.ts", dev: 1n, ino: 20n },
-    });
-    const before = await observeHostPathIdentity("/repo/before.ts", {
-      fileSystem: fake.fileSystem,
-    });
-    if (before.status !== "present") {
-      throw new Error("测试前置条件不成立。");
-    }
-
-    fake.records.delete("/repo/before.ts");
-    fake.records.set("/repo/after.ts", {
-      canonicalPath: "/repo/after.ts",
-      dev: 1n,
-      ino: 20n,
-    });
-    const afterRename = await observeHostPathIdentity("/repo/after.ts", {
-      fileSystem: fake.fileSystem,
-    });
-    await expect(observeHostPathIdentity("/repo/before.ts", {
-      fileSystem: fake.fileSystem,
-    })).resolves.toMatchObject({ status: "missing" });
-    if (afterRename.status !== "present") {
-      throw new Error("测试前置条件不成立。");
-    }
-    expect(afterRename.identity).toBe(before.identity);
-    expect(afterRename.evidenceDigest).not.toBe(before.evidenceDigest);
-
-    fake.records.set("/repo/before.ts", {
-      birthtimeNs: 2n,
-      canonicalPath: "/repo/before.ts",
-      dev: 1n,
-      ino: 21n,
-    });
-    const replacement = await observeHostPathIdentity("/repo/before.ts", {
-      fileSystem: fake.fileSystem,
-    });
-    if (replacement.status !== "present") {
-      throw new Error("测试前置条件不成立。");
-    }
-    expect(replacement.identity).not.toBe(before.identity);
-  });
-
-  it("detects a rename or replacement race while the path proof is being captured", async () => {
-    const fake = createFakeFileSystem({
-      "/repo/racing.ts": { canonicalPath: "/repo/racing.ts", dev: 1n, ino: 30n },
-    });
-    fake.realpath.mockImplementationOnce(async (input: string) => {
-      fake.records.set(input, { canonicalPath: input, dev: 1n, ino: 31n });
-      return input;
-    });
-
-    await expect(observeHostPathIdentity("/repo/racing.ts", {
-      fileSystem: fake.fileSystem,
-    })).resolves.toMatchObject({ code: "HOST_PATH_CHANGED", status: "changed" });
-  });
-
-  it("bounds, sorts and uniquifies the candidate logical-path proof", async () => {
-    const fake = createFakeFileSystem({
-      "/repo/a.ts": { canonicalPath: "/repo/a.ts", dev: 1n, ino: 40n },
-      "/repo/z.ts": { canonicalPath: "/repo/z.ts", dev: 1n, ino: 41n },
+      "C:\\repo\\inside.ts": {
+        canonicalPath: "C:\\outside\\inside.ts",
+        dev: 7n,
+        ino: 12n,
+      },
+      "C:\\outside\\inside.ts": {
+        canonicalPath: "C:\\outside\\inside.ts",
+        dev: 7n,
+        ino: 12n,
+      },
     });
     const broker = new HostPathIdentityBroker({
       fileSystem: fake.fileSystem,
-      maxCandidates: 2,
+      indexingRoot: "C:\\repo",
+      platform: "win32",
     });
 
-    const proof = await broker.resolveCandidates([
-      { absolutePath: "/repo/z.ts", logicalPath: "z.ts" },
-      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
-      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
-    ]);
-    expect(proof.status).toBe("complete");
-    expect(proof.entries.map((entry) => entry.logicalPath)).toEqual(["a.ts", "z.ts"]);
-    expect(proof.aliasGroups).toHaveLength(2);
-    expect(proof.proofDigest).toMatch(/^[a-f0-9]{64}$/u);
+    for (const absolutePath of [
+      "relative.ts",
+      "C:drive-relative.ts",
+      "\\relative-to-drive-root.ts",
+      "\\\\?\\C:\\repo\\device.ts",
+      "\\\\.\\C:\\repo\\device.ts",
+      "C:\\repo\\inside.ts:secret",
+      "C:\\outside\\outside.ts",
+    ]) {
+      const proof = await broker.resolveCandidates([
+        { absolutePath, logicalPath: "candidate.ts" },
+      ]);
+      expect(proof.status).toBe("rejected");
+      expect(proof.entries).toEqual([]);
+    }
 
-    const overLimit = await broker.resolveCandidates([
-      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
-      { absolutePath: "/repo/z.ts", logicalPath: "z.ts" },
-      { absolutePath: "/repo/third.ts", logicalPath: "third.ts" },
+    const junctionEscape = await broker.resolveCandidates([
+      { absolutePath: "C:\\repo\\inside.ts", logicalPath: "inside.ts" },
     ]);
-    expect(overLimit).toMatchObject({
-      code: "HOST_PATH_CANDIDATE_LIMIT_EXCEEDED",
-      entries: [],
-      status: "rejected",
+    expect(junctionEscape.status).toBe("failed");
+    expect(junctionEscape.aliasGroups).toEqual([]);
+    expect(junctionEscape.entries[0]?.observation).toMatchObject({
+      code: "HOST_PATH_OUTSIDE_INDEXING_ROOT",
+      retryable: false,
+      status: "unsupported",
     });
-    expect(fake.open).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects conflicting logical aliases and propagates unknown I/O errors fail-closed", async () => {
-    const fake = createFakeFileSystem({
-      "/repo/a.ts": { canonicalPath: "/repo/a.ts", dev: 1n, ino: 50n },
-      "/repo/b.ts": { canonicalPath: "/repo/b.ts", dev: 1n, ino: 51n },
-      "/repo/error.ts": {
-        canonicalPath: "/repo/error.ts",
-        dev: 1n,
-        ino: 52n,
-        openError: "EIO",
-      },
-    });
-    const broker = new HostPathIdentityBroker({ fileSystem: fake.fileSystem });
+  it("requires canonical relative POSIX logical paths", async () => {
+    const fake = createBasicFake();
+    const broker = createPosixBroker(fake);
 
+    for (const logicalPath of [
+      "/absolute.ts",
+      "../escape.ts",
+      "a/../b.ts",
+      "./a.ts",
+      "a\\b.ts",
+      "a//b.ts",
+      "e\u0301.ts",
+    ]) {
+      await expect(broker.resolveCandidates([
+        { absolutePath: "/repo/a.ts", logicalPath },
+      ])).resolves.toMatchObject({
+        code: "HOST_PATH_CANDIDATE_INVALID",
+        status: "rejected",
+      });
+    }
+  });
+
+  it("uses opened dev/ino identity and ignores mutable birth time", async () => {
+    const fake = createBasicFake();
+    const first = await observeHostPathIdentity("/repo/a.ts", {
+      fileSystem: fake.fileSystem,
+      indexingRoot: "/repo",
+      platform: "linux",
+    });
+    if (first.status !== "present") {
+      throw new Error("测试前置条件不成立。");
+    }
+
+    const originalLstat = fake.lstat.getMockImplementation();
+    fake.lstat.mockImplementation(async (input: string) => {
+      const status = await originalLstat!(input);
+      return { ...status, birthtimeNs: 999999n };
+    });
+    const second = await observeHostPathIdentity("/repo/a.ts", {
+      fileSystem: fake.fileSystem,
+      indexingRoot: "/repo",
+      platform: "linux",
+    });
+    if (second.status !== "present") {
+      throw new Error("测试前置条件不成立。");
+    }
+    expect(second.identity).toBe(first.identity);
+  });
+
+  it("returns non-retryable unsupported when a complete opened identity tuple is unavailable", async () => {
+    const fake = createBasicFake();
+    fake.records.set("/repo/a.ts", {
+      canonicalPath: "/repo/a.ts",
+      dev: 0n,
+      ino: 10n,
+    });
+
+    await expect(observeHostPathIdentity("/repo/a.ts", {
+      fileSystem: fake.fileSystem,
+      indexingRoot: "/repo",
+      platform: "linux",
+    })).resolves.toMatchObject({
+      code: "HOST_PATH_IDENTITY_UNSUPPORTED",
+      retryable: false,
+      status: "unsupported",
+    });
+  });
+
+  it("classifies topology errors after initial presence as changed and retryable", async () => {
+    const fake = createBasicFake();
+    fake.records.get("/repo/a.ts")!.openError = "EISDIR";
+
+    await expect(observeHostPathIdentity("/repo/a.ts", {
+      fileSystem: fake.fileSystem,
+      indexingRoot: "/repo",
+      platform: "linux",
+    })).resolves.toMatchObject({
+      code: "HOST_PATH_CHANGED",
+      retryable: true,
+      status: "changed",
+    });
+
+    fake.lstat.mockRejectedValueOnce(createHostError("ELOOP"));
+    await expect(observeHostPathIdentity("/repo/a.ts", {
+      fileSystem: fake.fileSystem,
+      indexingRoot: "/repo",
+      platform: "linux",
+    })).resolves.toMatchObject({
+      code: "ELOOP",
+      retryable: false,
+      status: "unsupported",
+    });
+  });
+
+  it("revalidates the whole read-set and rejects aliases that never coexisted", async () => {
+    const fake = createBasicFake();
+    let moved = false;
+    fake.records.get("/repo/a.ts")!.closeHook = () => {
+      if (moved) {
+        return;
+      }
+      moved = true;
+      fake.records.set("/repo/a.ts", {
+        canonicalPath: "/repo/a.ts",
+        dev: 1n,
+        ino: 12n,
+      });
+      fake.records.set("/repo/b.ts", {
+        canonicalPath: "/repo/b.ts",
+        dev: 1n,
+        ino: 10n,
+      });
+    };
+    const broker = createPosixBroker(fake);
+
+    const proof = await broker.resolveCandidates([
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+      { absolutePath: "/repo/b.ts", logicalPath: "b.ts" },
+    ]);
+    expect(proof.status).toBe("failed");
+    expect(proof.aliasGroups).toEqual([]);
+    expect(proof.entries).toHaveLength(2);
+    expect(proof.entries.every(({ observation }) =>
+      observation.status === "changed" && observation.retryable
+    )).toBe(true);
+    expect(proof).toHaveProperty("readSetDigest");
+  });
+
+  it("checks raw count and byte budgets before later allocation, sorting or I/O", async () => {
+    const fake = createBasicFake();
+    const broker = createPosixBroker(fake, {
+      maxAbsolutePathBytes: 32,
+      maxBatchBytes: 48,
+      maxCandidates: 2,
+      maxLogicalPathBytes: 16,
+    });
+    const unread = vi.fn(() => {
+      throw new Error("不应读取超限数组的元素。");
+    });
+    const overCount = [
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+      Object.defineProperties({}, {
+        absolutePath: { get: unread },
+        logicalPath: { get: unread },
+      }),
+    ] as unknown as Array<{ absolutePath: string; logicalPath: string }>;
+
+    await expect(broker.resolveCandidates(overCount)).resolves.toMatchObject({
+      code: "HOST_PATH_CANDIDATE_LIMIT_EXCEEDED",
+      status: "rejected",
+    });
+    expect(unread).not.toHaveBeenCalled();
+    expect(fake.lstat).not.toHaveBeenCalled();
+
+    const lateRead = vi.fn(() => {
+      throw new Error("超过字节预算后不得继续读取后续候选。");
+    });
+    const sameCandidateAbsoluteRead = vi.fn(() => {
+      throw new Error("logicalPath 超限后不得读取同一候选的 absolutePath。");
+    });
+    const overBytes = [
+      Object.defineProperties({}, {
+        absolutePath: { get: sameCandidateAbsoluteRead },
+        logicalPath: { value: "logical-path-too-long.ts" },
+      }),
+      Object.defineProperties({}, {
+        absolutePath: { get: lateRead },
+        logicalPath: { get: lateRead },
+      }),
+    ] as unknown as Array<{ absolutePath: string; logicalPath: string }>;
+    await expect(broker.resolveCandidates(overBytes)).resolves.toMatchObject({
+      code: "HOST_PATH_LOGICAL_PATH_LIMIT_EXCEEDED",
+      status: "rejected",
+    });
+    expect(sameCandidateAbsoluteRead).not.toHaveBeenCalled();
+    expect(lateRead).not.toHaveBeenCalled();
+    expect(fake.lstat).not.toHaveBeenCalled();
+
+    const cumulativeLateRead = vi.fn(() => {
+      throw new Error("累计 UTF-8 预算超限后不得读取后续候选。");
+    });
+    const cumulativeBroker = createPosixBroker(fake, {
+      maxAbsolutePathBytes: 32,
+      maxBatchBytes: 20,
+      maxCandidates: 3,
+      maxLogicalPathBytes: 16,
+    });
+    await expect(cumulativeBroker.resolveCandidates([
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+      { absolutePath: "/repo/b.ts", logicalPath: "b.ts" },
+      Object.defineProperties({}, {
+        absolutePath: { get: cumulativeLateRead },
+        logicalPath: { get: cumulativeLateRead },
+      }) as { absolutePath: string; logicalPath: string },
+    ])).resolves.toMatchObject({
+      code: "HOST_PATH_BATCH_LIMIT_EXCEEDED",
+      status: "rejected",
+    });
+    expect(cumulativeLateRead).not.toHaveBeenCalled();
+    expect(fake.lstat).not.toHaveBeenCalled();
+  });
+
+  it("sorts unique logical paths and keeps generation/proof digests deterministic", async () => {
+    const fake = createBasicFake();
+    const firstBroker = createPosixBroker(fake);
+    const secondBroker = createPosixBroker(fake);
+    const input = [
+      { absolutePath: "/repo/b.ts", logicalPath: "b.ts" },
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+    ];
+
+    const first = await firstBroker.resolveCandidates(input);
+    const second = await secondBroker.resolveCandidates([...input].reverse());
+    expect(first.status).toBe("complete");
+    expect(second.status).toBe("complete");
+    expect(first.entries.map(({ logicalPath }) => logicalPath)).toEqual(["a.ts", "b.ts"]);
+    expect(first.generation).toBe(1);
+    expect(second.generation).toBe(1);
+    expect(first.proofDigest).toBe(second.proofDigest);
+    expect(JSON.stringify(first)).not.toContain("/repo/");
+  });
+
+  it("preserves identity across rename and changes it after delete plus replace", async () => {
+    const fake = createBasicFake();
+    const broker = createPosixBroker(fake);
+    const before = await broker.observe("/repo/a.ts");
+    if (before.observation.status !== "present") {
+      throw new Error("测试前置条件不成立。");
+    }
+
+    fake.records.delete("/repo/a.ts");
+    fake.records.set("/repo/renamed.ts", {
+      canonicalPath: "/repo/renamed.ts",
+      dev: 1n,
+      ino: 10n,
+    });
+    const renamed = await broker.observe("/repo/renamed.ts");
+    if (renamed.observation.status !== "present") {
+      throw new Error("测试前置条件不成立。");
+    }
+    expect(renamed.observation.identity).toBe(before.observation.identity);
+
+    fake.records.set("/repo/a.ts", {
+      canonicalPath: "/repo/a.ts",
+      dev: 1n,
+      ino: 99n,
+    });
+    const replacement = await broker.observe("/repo/a.ts");
+    if (replacement.observation.status !== "present") {
+      throw new Error("测试前置条件不成立。");
+    }
+    expect(replacement.observation.identity).not.toBe(before.observation.identity);
+  });
+
+  it("keeps missing, unreadable, conflict and unknown I/O failures fail-closed", async () => {
+    const fake = createBasicFake();
+    fake.records.set("/repo/private.ts", {
+      canonicalPath: "/repo/private.ts",
+      dev: 1n,
+      ino: 20n,
+      openError: "EACCES",
+    });
+    fake.records.set("/repo/error.ts", {
+      canonicalPath: "/repo/error.ts",
+      dev: 1n,
+      ino: 21n,
+      openError: "EIO",
+    });
+    const broker = createPosixBroker(fake);
+
+    await expect(broker.observe("/repo/missing.ts")).resolves.toMatchObject({
+      observation: { code: "ENOENT", status: "missing" },
+    });
+    await expect(broker.observe("/repo/private.ts")).resolves.toMatchObject({
+      observation: { code: "EACCES", status: "unreadable" },
+    });
     await expect(broker.resolveCandidates([
       { absolutePath: "/repo/a.ts", logicalPath: "same.ts" },
       { absolutePath: "/repo/b.ts", logicalPath: "same.ts" },
     ])).resolves.toMatchObject({
       code: "HOST_PATH_LOGICAL_ALIAS_CONFLICT",
-      entries: [],
       status: "rejected",
     });
-
     const failed = await broker.resolveCandidates([
       { absolutePath: "/repo/error.ts", logicalPath: "error.ts" },
     ]);
     expect(failed.status).toBe("failed");
-    expect(failed.entries[0]?.observation).toMatchObject({ code: "EIO", status: "error" });
     expect(failed.aliasGroups).toEqual([]);
+    expect(failed.entries[0]?.observation).toMatchObject({ code: "EIO", status: "error" });
   });
 });

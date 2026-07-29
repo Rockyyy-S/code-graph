@@ -66,8 +66,8 @@ const expectedGates = [
     "qa",
   ],
   /**
-   * 第 24 个 gate 保留平台实现的五条触发元数据，不把本合同测试自身加入生产触发边界；
-   * triggerPaths 只描述影响面，本地 architecture-required 仍必须始终执行该 blocking gate。
+   * 第 24 个 gate 精确覆盖六条平台 owned path；triggerPaths 只描述影响面，
+   * 本地 architecture-required 仍必须始终执行该 blocking gate。
    */
   [
     "host-path-identity-win32-v1",
@@ -78,6 +78,7 @@ const expectedGates = [
       "ci/quality-gates.v1.yaml",
       "scripts/ci/verify-host-path-identity-v1.mjs",
       "tests/contract/host-path-identity-win32.test.ts",
+      "tests/contract/quality-gates-manifest.test.ts",
       "tests/unit/host-path-identity.test.ts",
     ],
   ],

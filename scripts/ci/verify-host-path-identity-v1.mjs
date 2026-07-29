@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import ts from "typescript";
 import { loadQualityGateRegistry } from "./load-quality-gates.mjs";
 import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
 
@@ -10,74 +11,149 @@ const gateId = "host-path-identity-win32-v1";
 const sourcePath = "apps/graph-service/src/host-path-identity.ts";
 const unitTestPath = "tests/unit/host-path-identity.test.ts";
 const contractTestPath = "tests/contract/host-path-identity-win32.test.ts";
+const manifestTestPath = "tests/contract/quality-gates-manifest.test.ts";
 const verifierPath = "scripts/ci/verify-host-path-identity-v1.mjs";
 const triggerPaths = [
   sourcePath,
   "ci/quality-gates.v1.yaml",
   verifierPath,
   contractTestPath,
+  manifestTestPath,
   unitTestPath,
 ];
-
-const forbiddenSourcePatterns = [
-  { label: "JavaScript lowercase", pattern: /\.toLowerCase\s*\(/u },
-  { label: "JavaScript uppercase", pattern: /\.toUpperCase\s*\(/u },
-  { label: "locale lowercase", pattern: /\.toLocaleLowerCase\s*\(/u },
-  { label: "locale uppercase", pattern: /\.toLocaleUpperCase\s*\(/u },
-  { label: "locale comparison", pattern: /\.localeCompare\s*\(/u },
-  { label: "Unicode case-fold helper", pattern: /case[-_ ]?fold/iu },
-  { label: "Unicode exception table", pattern: /unicode.{0,24}exception|exception.{0,24}unicode/iu },
-  { label: "hard-coded sharp-s exception", pattern: /[ẞß]/u },
-  { label: "hard-coded dotted-i exception", pattern: /[İı]/u },
-];
+const forbiddenMemberNames = new Set([
+  "birthtime",
+  "birthtimeMs",
+  "birthtimeNs",
+  "caseFold",
+  "casefold",
+  "localeCompare",
+  "toLocaleLowerCase",
+  "toLocaleUpperCase",
+  "toLowerCase",
+  "toUpperCase",
+  "unicodeCaseFold",
+]);
+const forbiddenUnicodeLiterals = new Set(["ẞ", "ß", "İ", "ı"]);
 
 /**
- * 独立校验 Win32 host identity 平台合同，并运行固定的 unit/contract 回归集。
+ * 独立校验 Win32 host identity 平台合同，并运行固定的黑盒 unit/contract 回归集。
  *
- * 静态检查只扫描生产实现，测试中的 lowercase 调用用于证明冲突样本，不能被实现复用。
+ * AST 检查只作为禁止第二套字符串算法与 helper 绕过的辅助防线；能力证明来自真实 API
+ * 负向/变异测试与 NTFS 合同，不依赖注释、死代码或 source 字符串标记。
  */
 export async function verifyHostPathIdentityV1() {
   const source = await readRepositoryFile(sourcePath);
-  validateSourceContract(source);
+  validateHostPathIdentitySource(source, sourcePath);
   await validateGateRegistration();
 
   const unitStatus = runVitest("vitest.config.ts", [unitTestPath]);
   if (unitStatus !== 0) {
     return unitStatus;
   }
-  return runVitest("vitest.contract.config.ts", [contractTestPath]);
+  return runVitest("vitest.contract.config.ts", [contractTestPath, manifestTestPath]);
 }
 
-/** 生产代码必须形成真实宿主观察闭环，并且不得出现任何 case-fold 替代。 */
-function validateSourceContract(source) {
-  for (const forbidden of forbiddenSourcePatterns) {
-    if (forbidden.pattern.test(source)) {
-      throw new Error(
-        `${sourcePath}: 禁止 ${forbidden.label} 作为文件身份。Fix: 仅使用 open/lstat/realpath 与 opaque 宿主身份。`,
-      );
+/**
+ * 用 TypeScript AST 拒绝字符串 case-fold、birthtime fallback、计算属性与 helper import。
+ *
+ * @param {string} source 待检查的 TypeScript 模块源码。
+ * @param {string} modulePath 用于稳定诊断的仓库相对路径。
+ */
+export function validateHostPathIdentitySource(source, modulePath = sourcePath) {
+  const sourceFile = ts.createSourceFile(
+    modulePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const violations = [];
+
+  /** 遍历全部 AST，包括不可达分支，避免死代码承载第二套 identity 算法。 */
+  function visit(node) {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier !== undefined &&
+      ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const specifier = node.moduleSpecifier.text;
+      if (!specifier.startsWith("node:")) {
+        violations.push(`禁止从 '${specifier}' 导入可隐藏 identity 算法的 helper。`);
+      }
     }
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword
+    ) {
+      const specifier = evaluateStaticString(node.arguments[0]);
+      if (specifier === undefined || !specifier.startsWith("node:")) {
+        violations.push("禁止 dynamic import 隐藏 identity helper。");
+      }
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
+      violations.push("禁止 require 隐藏 identity helper。");
+    }
+    if (ts.isIdentifier(node) && forbiddenMemberNames.has(node.text)) {
+      violations.push(`禁止标识符 '${node.text}'。`);
+    }
+    if (ts.isStringLiteralLike(node)) {
+      if (forbiddenMemberNames.has(node.text)) {
+        violations.push(`禁止字符串成员 '${node.text}'。`);
+      }
+      for (const forbidden of forbiddenUnicodeLiterals) {
+        if (node.text.indexOf(forbidden) >= 0) {
+          violations.push(`禁止硬编码 Unicode 例外 '${forbidden}'。`);
+        }
+      }
+    }
+    if (ts.isElementAccessExpression(node)) {
+      const propertyName = evaluateStaticString(node.argumentExpression);
+      if (propertyName !== undefined && forbiddenMemberNames.has(propertyName)) {
+        violations.push(`禁止计算属性 '${propertyName}'。`);
+      }
+    }
+    ts.forEachChild(node, visit);
   }
-  for (const required of [
-    "nativeOpen",
-    "nativeLstat",
-    "nativeRealpath",
-    "dev",
-    "ino",
-    "birthtimeNs",
-    "HostPathIdentityBroker",
-    "resolveCandidates",
-    "HOST_PATH_CHANGED",
-    'status: "missing" | "unreadable" | "changed"',
-  ]) {
-    if (!source.includes(required)) {
-      throw new Error(
-        `${sourcePath}: 缺少平台合同标记 '${required}'。Fix: 恢复宿主身份、候选证明或 fail-closed 状态。`,
-      );
-    }
+
+  visit(sourceFile);
+  if (violations.length > 0) {
+    throw new Error(
+      `${modulePath}: host identity AST 合同失败。Fix: 仅使用 root-bound opened-handle identity。\n${[
+        ...new Set(violations),
+      ].join("\n")}`,
+    );
   }
 }
 
-/** Gate 必须阻断、固定执行本 verifier，并覆盖全部平台 owned paths。 */
+/**
+ * 对字符串字面量、无替换模板和 `+` 连接求静态值，覆盖计算属性绕过。
+ *
+ * @param {import("typescript").Expression | undefined} expression AST 表达式。
+ * @returns {string | undefined} 可静态证明时的字符串值。
+ */
+function evaluateStaticString(expression) {
+  if (expression === undefined) {
+    return undefined;
+  }
+  if (ts.isStringLiteralLike(expression)) {
+    return expression.text;
+  }
+  if (ts.isParenthesizedExpression(expression)) {
+    return evaluateStaticString(expression.expression);
+  }
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = evaluateStaticString(expression.left);
+    const right = evaluateStaticString(expression.right);
+    return left === undefined || right === undefined ? undefined : `${left}${right}`;
+  }
+  return undefined;
+}
+
+/** Gate 必须阻断、固定执行本 verifier，并覆盖全部六条平台 owned path。 */
 async function validateGateRegistration() {
   const loaded = await loadQualityGateRegistry(repositoryRoot);
   const matching = loaded.registry.gates.filter(
@@ -95,7 +171,7 @@ async function validateGateRegistration() {
     JSON.stringify(definition.triggerPaths) !== JSON.stringify(triggerPaths)
   ) {
     throw new Error(
-      `ci/quality-gates.v1.yaml: ${gateId} 定义漂移。Fix: 恢复 blocking、固定 argv 与排序后的 owned triggerPaths。`,
+      `ci/quality-gates.v1.yaml: ${gateId} 定义漂移。Fix: 恢复 blocking、固定 argv 与六条 owned triggerPaths。`,
     );
   }
 }
@@ -105,7 +181,7 @@ async function readRepositoryFile(relativePath) {
   return readFile(path.join(repositoryRoot, ...relativePath.split("/")), "utf8");
 }
 
-/** 使用固定配置与路径运行不可由 Gate 参数缩小的 Vitest 测试。 */
+/** 使用固定配置与路径运行不可由 Gate 参数缩小的 Vitest 黑盒测试。 */
 function runVitest(configPath, paths) {
   const invocation = createPnpmInvocation(process.env.npm_execpath, [
     "exec",
