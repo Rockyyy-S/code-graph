@@ -12,7 +12,7 @@ import {
 } from "../../scripts/ci/run-architecture-required.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
-const workflowSha = "0981130a71a3960aa374a82829d42aa9d9f15012";
+const workflowSha = "1576f74da9e4985502c4baef95c21113900db456";
 const temporaryRoots: string[] = [];
 
 const expectedGates = [
