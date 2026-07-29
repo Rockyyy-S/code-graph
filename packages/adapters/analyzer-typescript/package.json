@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@codegraph/application": "workspace:*",
-    "@codegraph/domain": "workspace:*"
+    "@codegraph/domain": "workspace:*",
+    "typescript": "6.0.3"
   }
 }

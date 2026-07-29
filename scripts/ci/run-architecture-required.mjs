@@ -13,7 +13,8 @@ import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const loadedRegistry = await loadQualityGateRegistry(repositoryRoot);
 const outputLimitBytes = 1024 * 1024;
-const defaultGateTimeoutMs = 2 * 60 * 1000;
+/** 真实 contract gate 包含 Worker 冷启动与 SQLite 锁竞争，三分钟覆盖并行 Windows CI 的已测上界。 */
+export const ARCHITECTURE_GATE_TIMEOUT_MS = 3 * 60 * 1000;
 const defaultTotalTimeoutMs = 20 * 60 * 1000;
 
 /** @type {string[]} */
@@ -67,7 +68,7 @@ export async function runArchitectureRequired(options = {}) {
         : execute === undefined
           ? await executeRegistryGate(definition.gateId, definition.command, {
               timeoutMs: Math.min(
-                options.gateTimeoutMs ?? defaultGateTimeoutMs,
+                options.gateTimeoutMs ?? ARCHITECTURE_GATE_TIMEOUT_MS,
                 remainingMs,
               ),
             })
@@ -182,7 +183,7 @@ export async function executeRegistryGate(_gateId, registryCommand, options = {}
     executable: resolved.executable,
     killGraceMs: options.killGraceMs,
     outputLimitBytes,
-    timeoutMs: options.timeoutMs ?? defaultGateTimeoutMs,
+    timeoutMs: options.timeoutMs ?? ARCHITECTURE_GATE_TIMEOUT_MS,
     windowsVerbatimArguments: resolved.windowsVerbatimArguments === true,
   });
 }

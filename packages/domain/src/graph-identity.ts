@@ -1,5 +1,11 @@
-/** 当前 hierarchy 切片允许的基础实体类型。 */
-export type GraphEntityKind = "directory" | "file" | "workspace";
+/** hierarchy 切片允许使用工作区相对路径构造的实体类型。 */
+export type HierarchyEntityKind = "directory" | "file" | "workspace";
+
+/** 当前持久图谱允许的封闭实体类型。 */
+export type GraphEntityKind = HierarchyEntityKind | "external-package" | "node-builtin";
+
+/** 当前持久图谱允许的封闭关系类型。 */
+export type GraphRelationType = "contains" | "exports" | "imports";
 
 /**
  * 将输入路径规范为工作区相对、Unicode NFC、POSIX 分隔格式。
@@ -36,7 +42,7 @@ export function normalizeRelativeGraphPath(input: string): string {
 /** 使用工作区作用域、实体类型和规范相对路径构造确定性 cg:// ID。 */
 export function buildGraphEntityId(
   workspaceKey: string,
-  kind: GraphEntityKind,
+  kind: HierarchyEntityKind,
   relativePath: string,
 ): string {
   assertWorkspaceKey(workspaceKey);
@@ -58,7 +64,7 @@ export function buildGraphEntityId(
 export function buildGraphEdgeId(
   workspaceKey: string,
   fromId: string,
-  relationType: "contains",
+  relationType: GraphRelationType,
   toId: string,
   qualifier = "",
 ): string {

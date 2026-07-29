@@ -4,6 +4,7 @@ import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { createErrorV1, sha256CanonicalJson } from "@codegraph/contracts";
 import { openSqliteGraphStore } from "@codegraph/adapter-store-sqlite";
+import { createTypeScriptAnalyzer } from "@codegraph/adapter-analyzer-typescript";
 import {
   bootstrapServiceInstance,
   GraphServiceStartupError,
@@ -47,6 +48,7 @@ export async function startGraphService(
       paths: options.paths,
       initializeRuntime: async ({ serviceInstanceId, statusEpoch, workspaceKey }) => {
         let store: Awaited<ReturnType<typeof openSqliteGraphStore>> | null = null;
+        const analyzer = createTypeScriptAnalyzer();
         try {
           store = await openSqliteGraphStore({
             databasePath: path.join(options.paths.workspaceDirectory, "graph.sqlite"),
@@ -55,6 +57,7 @@ export async function startGraphService(
           });
           const ignoreState = await createInitialIgnoreState(indexingRoot);
           return await createVerifiedIndexJobRuntime({
+            analyzer,
             ignoreState,
             indexingRoot,
             serviceInstanceId,
@@ -63,6 +66,7 @@ export async function startGraphService(
             workspaceKey,
           });
         } catch (error) {
+          await analyzer.close().catch(() => undefined);
           store?.close();
           if (error instanceof GraphServiceStartupError) {
             throw error;
@@ -126,6 +130,7 @@ async function closeLoggerWithoutMaskingStartupError(
 }
 
 export * from "./instance-owner.js";
+export * from "./analyzer-config.js";
 export * from "./index-read-set.js";
 export * from "./index-job-runtime.js";
 export * from "./service-state.js";

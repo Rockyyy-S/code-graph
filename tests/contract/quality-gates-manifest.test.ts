@@ -6,6 +6,9 @@ import {
   loadQualityGateRegistry,
   validateQualityGateRegistry,
 } from "../../scripts/ci/load-quality-gates.mjs";
+import {
+  TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST,
+} from "../../scripts/ci/verify-typescript-module-analysis-v1.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const workflowSha = "0981130a71a3960aa374a82829d42aa9d9f15012";
@@ -94,6 +97,11 @@ const expectedGates = [
     "dev-enablement",
   ],
   ["type", ["pnpm", "type"], "dev-enablement"],
+  [
+    "typescript-module-analysis-v1",
+    ["node", "scripts/ci/verify-typescript-module-analysis-v1.mjs"],
+    "qa",
+  ],
   ["unit", ["pnpm", "unit"], "qa"],
 ] as const;
 
@@ -104,7 +112,65 @@ afterEach(async () => {
 });
 
 describe("quality-gates.v1 registry", () => {
-  it("登记唯一、升序、always-applicable 的二十三项 blocking gate", async () => {
+  it("locks the Story 1.5 verifier unit and process regression manifest", () => {
+    expect(TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST).toEqual({
+      buildFilters: [
+        "@codegraph/domain",
+        "@codegraph/contracts",
+        "@codegraph/application",
+        "@codegraph/service-client",
+        "@codegraph/adapter-analyzer-typescript",
+        "@codegraph/adapter-git-local",
+        "@codegraph/adapter-store-sqlite",
+        "@codegraph/graph-service",
+      ],
+      contractTests: ["tests/contract/graph-service-process.test.ts"],
+      unitTests: [
+        "tests/unit/analyzer-config-capture.test.ts",
+        "tests/unit/analyzer-config-snapshot.test.ts",
+        "tests/unit/composite-graph-patch.test.ts",
+        "tests/unit/index-job-runtime.test.ts",
+        "tests/unit/index-read-set.test.ts",
+        "tests/unit/module-dependency-domain.test.ts",
+        "tests/unit/module-fact-batch.test.ts",
+        "tests/unit/sqlite-graph-store.test.ts",
+        "tests/unit/sqlite-module-dependencies.test.ts",
+        "tests/unit/typescript-analyzer-worker.test.ts",
+        "tests/unit/typescript-module-resolution.test.ts",
+        "tests/unit/typescript-module-syntax.test.ts",
+      ],
+      version: 1,
+    });
+  });
+
+  it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {
+    const buildFilters = TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.buildFilters;
+    const order = new Map(buildFilters.map((filter, index) => [filter, index]));
+    const dependencies = new Map<string, readonly string[]>([
+      ["@codegraph/application", ["@codegraph/domain"]],
+      ["@codegraph/service-client", ["@codegraph/application", "@codegraph/contracts"]],
+      ["@codegraph/adapter-analyzer-typescript", ["@codegraph/application", "@codegraph/domain"]],
+      ["@codegraph/adapter-git-local", ["@codegraph/application", "@codegraph/domain"]],
+      ["@codegraph/adapter-store-sqlite", ["@codegraph/application", "@codegraph/domain"]],
+      ["@codegraph/graph-service", [
+        "@codegraph/contracts",
+        "@codegraph/application",
+        "@codegraph/service-client",
+        "@codegraph/adapter-analyzer-typescript",
+        "@codegraph/adapter-git-local",
+        "@codegraph/adapter-store-sqlite",
+      ]],
+    ]);
+
+    for (const [dependent, required] of dependencies) {
+      for (const dependency of required) {
+        expect(order.get(dependency), `${dependency} 必须先于 ${dependent} 构建`)
+          .toBeLessThan(order.get(dependent)!);
+      }
+    }
+  });
+
+  it("登记唯一、升序、always-applicable 的二十四项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);

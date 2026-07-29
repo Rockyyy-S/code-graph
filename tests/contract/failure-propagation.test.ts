@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
 import {
+  ARCHITECTURE_GATE_TIMEOUT_MS,
   executeRegistryGate,
   loadProviderEvaluation,
   QUALITY_GATES,
   runArchitectureRequired,
 } from "../../scripts/ci/run-architecture-required.mjs";
+import { DEFAULT_PROCESS_CLEANUP_GRACE_MS } from "../../scripts/ci/run-process-with-deadline.mjs";
 import { loadQualityGateRegistry } from "../../scripts/ci/load-quality-gates.mjs";
 import { sha256CanonicalJson } from "../../packages/contracts/src/canonical-json.js";
 
@@ -28,6 +30,13 @@ function executionResult(status: "fail" | "invalid" | "pass") {
 }
 
 describe("architecture-required failure propagation", () => {
+  it("为真实合同 gate 和 Windows 进程树清理保留已验证预算", () => {
+    expect(ARCHITECTURE_GATE_TIMEOUT_MS).toBe(3 * 60 * 1000);
+    expect(DEFAULT_PROCESS_CLEANUP_GRACE_MS).toBe(
+      process.platform === "win32" ? 10_000 : 2_000,
+    );
+  });
+
   for (const failingGate of QUALITY_GATES) {
     it(`executes every gate and returns non-zero when ${failingGate} fails`, async () => {
       const execute = vi.fn(async (gateId: string) =>
@@ -140,7 +149,11 @@ describe("architecture-required failure propagation", () => {
     const result = await executeRegistryGate(
       "hanging-gate",
       [process.execPath, "-e", "setInterval(() => {}, 1_000)"],
-      { killGraceMs: 50, timeoutMs: 50 },
+      {
+        // 50ms 仍是 gate 执行 deadline；树清理使用平台默认的独立有界宽限。
+        killGraceMs: DEFAULT_PROCESS_CLEANUP_GRACE_MS,
+        timeoutMs: 50,
+      },
     );
 
     expect(result.status).toBe("invalid");

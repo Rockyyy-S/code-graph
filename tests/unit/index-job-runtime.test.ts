@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   sha256CanonicalJson,
@@ -13,10 +14,13 @@ import {
   type SqliteGraphStore,
 } from "../../packages/adapters/store-sqlite/src/index.js";
 import {
+  AnalyzerFailureError,
+  buildGraphEntityId,
   buildHierarchyFactBatch,
   buildHierarchyGraphPatch,
   compareCanonicalGraphText,
 } from "../../packages/application/src/index.js";
+import { createAnalyzerSemanticContextCapture } from "../../apps/graph-service/src/analyzer-config.js";
 import { createInitialIgnoreState } from "../../apps/graph-service/src/ignore-bootstrap.js";
 import {
   createIndexJobRuntime,
@@ -32,6 +36,7 @@ import {
   WorkspaceScanCancelledError,
   WorkspaceScanError,
 } from "../../apps/graph-service/src/workspace-scanner.js";
+import { createTypeScriptAnalyzer } from "../../packages/adapters/analyzer-typescript/src/index.js";
 
 const roots: string[] = [];
 
@@ -143,6 +148,224 @@ function commitPreparedGraph(
 }
 
 describe("index job runtime", () => {
+  it("commits hierarchy and Worker module facts in one composite revision", async () => {
+    const fixture = await createFixture();
+    await mkdir(path.join(fixture.indexingRoot, "src"), { recursive: true });
+    await writeFile(
+      path.join(fixture.indexingRoot, "src", "index.ts"),
+      "import path from 'node:path';\nimport { value } from './dep.js';\nvoid path;\nvoid value;\n",
+    );
+    await writeFile(
+      path.join(fixture.indexingRoot, "src", "dep.ts"),
+      "export const value = 1;\n",
+    );
+    await writeFile(
+      path.join(fixture.indexingRoot, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" } }),
+    );
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const analyzer = createTypeScriptAnalyzer({
+      workerUrl: pathToFileURL(path.resolve(
+        "packages/adapters/analyzer-typescript/dist/analyzer-worker.js",
+      )),
+    });
+    const runtime = createIndexJobRuntime({
+      analyzer,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-module-composite-runtime",
+      statusEpoch: "epoch-module-composite-runtime",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(
+        () => expect(runtime.getStatus().lastIndexJob?.state).toBe("succeeded"),
+        { timeout: 20_000 },
+      );
+      const snapshot = store.readCommittedSnapshot();
+      expect(snapshot.graphRevision).toBe(1);
+      expect(snapshot.allEdges?.filter((edge) => edge.relationType === "imports")).toHaveLength(2);
+      expect(snapshot.allEvidence).toHaveLength(2);
+      expect(snapshot.allNodes).toContainEqual(expect.objectContaining({
+        id: "node:path",
+        kind: "node-builtin",
+      }));
+      expect(store.readBootstrapState().committed).toMatchObject({ graphRevision: 1 });
+      expect(runtime.getStatus().committed).toMatchObject({ edgeCount: 3, nodeCount: 4 });
+      expect(validateServiceStatusV1(runtime.getStatus())).toBe(true);
+
+      await writeFile(
+        path.join(fixture.indexingRoot, "tsconfig.json"),
+        JSON.stringify({ compilerOptions: { baseUrl: ".." } }),
+      );
+      const failed = runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(
+        () => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+          id: failed.job.id,
+          state: "failed",
+        }),
+        { timeout: 20_000 },
+      );
+      expect(runtime.getStatus()).toMatchObject({
+        committed: { graphRevision: 1 },
+        freshness: "stale",
+        graphRevision: 1,
+        lastIndexJob: {
+          baseGraphRevision: 1,
+          error: { code: "GRAPH_SCAN_FAILED" },
+          resultGraphRevision: 1,
+          state: "failed",
+        },
+      });
+      expect(validateServiceStatusV1(runtime.getStatus())).toBe(true);
+      expect(store.readCommittedSnapshot()).toMatchObject({
+        allEdges: snapshot.allEdges,
+        allEvidence: snapshot.allEvidence,
+        allNodes: snapshot.allNodes,
+        graphRevision: 1,
+      });
+
+      await writeFile(
+        path.join(fixture.indexingRoot, "src", "index.ts"),
+        "export const local = 1;\n",
+      );
+      await writeFile(
+        path.join(fixture.indexingRoot, "tsconfig.json"),
+        JSON.stringify({ compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" } }),
+      );
+      const second = runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(
+        () => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+          id: second.job.id,
+          state: "succeeded",
+        }),
+        { timeout: 20_000 },
+      );
+      const replaced = store.readCommittedSnapshot();
+      expect(replaced.graphRevision).toBe(2);
+      expect(replaced.allEdges?.filter((edge) => edge.relationType === "imports")).toEqual([]);
+      expect(replaced.allEvidence).toEqual([]);
+      /** Story 1.5 只移除 source facts；共享节点最后引用回收由 Story 1.7 负责。 */
+      expect(replaced.allNodes).toContainEqual(expect.objectContaining({ id: "node:path" }));
+    } finally {
+      await runtime.close();
+    }
+  }, 30_000);
+
+  it("rolls back consulted config changes inside the SQLite commit fence and reanalyzes paths", async () => {
+    const fixture = await createFixture();
+    await mkdir(path.join(fixture.indexingRoot, "configs"), { recursive: true });
+    await mkdir(path.join(fixture.indexingRoot, "src"), { recursive: true });
+    const baseConfigPath = path.join(fixture.indexingRoot, "configs", "base.json");
+    const configFor = (target: string): string => JSON.stringify({
+      compilerOptions: {
+        baseUrl: "..",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        paths: { "@dep": [target] },
+      },
+    });
+    await writeFile(baseConfigPath, configFor("src/dep-a.ts"));
+    await writeFile(
+      path.join(fixture.indexingRoot, "tsconfig.json"),
+      JSON.stringify({ extends: "./configs/base.json", include: ["src/**/*.ts"] }),
+    );
+    await writeFile(
+      path.join(fixture.indexingRoot, "src", "index.ts"),
+      "import { value } from '@dep';\nvoid value;\n",
+    );
+    await writeFile(
+      path.join(fixture.indexingRoot, "src", "dep-a.ts"),
+      "export const value = 'a';\n",
+    );
+    await writeFile(
+      path.join(fixture.indexingRoot, "src", "dep-b.ts"),
+      "export const value = 'b';\n",
+    );
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const ignoreState = await createInitialIgnoreState(fixture.indexingRoot);
+    if (ignoreState.kind !== "ready") {throw new Error("测试 ignore 前置条件不成立。");}
+    const analyzer = createTypeScriptAnalyzer({
+      workerUrl: pathToFileURL(path.resolve(
+        "packages/adapters/analyzer-typescript/dist/analyzer-worker.js",
+      )),
+    });
+    const provider = createIndexReadSetProvider({
+      captureAnalyzerSemanticContext: createAnalyzerSemanticContextCapture({
+        analyzer,
+        effectiveIgnoreSnapshot: ignoreState.snapshot,
+        indexingRoot: fixture.indexingRoot,
+        workspaceKey: fixture.workspaceKey,
+      }),
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: fixture.indexingRoot,
+      statusEpoch: "epoch-consulted-config-commit-fence",
+      watchWorkspaceChanges: true,
+    });
+    let commitMutations = 0;
+    let injected = false;
+    const runtime = createIndexJobRuntime({
+      analyzer,
+      ignoreState,
+      indexingRoot: fixture.indexingRoot,
+      readSetProvider: {
+        ...provider,
+        runCommitFence: (expected, prepared, commitMutation) => provider.runCommitFence(
+          expected,
+          prepared,
+          () => {
+            commitMutations += 1;
+            if (!injected) {
+              injected = true;
+              // 精确落在 SQLite transaction 内，证明 consulted hash 变化会回滚全部 composite facts。
+              writeFileSync(baseConfigPath, configFor("src/dep-b.ts"), "utf8");
+            }
+            commitMutation();
+          },
+        ),
+      },
+      serviceInstanceId: "instance-consulted-config-commit-fence",
+      statusEpoch: "epoch-consulted-config-commit-fence",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      const started = runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(
+        () => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+          id: started.job.id,
+          state: "succeeded",
+        }),
+        { timeout: 20_000 },
+      );
+
+      const snapshot = store.readCommittedSnapshot();
+      const depAId = buildGraphEntityId(fixture.workspaceKey, "file", "src/dep-a.ts");
+      const depBId = buildGraphEntityId(fixture.workspaceKey, "file", "src/dep-b.ts");
+      const importEdges = snapshot.allEdges?.filter((edge) => edge.relationType === "imports");
+      expect(commitMutations).toBe(2);
+      expect(snapshot.graphRevision).toBe(1);
+      expect(importEdges).toEqual([expect.objectContaining({ toId: depBId })]);
+      expect(importEdges).not.toContainEqual(expect.objectContaining({ toId: depAId }));
+      expect(snapshot.allEvidence).toHaveLength(1);
+      const current = await provider.capture(1);
+      expect(current.analyzerContext?.configSnapshot.consultedFiles)
+        .toContainEqual(expect.objectContaining({ path: "configs/base.json" }));
+      expect(snapshot.committedReadSet?.configDigest).toBe(current.readSet.configDigest);
+      expect(runtime.getStatus()).toMatchObject({ freshness: "current", graphRevision: 1 });
+    } finally {
+      await runtime.close();
+    }
+  }, 30_000);
+
   it("persists a real empty success distinct from never built", async () => {
     const fixture = await createFixture();
     const store = await openSqliteGraphStore({
@@ -1355,6 +1578,145 @@ describe("index job runtime", () => {
     await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob).toMatchObject({
       state: "cancelled",
     }));
+    await expect(runtime.close()).resolves.toBeUndefined();
+  });
+
+  it("maps closed Analyzer failures to GRAPH_SCAN_FAILED", async () => {
+    const fixture = await createFixture();
+    await mkdir(path.join(fixture.indexingRoot, "src"), { recursive: true });
+    await writeFile(path.join(fixture.indexingRoot, "src", "index.ts"), "export {};\n");
+    await writeFile(path.join(fixture.indexingRoot, "tsconfig.json"), "{}\n");
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const runtime = createIndexJobRuntime({
+      analyzer: {
+        analyze: async () => {
+          throw new AnalyzerFailureError(
+            "ANALYZER_PROTOCOL_INVALID",
+            "测试注入 Analyzer 协议失败。",
+          );
+        },
+        close: () => undefined,
+        observeConfiguration: async () => ({
+          consultedLogicalPaths: ["tsconfig.json"],
+          effectiveCompilerOptions: {},
+          projectConfigurations: [],
+          resolutionCandidateLogicalPaths: [],
+        }),
+      },
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-analyzer-failure",
+      statusEpoch: "epoch-analyzer-failure",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+        error: { code: "GRAPH_SCAN_FAILED" },
+        state: "failed",
+      }));
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("maps ordinary Analyzer configuration/broker failures to scan failure and persists stale", async () => {
+    const fixture = await createFixture();
+    await mkdir(path.join(fixture.indexingRoot, "src"), { recursive: true });
+    await writeFile(path.join(fixture.indexingRoot, "src", "index.ts"), "export {};\n");
+    await writeFile(path.join(fixture.indexingRoot, "tsconfig.json"), "{}\n");
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    store.createJob({
+      baseGraphRevision: null,
+      id: "analyzer-config-baseline",
+      kind: "initial-index",
+      requestedAt: "2026-07-27T00:00:00.000Z",
+    });
+    store.markJobRunning("analyzer-config-baseline", "2026-07-27T00:00:00.000Z");
+    commitPreparedGraph(
+      store,
+      fixture.workspaceKey,
+      "analyzer-config-baseline",
+      ["src/index.ts"],
+      "2026-07-27T00:00:01.000Z",
+    );
+    const runtime = createIndexJobRuntime({
+      analyzer: {
+        analyze: async () => ({ consultedLogicalPaths: [], files: [] }),
+        close: () => undefined,
+        observeConfiguration: async () => {
+          throw new Error("测试注入 metadata broker 普通失败。");
+        },
+      },
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-analyzer-config-failure",
+      statusEpoch: "epoch-analyzer-config-failure",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(() => expect(runtime.getStatus()).toMatchObject({
+        freshness: "stale",
+        lastIndexJob: {
+          error: { code: "GRAPH_SCAN_FAILED" },
+          state: "failed",
+        },
+      }));
+      expect(store.readBootstrapState()).toMatchObject({ freshness: "stale" });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("includes Analyzer shutdown in the runtime close deadline", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const ignoreState = await createInitialIgnoreState(fixture.indexingRoot);
+    let resolveAnalyzerClose: (() => void) | undefined;
+    const analyzerClose = new Promise<void>((resolve) => {
+      resolveAnalyzerClose = resolve;
+    });
+    const runtime = createIndexJobRuntime({
+      analyzer: {
+        analyze: async () => ({ consultedLogicalPaths: [], files: [] }),
+        close: () => analyzerClose,
+        observeConfiguration: async () => ({
+          consultedLogicalPaths: [],
+          effectiveCompilerOptions: {},
+          projectConfigurations: [],
+          resolutionCandidateLogicalPaths: [],
+        }),
+      },
+      closeTimeoutMs: 10,
+      ignoreState,
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-analyzer-close-deadline",
+      statusEpoch: "epoch-analyzer-close-deadline",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    const firstClose = runtime.close();
+    const outcome = await Promise.race([
+      firstClose.then(() => "resolved" as const, (error: unknown) => error),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 50)),
+    ]);
+    resolveAnalyzerClose?.();
+    await firstClose.catch(() => undefined);
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome).toMatchObject({ message: expect.stringMatching(/超时/u) });
     await expect(runtime.close()).resolves.toBeUndefined();
   });
 });

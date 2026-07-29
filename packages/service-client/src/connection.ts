@@ -32,7 +32,11 @@ import {
   validateServiceStatusV1Compatible,
   validateShutdownResultCompatible,
 } from "@codegraph/contracts";
-import { connectFirstOrStart, type ServiceDiscoveryRecord } from "./discovery.js";
+import {
+  connectFirstOrStart,
+  type ConnectFirstOrStartOptions,
+  type ServiceDiscoveryRecord,
+} from "./discovery.js";
 import { createWorkspacePaths } from "./endpoint.js";
 import { createServiceClientError, ServiceClientError } from "./errors.js";
 import { createBoundedJsonRpcInput } from "./bounded-json-rpc-input.js";
@@ -68,6 +72,13 @@ export interface ConnectToGraphServiceOptions {
   requestTimeoutMs?: number;
   startTimeoutMs?: number;
   trust: WorkspaceTrustGate;
+}
+
+/** 仓库测试专用的发现边界注入；生产入口始终使用真实文件系统探测。 */
+interface ConnectToGraphServiceTestOverrides {
+  probeDiscoveryState?: NonNullable<
+    ConnectFirstOrStartOptions<unknown>["probeDiscoveryState"]
+  >;
 }
 
 /** status 传输立即吸收 rejection，等待观测队列时不会产生裸 Promise 拒绝。 */
@@ -412,8 +423,9 @@ export async function connectToGraphService(
 export async function connectToGraphServiceWithCacheRootForTests(
   options: ConnectToGraphServiceOptions,
   cacheRoot: string,
+  testOverrides: ConnectToGraphServiceTestOverrides = {},
 ): Promise<GraphServiceConnection> {
-  return connectToGraphServiceInternal(options, cacheRoot);
+  return connectToGraphServiceInternal(options, cacheRoot, testOverrides);
 }
 
 /** 仓库传输测试专用入口；绕过 discovery 以注入受控的伪造 endpoint。 */
@@ -437,6 +449,7 @@ export async function openServiceConnectionForTests(
 async function connectToGraphServiceInternal(
   options: ConnectToGraphServiceOptions,
   cacheRoot?: string,
+  testOverrides?: ConnectToGraphServiceTestOverrides,
 ): Promise<GraphServiceConnection> {
   if (!options.trust.isTrusted) {
     throw createServiceClientError("SERVICE_WORKSPACE_UNTRUSTED");
@@ -493,6 +506,9 @@ async function connectToGraphServiceInternal(
       ),
     paths,
     pollIntervalMs,
+    ...(testOverrides?.probeDiscoveryState === undefined
+      ? {}
+      : { probeDiscoveryState: testOverrides.probeDiscoveryState }),
     start: (remainingMs, signal) => options.launcher.start(
       { indexingRoot: identity.indexingRoot, paths },
       remainingMs,

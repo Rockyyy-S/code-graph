@@ -1,9 +1,9 @@
-import type { GraphEntityKind } from "./graph-identity.js";
+import type { HierarchyEntityKind } from "./graph-identity.js";
 
 /** 当前层级切片的业务节点。 */
 export interface HierarchyNode {
   id: string;
-  kind: GraphEntityKind;
+  kind: HierarchyEntityKind;
   relativePath: string;
 }
 

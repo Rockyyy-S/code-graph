@@ -245,6 +245,17 @@
     },
     {
       "gateDefinition": {
+        "gateId": "typescript-module-analysis-v1",
+        "checkId": "typescript-module-analysis-v1",
+        "command": ["node", "scripts/ci/verify-typescript-module-analysis-v1.mjs"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@0981130a71a3960aa374a82829d42aa9d9f15012#typescript-module-analysis-v1"
+      },
+      "gateDefinitionDigest": "d77e2d15619f2c0ea060a648ac1fc98c035f6fae920b534aec9ea2d58289c931"
+    },
+    {
+      "gateDefinition": {
         "gateId": "unit",
         "checkId": "unit",
         "command": ["pnpm", "unit"],

@@ -6,7 +6,9 @@ import {
   HIERARCHY_PRODUCER_KIND,
   HIERARCHY_PRODUCER_VERSION,
   isSupportedSourceFile,
+  normalizeHostPathIdentity,
   normalizeRelativeGraphPath,
+  type AnalyzerConfigSnapshotV1,
   type HierarchyReadSetV1,
 } from "@codegraph/application";
 import {
@@ -14,6 +16,7 @@ import {
   type EffectiveIgnoreSnapshotV1,
 } from "./ignore-bootstrap.js";
 import {
+  isFileSystemCaseSensitive,
   scanWorkspace,
   type ScanWorkspaceOptions,
   verifyWorkspaceReadSetSync,
@@ -21,6 +24,17 @@ import {
   type WorkspaceScanResult,
   type WorkspaceVerificationProof,
 } from "./workspace-scanner.js";
+import {
+  prepareAnalyzerConfigFenceSynchronously,
+  verifyPreparedAnalyzerConfigFenceSynchronously,
+  verifyAnalyzerConfigSnapshotSynchronously,
+  type CaptureAnalyzerSemanticContext,
+  type PreparedAnalyzerConfigFenceV1,
+  type PreparedAnalyzerContextV1,
+} from "./analyzer-config.js";
+
+/** eval watcher 与主线程共享同一个纯函数值，避免构建器重写 imported binding 名称。 */
+const hostPathIdentity = normalizeHostPathIdentity;
 
 /** 运行期出现用户 ignore 配置后，当前实例无法继续安全解释输入集合。 */
 export class WorkspaceIgnoreConfigChangedError extends Error {
@@ -32,12 +46,14 @@ export class WorkspaceIgnoreConfigChangedError extends Error {
 
 /** 一次 read-set 捕获同时交付 scanner 事实，避免 application 重新读取文件系统。 */
 export interface IndexReadSetCapture {
+  analyzerContext?: PreparedAnalyzerContextV1;
   readSet: HierarchyReadSetV1;
   scanResult: WorkspaceScanResult;
 }
 
 /** 事务外双重完整扫描生成、供事务内同步身份与成员栅栏消费的稳定输入证明。 */
 export interface PreparedCommitFence {
+  analyzerVerificationProof: PreparedAnalyzerConfigFenceV1 | null;
   monitorSequence: bigint | null;
   observationDigest: string;
   verificationProof: WorkspaceVerificationProof;
@@ -73,13 +89,22 @@ export interface WorkspaceChangeMonitor {
   readHandledSequence?: () => bigint;
   readRawSequence?: () => bigint;
   readSequence?: () => bigint;
+  /** 把本次 Analyzer consulted/absent metadata 集合同步注入原生 watcher。 */
+  setAnalyzerMetadataPaths?: (
+    paths: readonly string[],
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ) => Promise<void>;
 }
+
+/** metadata path 安装 ACK 的默认硬超时。 */
+export const DEFAULT_METADATA_PATHS_ACK_TIMEOUT_MS = 5_000;
 
 /** 可注入监视器工厂，测试可以精确触发最终扫描前缀变化。 */
 export type CreateWorkspaceChangeMonitor = (
   indexingRoot: string,
   onChange: (relativePath?: string, eventType?: "change" | "rename") => void,
   onError: (error: unknown) => void,
+  caseSensitivePaths?: boolean,
 ) => WorkspaceChangeMonitor;
 
 /**
@@ -91,6 +116,8 @@ export function isPotentialSemanticWorkspaceEvent(
   relativePath: string | undefined,
   eventType: "change" | "rename",
   pathKind?: "directory" | "file",
+  analyzerMetadataPaths?: ReadonlySet<string>,
+  caseSensitivePaths = true,
 ): boolean {
   if (eventType === "rename" || relativePath === undefined) {
     return true;
@@ -110,6 +137,14 @@ export function isPotentialSemanticWorkspaceEvent(
     if (normalizedPath.toLowerCase() === ".codegraphignore") {
       return true;
     }
+    const watcherKey = normalizeWatcherPathKey(normalizedPath, caseSensitivePaths);
+    const isDynamicMetadata = analyzerMetadataPaths === undefined
+      ? false
+      : [...analyzerMetadataPaths].some((entry) =>
+        normalizeWatcherPathKey(entry, caseSensitivePaths) === watcherKey);
+    if (isAnalyzerMetadataPath(normalizedPath) || isDynamicMetadata) {
+      return true;
+    }
     const ignoredDirectoryNames = new Set([
       "node_modules",
       ".pnpm",
@@ -125,11 +160,17 @@ export function isPotentialSemanticWorkspaceEvent(
       "generated",
       ".generated",
       "__generated__",
-    ]);
-    if (segments[0] === ".git" || segments.some((segment) => ignoredDirectoryNames.has(segment))) {
+    ].map((segment) => hostPathIdentity(segment, caseSensitivePaths)));
+    if (
+      hostPathIdentity(segments[0] ?? "", caseSensitivePaths) ===
+        hostPathIdentity(".git", caseSensitivePaths) ||
+      segments.some((segment) => ignoredDirectoryNames.has(
+        hostPathIdentity(segment, caseSensitivePaths),
+      ))
+    ) {
       return false;
     }
-    const lowerName = normalizedPath.toLocaleLowerCase("en-US");
+    const lowerName = hostPathIdentity(normalizedPath, false);
     if ([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"]
       .some((suffix) => lowerName.endsWith(suffix))) {
       return true;
@@ -140,8 +181,15 @@ export function isPotentialSemanticWorkspaceEvent(
   }
 }
 
+/** 原生 watcher 在大小写不敏感文件系统上使用同一 NFC case-fold key。 */
+function normalizeWatcherPathKey(relativePath: string, caseSensitivePaths: boolean): string {
+  return hostPathIdentity(relativePath, caseSensitivePaths);
+}
+
 /** read-set provider 构造参数。 */
 export interface CreateIndexReadSetProviderOptions {
+  caseSensitivePaths?: boolean;
+  captureAnalyzerSemanticContext?: CaptureAnalyzerSemanticContext;
   createWorkspaceChangeMonitor?: CreateWorkspaceChangeMonitor;
   ignoreSnapshot: EffectiveIgnoreSnapshotV1;
   indexingRoot: string;
@@ -164,6 +212,8 @@ export interface CreateIndexReadSetProviderOptions {
 export function createIndexReadSetProvider(
   options: CreateIndexReadSetProviderOptions,
 ): IndexReadSetProvider {
+  const caseSensitivePaths = options.caseSensitivePaths ??
+    isFileSystemCaseSensitive(options.indexingRoot);
   if (options.statusEpoch.length === 0) {
     throw new TypeError("read-set statusEpoch 不能为空。");
   }
@@ -289,6 +339,10 @@ export function createIndexReadSetProvider(
       invalidateCurrentProof();
       return;
     }
+    if (isAnalyzerMetadataPath(normalizedPath, lastCapturedReadSet, caseSensitivePaths)) {
+      invalidateCurrentProof();
+      return;
+    }
     if (eventType === "change" || eventType === "rename") {
       try {
         const absolutePath = path.join(options.indexingRoot, relativePath);
@@ -319,6 +373,7 @@ export function createIndexReadSetProvider(
           monitorError = error;
           invalidateCurrentProof();
         },
+        caseSensitivePaths,
       )
     : null;
 
@@ -337,7 +392,20 @@ export function createIndexReadSetProvider(
       ...(signal === undefined ? {} : { signal }),
     });
     assertMonitorHealthy(monitorError);
-    const configDigest = sha256CanonicalJson({
+    const analyzerContext = options.captureAnalyzerSemanticContext === undefined
+      ? undefined
+      : await options.captureAnalyzerSemanticContext(scanResult, signal);
+    if (analyzerContext !== undefined) {
+      await monitor?.setAnalyzerMetadataPaths?.([
+        ...analyzerContext.configSnapshot.consultedFiles.map((file) => file.path),
+        ...(analyzerContext.configSnapshot.absentFiles ?? []),
+        ...(analyzerContext.configSnapshot.absentResolutionFiles ?? []),
+        ...(analyzerContext.configSnapshot.blockedResolutionFiles ?? [])
+          .map((file) => file.path),
+      ], signal === undefined ? undefined : { signal });
+      assertMonitorHealthy(monitorError);
+    }
+    const configDigest = analyzerContext?.configDigest ?? sha256CanonicalJson({
       ignore: {
         effectiveDigest: capturedIgnoreSnapshot.effectiveDigest,
         version: capturedIgnoreSnapshot.version,
@@ -347,8 +415,12 @@ export function createIndexReadSetProvider(
         version: HIERARCHY_PRODUCER_VERSION,
       },
     });
-    const inputDigest = sha256CanonicalJson({ manifest: scanResult.manifest });
+    const inputDigest = analyzerContext?.inputDigest ??
+      sha256CanonicalJson({ manifest: scanResult.manifest });
     const readSet: HierarchyReadSetV1 = Object.freeze({
+      ...(analyzerContext === undefined ? {} : {
+        analyzerConfigSnapshot: analyzerContext.configSnapshot,
+      }),
       baseGraphRevision,
       bootstrapGeneration: capturedBootstrapGeneration,
       configDigest,
@@ -359,7 +431,11 @@ export function createIndexReadSetProvider(
       statusEpoch: options.statusEpoch,
     });
     lastCapturedReadSet = readSet;
-    return Object.freeze({ readSet, scanResult });
+    return Object.freeze({
+      ...(analyzerContext === undefined ? {} : { analyzerContext }),
+      readSet,
+      scanResult,
+    });
   };
 
   const prepareCommitFence = async (
@@ -372,7 +448,10 @@ export function createIndexReadSetProvider(
       return null;
     }
     assertNoUserIgnoreConfigSync(options.indexingRoot);
-    if (closed || !isCheapFenceCurrent(expected, bootstrapGeneration, options.ignoreSnapshot)) {
+    if (
+      closed || !isCheapFenceCurrent(expected, bootstrapGeneration, options.ignoreSnapshot) ||
+      !isAnalyzerConfigCurrent(options.indexingRoot, expected)
+    ) {
       return null;
     }
     const capturedIgnoreSnapshot = freezeIgnoreSnapshot(options.ignoreSnapshot);
@@ -390,7 +469,8 @@ export function createIndexReadSetProvider(
       if (
         result.verificationProof === undefined ||
         result.manifestDigest !== expected.manifestDigest ||
-        sha256CanonicalJson(result.manifest) !== sha256CanonicalJson(expected.manifest)
+        sha256CanonicalJson(result.manifest) !== sha256CanonicalJson(expected.manifest) ||
+        !isAnalyzerConfigCurrent(options.indexingRoot, expected)
       ) {
         return null;
       }
@@ -418,7 +498,10 @@ export function createIndexReadSetProvider(
     ) {
       return null;
     }
+    const analyzerVerificationProof = prepareAnalyzerFence(options.indexingRoot, expected);
+    if (analyzerVerificationProof === false) {return null;}
     return Object.freeze({
+      analyzerVerificationProof,
       monitorSequence,
       observationDigest: second.observationDigest,
       verificationProof: second.verificationProof,
@@ -465,6 +548,10 @@ export function createIndexReadSetProvider(
         expected,
         prepared.verificationProof,
         forceContentHash,
+      ) && isPreparedAnalyzerFenceCurrent(
+        options.indexingRoot,
+        expected,
+        prepared.analyzerVerificationProof,
       );
       assertNoUserIgnoreConfigSync(options.indexingRoot);
       if (
@@ -487,6 +574,10 @@ export function createIndexReadSetProvider(
         expected,
         prepared.verificationProof,
         forceContentHash,
+      ) && isPreparedAnalyzerFenceCurrent(
+        options.indexingRoot,
+        expected,
+        prepared.analyzerVerificationProof,
       );
       assertNoUserIgnoreConfigSync(options.indexingRoot);
       if (
@@ -506,7 +597,8 @@ export function createIndexReadSetProvider(
       const monitorSequence = readStableMonitorSequence(monitor);
       return monitorSequence !== false &&
         monitorError === undefined &&
-        isCheapFenceCurrent(expected, bootstrapGeneration, options.ignoreSnapshot);
+        isCheapFenceCurrent(expected, bootstrapGeneration, options.ignoreSnapshot) &&
+        isAnalyzerConfigCurrent(options.indexingRoot, expected);
     },
     isCaptureCurrent: async (capture) => {
       assertMonitorHealthy(monitorError);
@@ -533,6 +625,7 @@ export function createIndexReadSetProvider(
       );
       assertNoUserIgnoreConfigSync(options.indexingRoot);
       const isCurrent = verified &&
+        isAnalyzerConfigCurrent(options.indexingRoot, capture.readSet) &&
         !renameVerificationScheduled &&
         isCheapFenceCurrent(
           capture.readSet,
@@ -587,10 +680,11 @@ function advanceSharedSequence(state: BigInt64Array, index: number): bigint {
 }
 
 /** 默认递归监听在独立 worker 中推进原生序列，避免同步 SQLite 栈延迟事件观察。 */
-function createNativeWorkspaceChangeMonitor(
+export function createNativeWorkspaceChangeMonitor(
   indexingRoot: string,
   onChange: (relativePath?: string, eventType?: "change" | "rename") => void,
   onError: (error: unknown) => void,
+  caseSensitivePaths = isFileSystemCaseSensitive(indexingRoot),
 ): WorkspaceChangeMonitor {
   const rootStatus = lstatSync(indexingRoot, { bigint: true });
   if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) {
@@ -600,8 +694,27 @@ function createNativeWorkspaceChangeMonitor(
   const stateBuffer = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT * 4);
   const state = new BigInt64Array(stateBuffer);
   let handledSequence = 0n;
+  let nextMetadataRequestId = 1;
+  const pendingMetadataRequests = new Map<number, {
+    onAbort?: () => void;
+    reject: (error: unknown) => void;
+    resolve: () => void;
+    signal?: AbortSignal;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
   let closed = false;
   let failureReported = false;
+  const settleMetadataRequest = (requestId: number, error?: unknown): void => {
+    const pending = pendingMetadataRequests.get(requestId);
+    if (pending === undefined) {return;}
+    pendingMetadataRequests.delete(requestId);
+    clearTimeout(pending.timeout);
+    if (pending.onAbort !== undefined) {
+      pending.signal?.removeEventListener("abort", pending.onAbort);
+    }
+    if (error === undefined) {pending.resolve();}
+    else {pending.reject(error);}
+  };
   const reportFailure = (error: unknown): void => {
     if (closed || failureReported) {
       return;
@@ -609,6 +722,9 @@ function createNativeWorkspaceChangeMonitor(
     Atomics.store(state, 3, 1n);
     Atomics.notify(state, 3);
     failureReported = true;
+    for (const requestId of [...pendingMetadataRequests.keys()]) {
+      settleMetadataRequest(requestId, error);
+    }
     onError(error);
   };
   const assertRootIdentityCurrent = (): void => {
@@ -640,8 +756,12 @@ function createNativeWorkspaceChangeMonitor(
     const { parentPort, workerData } = require("node:worker_threads");
     const state = new BigInt64Array(workerData.stateBuffer);
     const advanceSharedSequence = (${advanceSharedSequence.toString()});
+    const isAnalyzerMetadataPath = (${isAnalyzerMetadataPath.toString()});
+    const hostPathIdentity = (${normalizeHostPathIdentity.toString()});
+    const normalizeWatcherPathKey = (${normalizeWatcherPathKey.toString()});
     const isPotentialSemanticWorkspaceEvent = (${isPotentialSemanticWorkspaceEvent.toString()});
     let closing = false;
+    let analyzerMetadataPaths = new Set();
     const publishError = (error) => {
       Atomics.store(state, 3, 1n);
       Atomics.notify(state, 3);
@@ -687,7 +807,13 @@ function createNativeWorkspaceChangeMonitor(
           let sequence;
           try {
             advanceSharedSequence(state, 1);
-            sequence = isPotentialSemanticWorkspaceEvent(normalizedRelativePath, eventType, pathKind)
+            sequence = isPotentialSemanticWorkspaceEvent(
+              normalizedRelativePath,
+              eventType,
+              pathKind,
+              analyzerMetadataPaths,
+              workerData.caseSensitivePaths,
+            )
               ? advanceSharedSequence(state, 2)
               : Atomics.load(state, 2);
           } catch (error) {
@@ -725,6 +851,17 @@ function createNativeWorkspaceChangeMonitor(
           closing = true;
           watcher.close();
           parentPort.close();
+        } else if (message && message.kind === "metadata-paths" &&
+          Number.isSafeInteger(message.requestId) && Array.isArray(message.paths) &&
+          message.paths.every((entry) => typeof entry === "string")) {
+          const next = new Set(message.paths.map((entry) =>
+            normalizeWatcherPathKey(entry, workerData.caseSensitivePaths)));
+          const changed = next.size !== analyzerMetadataPaths.size ||
+            [...next].some((entry) => !analyzerMetadataPaths.has(entry));
+          analyzerMetadataPaths = next;
+          let sequence = Atomics.load(state, 2);
+          if (changed) {sequence = advanceSharedSequence(state, 2);}
+          parentPort.postMessage({ kind: "metadata-paths-applied", requestId: message.requestId, sequence });
         }
       });
       Atomics.store(state, 0, 1n);
@@ -736,7 +873,11 @@ function createNativeWorkspaceChangeMonitor(
     }
   `, {
     eval: true,
-    workerData: { indexingRoot, stateBuffer },
+    workerData: {
+      caseSensitivePaths,
+      indexingRoot,
+      stateBuffer,
+    },
   });
   const ready = Atomics.load(state, 0) === 0n
     ? Atomics.wait(state, 0, 0n, 5_000)
@@ -751,6 +892,19 @@ function createNativeWorkspaceChangeMonitor(
     }
     if (message.kind === "error") {
       reportFailure(new Error("工作区变化 worker 监听失败。"));
+      return;
+    }
+    if (
+      message.kind === "metadata-paths-applied" && "requestId" in message &&
+      Number.isSafeInteger(message.requestId) && "sequence" in message &&
+      typeof message.sequence === "bigint"
+    ) {
+      const requestId = message.requestId as number;
+      const pending = pendingMetadataRequests.get(requestId);
+      if (pending !== undefined) {
+        if (message.sequence > handledSequence) {handledSequence = message.sequence;}
+        settleMetadataRequest(requestId);
+      }
       return;
     }
     if (
@@ -786,7 +940,15 @@ function createNativeWorkspaceChangeMonitor(
         return;
       }
       closed = true;
-      worker.postMessage("close");
+      const abortError = createMetadataWatcherAbortError();
+      for (const requestId of [...pendingMetadataRequests.keys()]) {
+        settleMetadataRequest(requestId, abortError);
+      }
+      try {
+        worker.postMessage("close");
+      } catch {
+        /** pending 已同步结算；关闭消息失败仍由 terminate 完成资源回收。 */
+      }
       void worker.terminate();
     },
     readHandledSequence: () => handledSequence,
@@ -802,6 +964,48 @@ function createNativeWorkspaceChangeMonitor(
         throw new Error("工作区变化 worker 已进入不可恢复失败状态。");
       }
       return Atomics.load(state, 2);
+    },
+    setAnalyzerMetadataPaths: (paths, requestOptions) => {
+      if (closed || failureReported) {
+        return Promise.reject(new Error("工作区变化 worker 已关闭或失效。"));
+      }
+      if (requestOptions?.signal?.aborted === true) {
+        return Promise.reject(createMetadataWatcherAbortError());
+      }
+      const timeoutMs = requestOptions?.timeoutMs ?? DEFAULT_METADATA_PATHS_ACK_TIMEOUT_MS;
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+        return Promise.reject(new RangeError("metadata watcher timeout 必须是正安全整数。"));
+      }
+      const normalizedPaths = [...new Set(paths.map((entry) =>
+        normalizeRelativeGraphPath(entry)))].sort();
+      const requestId = nextMetadataRequestId;
+      nextMetadataRequestId += 1;
+      if (!Number.isSafeInteger(nextMetadataRequestId)) {
+        return Promise.reject(new RangeError("metadata watcher requestId 已达到安全上限。"));
+      }
+      return new Promise<void>((resolve, reject) => {
+        const onAbort = requestOptions?.signal === undefined
+          ? undefined
+          : (): void => settleMetadataRequest(requestId, createMetadataWatcherAbortError());
+        const timeout = setTimeout(() => reportFailure(
+          new Error("工作区变化 worker metadata paths ACK 超时。"),
+        ), timeoutMs);
+        pendingMetadataRequests.set(requestId, {
+          ...(onAbort === undefined ? {} : { onAbort }),
+          reject,
+          resolve,
+          ...(requestOptions?.signal === undefined ? {} : { signal: requestOptions.signal }),
+          timeout,
+        });
+        requestOptions?.signal?.addEventListener("abort", onAbort ?? (() => undefined), {
+          once: true,
+        });
+        try {
+          worker.postMessage({ kind: "metadata-paths", paths: normalizedPaths, requestId });
+        } catch (error) {
+          reportFailure(error);
+        }
+      });
     },
   };
 }
@@ -842,6 +1046,113 @@ function assertMonitorHealthy(error: unknown): void {
 }
 
 /** watcher 回调可能被同步提交阻塞，因此最终栅栏必须直接复核根级保留名。 */
+/** Analyzer 配置、manifest、lockfile 与已封口 consulted path 都属于语义事件。 */
+function isAnalyzerMetadataPath(
+  relativePath: string,
+  readSet?: HierarchyReadSetV1 | null,
+  caseSensitivePaths = true,
+): boolean {
+  const normalized = relativePath.replaceAll("\\", "/").normalize("NFC");
+  const normalizedKey = normalizeWatcherPathKey(normalized, caseSensitivePaths);
+  const baseName = normalized.split("/").at(-1)?.toLowerCase() ?? "";
+  if (
+    baseName === "package.json" ||
+    baseName === "package-lock.json" ||
+    baseName === "pnpm-lock.yaml" ||
+    baseName === "pnpm-workspace.yaml" ||
+    baseName === "yarn.lock" ||
+    /^(?:tsconfig|jsconfig)(?:\.[^/]*)?\.json$/iu.test(baseName)
+  ) {
+    return true;
+  }
+  const snapshot = readSet?.analyzerConfigSnapshot;
+  if (typeof snapshot !== "object" || snapshot === null || !("consultedFiles" in snapshot)) {
+    return false;
+  }
+  const consultedFiles = (snapshot as { consultedFiles?: unknown }).consultedFiles;
+  if (Array.isArray(consultedFiles) && consultedFiles.some((entry) =>
+    typeof entry === "object" && entry !== null && "path" in entry &&
+    typeof (entry as { path?: unknown }).path === "string" &&
+    normalizeWatcherPathKey(
+      (entry as { path: string }).path,
+      caseSensitivePaths,
+    ) === normalizedKey)) {
+    return true;
+  }
+  const absentFiles = (snapshot as { absentFiles?: unknown }).absentFiles;
+  if (Array.isArray(absentFiles) && absentFiles.some((entry) => typeof entry === "string" &&
+    normalizeWatcherPathKey(entry, caseSensitivePaths) === normalizedKey)) {
+    return true;
+  }
+  const absentResolutionFiles = (snapshot as { absentResolutionFiles?: unknown })
+    .absentResolutionFiles;
+  if (Array.isArray(absentResolutionFiles) &&
+    absentResolutionFiles.some((entry) => typeof entry === "string" &&
+      normalizeWatcherPathKey(entry, caseSensitivePaths) === normalizedKey)) {
+    return true;
+  }
+  const blockedResolutionFiles = (snapshot as { blockedResolutionFiles?: unknown })
+    .blockedResolutionFiles;
+  return Array.isArray(blockedResolutionFiles) && blockedResolutionFiles.some((entry) =>
+    typeof entry === "object" && entry !== null && "path" in entry &&
+    typeof (entry as { path?: unknown }).path === "string" &&
+    normalizeWatcherPathKey(
+      (entry as { path: string }).path,
+      caseSensitivePaths,
+    ) === normalizedKey);
+}
+
+/** close/abort 统一使用稳定 AbortError，确保调用方不会遗留悬挂 Promise。 */
+function createMetadataWatcherAbortError(): Error {
+  const error = new Error("工作区变化 worker metadata 请求已取消。");
+  error.name = "AbortError";
+  return error;
+}
+
+/** hierarchy-only read-set 无 Analyzer 栅栏；composite read-set 必须逐文件同步复核。 */
+function isAnalyzerConfigCurrent(
+  indexingRoot: string,
+  readSet: HierarchyReadSetV1,
+): boolean {
+  const snapshot = readSet.analyzerConfigSnapshot;
+  if (snapshot === undefined) {return true;}
+  if (typeof snapshot !== "object" || snapshot === null) {return false;}
+  return verifyAnalyzerConfigSnapshotSynchronously(
+    indexingRoot,
+    snapshot as AnalyzerConfigSnapshotV1,
+  );
+}
+
+/** 事务外生成 Analyzer 完整字节证明；hierarchy-only read-set 使用 null。 */
+function prepareAnalyzerFence(
+  indexingRoot: string,
+  readSet: HierarchyReadSetV1,
+): PreparedAnalyzerConfigFenceV1 | null | false {
+  const snapshot = readSet.analyzerConfigSnapshot;
+  if (snapshot === undefined) {return null;}
+  if (typeof snapshot !== "object" || snapshot === null) {return false;}
+  return prepareAnalyzerConfigFenceSynchronously(
+    indexingRoot,
+    snapshot as AnalyzerConfigSnapshotV1,
+  ) ?? false;
+}
+
+/** 同步事务内禁止重新 hash Analyzer 文件，仅复核事务外准备身份。 */
+function isPreparedAnalyzerFenceCurrent(
+  indexingRoot: string,
+  readSet: HierarchyReadSetV1,
+  prepared: PreparedAnalyzerConfigFenceV1 | null,
+): boolean {
+  const snapshot = readSet.analyzerConfigSnapshot;
+  if (snapshot === undefined) {return prepared === null;}
+  return prepared !== null && typeof snapshot === "object" && snapshot !== null &&
+    verifyPreparedAnalyzerConfigFenceSynchronously(
+      indexingRoot,
+      snapshot as AnalyzerConfigSnapshotV1,
+      prepared,
+    );
+}
+
 function assertNoUserIgnoreConfigSync(indexingRoot: string): void {
   try {
     if (readdirSync(indexingRoot).some((name) => name.normalize("NFC").toLowerCase() ===

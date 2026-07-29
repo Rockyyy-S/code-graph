@@ -93,6 +93,9 @@ importers:
       '@codegraph/domain':
         specifier: workspace:*
         version: link:../../domain
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/adapters/git-local:
     dependencies:

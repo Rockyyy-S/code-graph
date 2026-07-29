@@ -41,6 +41,143 @@ export const MAX_SOURCE_FILE_BYTES = 10 * 1024 * 1024;
 /** 单次完整 read-set 允许读取的源码总字节预算，约束最终同步双重 collect 的最坏阻塞。 */
 export const MAX_TOTAL_SOURCE_BYTES = 512 * 1024 * 1024;
 
+/** 文件系统大小写探测的只读注入边界，仅用于受控宿主与跨平台回归。 */
+export interface FileSystemCaseSensitivityProbeOptions {
+  /** 测试或受控宿主可替换的只读路径状态查询。 */
+  lstat?: (candidate: string) => {
+    dev: bigint | number;
+    ino: bigint | number;
+    isDirectory: () => boolean;
+  };
+  /** 路径语义仅用于跨平台测试；生产默认使用当前宿主语义。 */
+  pathStyle?: "native" | "posix" | "win32";
+  /** 测试或受控宿主可替换的只读目录枚举。 */
+  readDirectory?: (directory: string) => readonly string[];
+  /** 测试或受控宿主可替换的真实路径解析。 */
+  realpath?: (candidate: string) => string;
+}
+
+/**
+ * 通过同卷实体的大小写变体只读探测文件系统语义。
+ *
+ * 当 indexing root 的所有路径段都没有 ASCII 字母时，Windows 继续探测卷根盘符；
+ * POSIX 则有界枚举同卷既有目录项。任何路径都不会被创建或改名，无法取得同实体证明时
+ * 仍保持大小写敏感的封闭默认。
+ */
+export function isFileSystemCaseSensitive(
+  existingPath: string,
+  probe: FileSystemCaseSensitivityProbeOptions = {},
+): boolean {
+  const pathApi = probe.pathStyle === "win32"
+    ? path.win32
+    : probe.pathStyle === "posix"
+      ? path.posix
+      : path;
+  const lstat = probe.lstat ?? ((candidate: string) => lstatSync(candidate, { bigint: true }));
+  const readDirectory = probe.readDirectory ?? ((directory: string) =>
+    readdirSync(directory, { withFileTypes: true }).map((entry) => entry.name));
+  const realpath = probe.realpath ?? realpathSync.native;
+  const resolvedPath = realpath(existingPath);
+  let resolvedStatus: ReturnType<typeof lstat>;
+  try {
+    resolvedStatus = lstat(resolvedPath);
+  } catch {
+    return true;
+  }
+  const volumeDevice = resolvedStatus.dev;
+  let current = resolvedPath;
+  while (true) {
+    const baseName = pathApi.basename(current);
+    const alternateName = toggleFirstAsciiLetterCase(baseName);
+    if (alternateName !== baseName) {
+      const originalStatus = safeCaseProbeLstat(current, lstat);
+      if (originalStatus === null || originalStatus.dev !== volumeDevice) {break;}
+      const alternatePath = pathApi.join(pathApi.dirname(current), alternateName);
+      return compareCaseVariantIdentity(originalStatus, alternatePath, lstat);
+    }
+    const parent = pathApi.dirname(current);
+    if (parent === current) {break;}
+    current = parent;
+  }
+
+  const volumeRoot = pathApi.parse(resolvedPath).root;
+  const alternateRoot = toggleFirstAsciiLetterCase(volumeRoot);
+  if (alternateRoot !== volumeRoot) {
+    const rootStatus = safeCaseProbeLstat(volumeRoot, lstat);
+    if (rootStatus !== null && rootStatus.dev === volumeDevice) {
+      return compareCaseVariantIdentity(rootStatus, alternateRoot, lstat);
+    }
+  }
+
+  current = resolvedStatus.isDirectory() ? resolvedPath : pathApi.dirname(resolvedPath);
+  for (let depth = 0; depth < 128; depth += 1) {
+    const directoryStatus = safeCaseProbeLstat(current, lstat);
+    if (directoryStatus === null || directoryStatus.dev !== volumeDevice) {break;}
+    let entryNames: readonly string[];
+    try {
+      entryNames = readDirectory(current);
+    } catch {
+      entryNames = [];
+    }
+    for (const entryName of entryNames.slice(0, 256)) {
+      const alternateName = toggleFirstAsciiLetterCase(entryName);
+      if (alternateName === entryName) {continue;}
+      const originalPath = pathApi.join(current, entryName);
+      const originalStatus = safeCaseProbeLstat(originalPath, lstat);
+      if (originalStatus === null || originalStatus.dev !== volumeDevice) {continue;}
+      return compareCaseVariantIdentity(
+        originalStatus,
+        pathApi.join(current, alternateName),
+        lstat,
+      );
+    }
+    const parent = pathApi.dirname(current);
+    if (parent === current) {break;}
+    current = parent;
+  }
+  return true;
+}
+
+/** 以只读方式读取探测实体；失败由调用方按封闭默认处理。 */
+function safeCaseProbeLstat<T extends { dev: bigint | number; ino: bigint | number }>(
+  candidate: string,
+  lstat: (candidate: string) => T,
+): T | null {
+  try {
+    return lstat(candidate);
+  } catch {
+    return null;
+  }
+}
+
+/** 已存在大小写变体且物理身份相同，才足以证明当前卷不区分大小写。 */
+function compareCaseVariantIdentity<T extends { dev: bigint | number; ino: bigint | number }>(
+  original: T,
+  alternatePath: string,
+  lstat: (candidate: string) => T,
+): boolean {
+  try {
+    const alternate = lstat(alternatePath);
+    return original.dev !== alternate.dev || original.ino !== alternate.ino;
+  } catch {
+    return true;
+  }
+}
+
+/** 仅切换首个 ASCII 字母，避免 locale 大小写扩展改变路径段长度。 */
+function toggleFirstAsciiLetterCase(value: string): string {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0x41 && code <= 0x5a) {
+      return `${value.slice(0, index)}${value[index]!.toLowerCase()}${value.slice(index + 1)}`;
+    }
+    if (code >= 0x61 && code <= 0x7a) {
+      return `${value.slice(0, index)}${value[index]!.toUpperCase()}${value.slice(index + 1)}`;
+    }
+  }
+  return value;
+}
+
 /** 扫描失败使用的稳定内部错误，runtime 会映射为 ErrorV1。 */
 export class WorkspaceScanError extends Error {
   public readonly code: "GRAPH_SCAN_FAILED" | "GRAPH_SCAN_LIMIT_EXCEEDED";
@@ -155,7 +292,13 @@ export interface WorkspaceScanResult {
   excludedPathCount: number;
   manifest: readonly ManifestEntryV1[];
   manifestDigest: string;
+  sourceFiles?: readonly WorkspaceSourceSnapshotV1[];
   verificationProof?: WorkspaceVerificationProof;
+}
+
+/** Analyzer 使用的不可变源码字节快照，与同次 manifest hash 绑定。 */
+export interface WorkspaceSourceSnapshotV1 extends ManifestEntryV1 {
+  bytes: Uint8Array;
 }
 
 /** SQLite 首次写入前使用的同步完整 read-set 复核参数。 */
@@ -400,6 +543,7 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
       signal,
     );
     const manifest: ManifestEntryV1[] = [];
+    const sourceFiles: WorkspaceSourceSnapshotV1[] = [];
     const fileProofs: WorkspacePathVerificationProof[] = [];
     let hashedSourceBytes = 0;
     for (const candidate of candidates.sort((left, right) =>
@@ -415,6 +559,11 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
         signal,
       );
       manifest.push(Object.freeze({
+        contentHash: hashed.contentHash,
+        path: candidate.path,
+      }));
+      sourceFiles.push(Object.freeze({
+        bytes: hashed.bytes,
         contentHash: hashed.contentHash,
         path: candidate.path,
       }));
@@ -445,6 +594,7 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
       excludedPathCount,
       manifest: Object.freeze(manifest),
       manifestDigest,
+      sourceFiles: Object.freeze(sourceFiles),
       ...(verificationProofAvailable ? {
         verificationProof: Object.freeze({
           directories: Object.freeze(directoryProofs),
@@ -849,6 +999,7 @@ async function hashTrustedFile(
   signal?: AbortSignal,
 ): Promise<{
   byteLength: number;
+  bytes: Uint8Array;
   contentHash: string;
   verificationProof: WorkspacePathVerificationProof | null;
 }> {
@@ -901,7 +1052,7 @@ async function hashTrustedFile(
       resolveRealpath,
       signal,
     );
-    const { byteLength, contentHash } = await hashOpenedFileWithinLimit(handle, signal);
+    const { byteLength, bytes, contentHash } = await hashOpenedFileWithinLimit(handle, signal);
     const after = await waitAbortable(handle.stat({ bigint: true }), signal);
     if (
       byteLength !== Number(before.size) ||
@@ -921,6 +1072,7 @@ async function hashTrustedFile(
     );
     return {
       byteLength,
+      bytes,
       contentHash,
       verificationProof: readPathVerificationProof(after, logicalPath),
     };
@@ -933,9 +1085,10 @@ async function hashTrustedFile(
 async function hashOpenedFileWithinLimit(
   handle: ScannerFileHandle,
   signal?: AbortSignal,
-): Promise<{ byteLength: number; contentHash: string }> {
+): Promise<{ byteLength: number; bytes: Uint8Array; contentHash: string }> {
   const hash = createHash("sha256");
   const buffer = Buffer.allocUnsafe(64 * 1024);
+  const chunks: Buffer[] = [];
   let byteLength = 0;
   let position = 0;
   while (true) {
@@ -957,9 +1110,25 @@ async function hashOpenedFileWithinLimit(
       );
     }
     hash.update(buffer.subarray(0, result.bytesRead));
+    chunks.push(Buffer.from(buffer.subarray(0, result.bytesRead)));
     position += result.bytesRead;
   }
-  return { byteLength, contentHash: hash.digest("hex") };
+  return {
+    byteLength,
+    bytes: copyChunksToSharedBuffer(chunks, byteLength),
+    contentHash: hash.digest("hex"),
+  };
+}
+
+/** 将 scanner 唯一源码快照落入共享内存，Worker structured clone 不再复制正文。 */
+function copyChunksToSharedBuffer(chunks: readonly Buffer[], byteLength: number): Uint8Array {
+  const bytes = new Uint8Array(new SharedArrayBuffer(byteLength));
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 /** 在读取前后把路径当前身份与已打开句柄绑定，拒绝同路径替换与 reparse 竞态。 */

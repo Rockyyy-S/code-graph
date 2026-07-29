@@ -3,7 +3,7 @@
   "compilerOptions": {
     "noEmit": true,
     "rootDir": "src",
-    "types": []
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }
