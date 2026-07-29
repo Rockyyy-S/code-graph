@@ -146,6 +146,24 @@
     },
     {
       "gateDefinition": {
+        "gateId": "host-path-identity-win32-v1",
+        "checkId": "host-path-identity-win32-v1",
+        "triggerPaths": [
+          "apps/graph-service/src/host-path-identity.ts",
+          "ci/quality-gates.v1.yaml",
+          "scripts/ci/verify-host-path-identity-v1.mjs",
+          "tests/contract/host-path-identity-win32.test.ts",
+          "tests/unit/host-path-identity.test.ts"
+        ],
+        "command": ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
+        "capabilityOwner": "qa",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@0981130a71a3960aa374a82829d42aa9d9f15012#host-path-identity-win32-v1"
+      },
+      "gateDefinitionDigest": "9a0b2481ad933ee4c3c05675029e5e1ae68f3dd73e42c79be5bd6dacc85932d7"
+    },
+    {
+      "gateDefinition": {
         "gateId": "lint",
         "checkId": "lint",
         "command": ["pnpm", "lint"],
