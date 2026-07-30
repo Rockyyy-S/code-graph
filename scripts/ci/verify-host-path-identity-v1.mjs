@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -61,6 +62,9 @@ const requiredProductionCalls = new Map([
   ["createCapturedIdentityContext", ["digestJson"]],
   ["createPresentObservation", ["digestJson"]],
 ]);
+/** PowerShell/Get-Volume 的内部安全 deadline 固定为 10 秒，禁止由调用方放宽。 */
+export const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;
+const WINDOWS_GATE_ENVELOPE_SCHEMA_VERSION = 1;
 
 /** 独立校验完整生产闭包与固定原生脚本，执行 mutation oracle 后运行黑盒回归。 */
 export async function verifyHostPathIdentityV1() {
@@ -71,9 +75,29 @@ export async function verifyHostPathIdentityV1() {
 
   const unitStatus = runVitest("vitest.config.ts", [unitTestPath]);
   if (unitStatus !== 0) {
+    writeHostPathIdentityEnvelope({
+      classification: "unit-suite-failure",
+      outcome: "fail",
+    });
     return unitStatus;
   }
-  return runVitestWithRequiredCounts(dedicatedContractConfigPath, contractTestPath);
+  const preflight = runWindowsContractPreflight();
+  if (!preflight.ok) {
+    writeHostPathIdentityEnvelope({
+      classification: preflight.classification,
+      outcome: "fail",
+      preflight: preflight.preflight,
+    });
+    return 1;
+  }
+  const suite = runVitestWithRequiredCounts(dedicatedContractConfigPath, contractTestPath);
+  writeHostPathIdentityEnvelope({
+    classification: suite.classification,
+    outcome: suite.ok ? "pass" : "fail",
+    preflight: preflight.preflight,
+    suite: suite.suite,
+  });
+  return suite.ok ? 0 : 1;
 }
 
 /**
@@ -268,6 +292,149 @@ function recordHostPathIdentityInvocation(environment, invocation, args) {
     schemaVersion: 1,
     trustedExecutable,
   })}\n`, { encoding: "utf8", flag: "w" });
+}
+
+/** 将 spawnSync 的文本输出收敛为有界 UTF-8 字符串。 */
+function boundedProcessText(value) {
+  if (typeof value === "string") {
+    return value.slice(0, 8_192);
+  }
+  return Buffer.isBuffer(value) ? value.toString("utf8", 0, 8_192) : "";
+}
+
+/**
+ * 在 dedicated Vitest 启动前独立证明真实 Win32 固定 NTFS 根。
+ *
+ * @param {{
+ *   platform?: NodeJS.Platform;
+ *   spawnSyncImpl?: typeof spawnSync;
+ *   testRoot?: string;
+ * }} [options] 仅用于隔离平台边界的测试依赖。
+ * @returns {{classification:string;ok:boolean;preflight:object}} reporter 外的封闭结果。
+ */
+export function runWindowsContractPreflight(options = {}) {
+  const platform = options.platform ?? process.platform;
+  const candidateRoot = path.win32.resolve(options.testRoot ?? tmpdir());
+  const base = {
+    candidateRoot,
+    getVolume: { status: null, stderr: "", stdout: "", timeout: false },
+    processPlatform: platform,
+  };
+  if (platform !== "win32") {
+    return {
+      classification: "preflight-unsafe-root",
+      ok: false,
+      preflight: { ...base, code: "NON_WIN32" },
+    };
+  }
+  const driveLetter = path.win32.parse(candidateRoot).root.match(/^([A-Za-z]):\\$/u)?.[1];
+  if (driveLetter === undefined) {
+    return {
+      classification: "preflight-unsafe-root",
+      ok: false,
+      preflight: { ...base, code: "ROOT_WITHOUT_DRIVE" },
+    };
+  }
+  const result = (options.spawnSyncImpl ?? spawnSync)(
+    "powershell.exe",
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      [
+        "$ErrorActionPreference='Stop'",
+        `$volume=Get-Volume -DriveLetter '${driveLetter}' -ErrorAction Stop`,
+        "$item=Get-Item -LiteralPath $env:CODEGRAPH_CONTRACT_TMPDIR -Force -ErrorAction Stop",
+        "$result=[ordered]@{drive=[string]$volume.DriveLetter;driveType=[string]$volume.DriveType;fileSystem=[string]$volume.FileSystem;ordinary=[bool]$item.PSIsContainer;reparse=[bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint);root=[IO.Path]::GetFullPath($item.FullName)}",
+        "$result | ConvertTo-Json -Compress",
+      ].join(";"),
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CODEGRAPH_CONTRACT_TMPDIR: candidateRoot },
+      shell: false,
+      timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
+  const spawnErrorCode = result.error?.code;
+  const processEvidence = {
+    ...base,
+    getVolume: {
+      status: result.status,
+      stderr: boundedProcessText(result.stderr),
+      stdout: boundedProcessText(result.stdout),
+      timeout: spawnErrorCode === "ETIMEDOUT",
+    },
+  };
+  if (spawnErrorCode === "ETIMEDOUT") {
+    return {
+      classification: "preflight-timeout",
+      ok: false,
+      preflight: { ...processEvidence, code: "GET_VOLUME_TIMEOUT" },
+    };
+  }
+  if (result.error !== undefined || result.status !== 0) {
+    return {
+      classification: "preflight-process-error",
+      ok: false,
+      preflight: {
+        ...processEvidence,
+        code: "GET_VOLUME_PROCESS_ERROR",
+        processErrorCode: typeof spawnErrorCode === "string" ? spawnErrorCode : null,
+      },
+    };
+  }
+  let probe;
+  try {
+    probe = JSON.parse(processEvidence.getVolume.stdout);
+  } catch {
+    return {
+      classification: "preflight-invalid-json",
+      ok: false,
+      preflight: { ...processEvidence, code: "GET_VOLUME_INVALID_JSON" },
+    };
+  }
+  if (
+    probe === null ||
+    typeof probe !== "object" ||
+    Array.isArray(probe) ||
+    probe.fileSystem !== "NTFS" ||
+    probe.driveType !== "Fixed" ||
+    probe.ordinary !== true ||
+    probe.reparse !== false ||
+    typeof probe.root !== "string" ||
+    path.win32.resolve(probe.root).toLowerCase() !== candidateRoot.toLowerCase()
+  ) {
+    return {
+      classification: "preflight-unsafe-root",
+      ok: false,
+      preflight: { ...processEvidence, code: "UNSAFE_TEST_ROOT", probe },
+    };
+  }
+  return {
+    classification: "preflight-pass",
+    ok: true,
+    preflight: { ...processEvidence, code: "OK", probe },
+  };
+}
+
+/** 将 verifier 的最终结论序列化为唯一单行 JSON envelope。 */
+export function serializeHostPathIdentityEnvelope(result) {
+  return JSON.stringify({
+    schemaVersion: WINDOWS_GATE_ENVELOPE_SCHEMA_VERSION,
+    gateId,
+    outcome: result.outcome,
+    classification: result.classification,
+    ...(result.preflight === undefined ? {} : { preflight: result.preflight }),
+    ...(result.suite === undefined ? {} : { suite: result.suite }),
+  });
+}
+
+/** 将最终 envelope 写到 reporter 之外的 stdout，保证成功与失败使用同一通道。 */
+function writeHostPathIdentityEnvelope(result) {
+  process.stdout.write(`${serializeHostPathIdentityEnvelope(result)}\n`);
 }
 
 /**
@@ -538,7 +705,7 @@ function runVitest(configPath, paths) {
   return result.status ?? 1;
 }
 
-/** 使用独立配置精确运行 Win32 suite，并证明文件数、测试数非零且没有 skip/todo。 */
+/** 使用独立配置精确运行 Win32 suite，并证明四个业务测试全部真实执行。 */
 function runVitestWithRequiredCounts(configPath, exactPath) {
   const result = runHostPathIdentityPnpm([
     "exec",
@@ -561,56 +728,95 @@ function runVitestWithRequiredCounts(configPath, exactPath) {
   if (result.stderr.length > 0) {
     process.stderr.write(result.stderr);
   }
+  return classifyDedicatedVitestResult(result, exactPath);
+}
+
+/**
+ * 将 Vitest JSON 与进程结论收敛为互斥的 suite-hook/assertion/process/count 分类。
+ *
+ * @param {import("node:child_process").SpawnSyncReturns<string>} result dedicated 进程结果。
+ * @param {string} exactPath 唯一允许执行的测试文件。
+ */
+export function classifyDedicatedVitestResult(result, exactPath) {
   if (result.error !== undefined) {
-    console.error("Win32 host identity dedicated contract 无法启动。");
-    return 1;
+    return {
+      classification: result.error.code === "ETIMEDOUT"
+        ? "suite-process-timeout"
+        : "suite-process-error",
+      ok: false,
+      suite: {
+        processErrorCode: result.error.code ?? "UNKNOWN",
+        processStatus: result.status,
+      },
+    };
   }
+  let report;
   try {
     const jsonLine = result.stdout
       .trim()
       .split(/\r?\n/u)
       .findLast((line) => line.trimStart().startsWith("{"));
-    const report = JSON.parse(jsonLine ?? "null");
-    const normalizedResultPath = report?.testResults?.[0]?.name?.replaceAll("\\", "/");
-    if (result.status !== 0 || report?.success !== true) {
-      const failures = (report?.testResults ?? []).slice(0, 4).map((suite) => ({
-        assertionFailures: (suite.assertionResults ?? [])
-          .filter(({ status }) => status === "failed")
-          .slice(0, 8)
-          .map(({ failureMessages, fullName, title }) => ({
-            failureMessages: (failureMessages ?? []).slice(0, 4),
-            fullName,
-            title,
-          })),
-        message: typeof suite.message === "string" ? suite.message.slice(0, 16_384) : "",
-        name: suite.name,
-        status: suite.status,
-      }));
-      console.error(`CODEGRAPH_WIN32_DEDICATED_FAILURE ${JSON.stringify({
-        failures,
-        numFailedTestSuites: report?.numFailedTestSuites,
-        numFailedTests: report?.numFailedTests,
-        processStatus: result.status,
-      })}`);
-      return 1;
-    }
-    if (
-      report.testResults.length !== 1 ||
-      !normalizedResultPath?.endsWith(`/${exactPath}`) ||
-      report.numTotalTestSuites <= 0 ||
-      report.numTotalTests <= 0 ||
-      report.numPassedTests !== report.numTotalTests ||
-      report.numFailedTests !== 0 ||
-      report.numPendingTests !== 0 ||
-      report.numTodoTests !== 0
-    ) {
-      throw new Error("dedicated contract 计数或精确路径不闭合。");
-    }
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : "dedicated contract JSON 无法解析。");
-    return 1;
+    report = JSON.parse(jsonLine ?? "null");
+  } catch {
+    return {
+      classification: "suite-invalid-json",
+      ok: false,
+      suite: { processStatus: result.status },
+    };
   }
-  return 0;
+  const suites = Array.isArray(report?.testResults) ? report.testResults : [];
+  const assertionFailures = suites.flatMap((suite) =>
+    (Array.isArray(suite.assertionResults) ? suite.assertionResults : [])
+      .filter(({ status }) => status === "failed")
+      .slice(0, 8)
+      .map(({ failureMessages, fullName, title }) => ({
+        failureMessages: (failureMessages ?? []).slice(0, 4),
+        fullName,
+        title,
+      })),
+  ).slice(0, 8);
+  const suiteEvidence = {
+    assertionFailures,
+    numFailedTestSuites: report?.numFailedTestSuites,
+    numFailedTests: report?.numFailedTests,
+    numPassedTests: report?.numPassedTests,
+    numPendingTests: report?.numPendingTests,
+    numTodoTests: report?.numTodoTests,
+    numTotalTestSuites: report?.numTotalTestSuites,
+    numTotalTests: report?.numTotalTests,
+    processStatus: result.status,
+    suites: suites.slice(0, 4).map((suite) => ({
+      message: typeof suite.message === "string" ? suite.message.slice(0, 16_384) : "",
+      name: suite.name,
+      status: suite.status,
+    })),
+  };
+  if (assertionFailures.length > 0 || report?.numFailedTests > 0) {
+    return { classification: "test-assertion-failure", ok: false, suite: suiteEvidence };
+  }
+  if (
+    report?.numFailedTestSuites > 0 ||
+    suites.some((suite) => suite?.status === "failed")
+  ) {
+    return { classification: "suite-hook-failure", ok: false, suite: suiteEvidence };
+  }
+  if (result.status !== 0 || report?.success !== true) {
+    return { classification: "suite-process-error", ok: false, suite: suiteEvidence };
+  }
+  const normalizedResultPath = suites[0]?.name?.replaceAll("\\", "/");
+  if (
+    suites.length !== 1 ||
+    !normalizedResultPath?.endsWith(`/${exactPath}`) ||
+    report.numTotalTestSuites <= 0 ||
+    report.numTotalTests !== 4 ||
+    report.numPassedTests !== 4 ||
+    report.numFailedTests !== 0 ||
+    report.numPendingTests !== 0 ||
+    report.numTodoTests !== 0
+  ) {
+    return { classification: "suite-count-mismatch", ok: false, suite: suiteEvidence };
+  }
+  return { classification: "dedicated-pass", ok: true, suite: suiteEvidence };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -619,7 +825,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.exitCode = status;
     })
     .catch((error) => {
-      console.error(error instanceof Error ? error.message : "Win32 host identity verifier 未知错误。");
+      writeHostPathIdentityEnvelope({
+        classification: "verifier-error",
+        outcome: "fail",
+        suite: {
+          message: error instanceof Error
+            ? error.message.slice(0, 16_384)
+            : "Win32 host identity verifier 未知错误。",
+        },
+      });
       process.exitCode = 1;
     });
 }

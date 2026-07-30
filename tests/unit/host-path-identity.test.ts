@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
   HostPathIdentityBroker,
@@ -13,11 +15,15 @@ import {
   type HostPathSnapshotCandidateV1,
 } from "../../apps/graph-service/src/host-path-identity.js";
 import {
+  classifyDedicatedVitestResult,
   createHostPathIdentityPnpmInvocation,
   runHostPathIdentityPnpm,
+  runWindowsContractPreflight,
+  serializeHostPathIdentityEnvelope,
   validateCandidateSourceIdentity,
   validateHostPathIdentitySource,
 } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
+import { runProcessWithDeadline } from "../../scripts/ci/run-process-with-deadline.mjs";
 
 interface FakeHostObject {
   objectId: string;
@@ -191,6 +197,241 @@ describe("host path identity broker", () => {
     }, ["--version"])).toEqual({
       args: ["--version"],
       executable: "C:\\local-tools\\pnpm.exe",
+    });
+  });
+
+  it.each([
+    [
+      "timeout",
+      {
+        error: Object.assign(new Error("deadline"), { code: "ETIMEDOUT" }),
+        status: null,
+        stderr: "deadline",
+        stdout: "",
+      },
+      "preflight-timeout",
+      "GET_VOLUME_TIMEOUT",
+    ],
+    [
+      "spawn/nonzero process error",
+      { status: 5, stderr: "access denied", stdout: "" },
+      "preflight-process-error",
+      "GET_VOLUME_PROCESS_ERROR",
+    ],
+    [
+      "invalid JSON",
+      { status: 0, stderr: "", stdout: "{invalid" },
+      "preflight-invalid-json",
+      "GET_VOLUME_INVALID_JSON",
+    ],
+    [
+      "unsafe root",
+      {
+        status: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          drive: "C",
+          driveType: "Fixed",
+          fileSystem: "ReFS",
+          ordinary: true,
+          reparse: false,
+          root: "C:\\gate-root",
+        }),
+      },
+      "preflight-unsafe-root",
+      "UNSAFE_TEST_ROOT",
+    ],
+  ])("classifies reporter-independent Win32 preflight %s", (
+    _label,
+    processResult,
+    classification,
+    code,
+  ) => {
+    const spawnSyncImpl = vi.fn((_executable, _args, options) => {
+      expect(options).toMatchObject({ shell: false, timeout: 10_000, windowsHide: true });
+      return processResult as never;
+    });
+    const result = runWindowsContractPreflight({
+      platform: "win32",
+      spawnSyncImpl: spawnSyncImpl as never,
+      testRoot: "C:\\gate-root",
+    });
+
+    expect(result).toMatchObject({ classification, ok: false, preflight: { code } });
+    expect(spawnSyncImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits one stable preflight pass envelope for an exact fixed NTFS root", () => {
+    const root = "C:\\gate-root";
+    const result = runWindowsContractPreflight({
+      platform: "win32",
+      spawnSyncImpl: vi.fn(() => ({
+        status: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          drive: "C",
+          driveType: "Fixed",
+          fileSystem: "NTFS",
+          ordinary: true,
+          reparse: false,
+          root,
+        }),
+      })) as never,
+      testRoot: root,
+    });
+    const envelope = serializeHostPathIdentityEnvelope({
+      classification: result.classification,
+      outcome: result.ok ? "pass" : "fail",
+      preflight: result.preflight,
+    });
+
+    expect(result).toMatchObject({ classification: "preflight-pass", ok: true });
+    expect(envelope).not.toMatch(/[\r\n]/u);
+    expect(JSON.parse(envelope)).toMatchObject({
+      classification: "preflight-pass",
+      gateId: "host-path-identity-win32-v1",
+      outcome: "pass",
+      schemaVersion: 1,
+    });
+  });
+
+  it.each([
+    [
+      "suite hook failure",
+      {
+        numFailedTestSuites: 1,
+        numFailedTests: 0,
+        numPassedTests: 0,
+        numPendingTests: 4,
+        numTodoTests: 0,
+        numTotalTestSuites: 1,
+        numTotalTests: 4,
+        success: false,
+        testResults: [{
+          assertionResults: [],
+          message: "beforeEach hook failed",
+          name: "C:\\repo\\tests\\contract\\host-path-identity-win32.test.ts",
+          status: "failed",
+        }],
+      },
+      "suite-hook-failure",
+    ],
+    [
+      "test assertion failure",
+      {
+        numFailedTestSuites: 1,
+        numFailedTests: 1,
+        numPassedTests: 3,
+        numPendingTests: 0,
+        numTodoTests: 0,
+        numTotalTestSuites: 1,
+        numTotalTests: 4,
+        success: false,
+        testResults: [{
+          assertionResults: [{
+            failureMessages: ["expected complete"],
+            fullName: "Windows host path identity contract rejects unsafe alias",
+            status: "failed",
+            title: "rejects unsafe alias",
+          }],
+          message: "",
+          name: "C:\\repo\\tests\\contract\\host-path-identity-win32.test.ts",
+          status: "failed",
+        }],
+      },
+      "test-assertion-failure",
+    ],
+  ])("keeps %s distinct from other dedicated failures", (_label, report, classification) => {
+    const result = classifyDedicatedVitestResult({
+      output: [],
+      pid: 1,
+      signal: null,
+      status: 1,
+      stderr: "",
+      stdout: JSON.stringify(report),
+    }, "tests/contract/host-path-identity-win32.test.ts");
+
+    expect(result).toMatchObject({ classification, ok: false });
+  });
+
+  it("requires exactly one dedicated file with four passed business tests", () => {
+    const result = classifyDedicatedVitestResult({
+      output: [],
+      pid: 1,
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        numFailedTestSuites: 0,
+        numFailedTests: 0,
+        numPassedTests: 4,
+        numPendingTests: 0,
+        numTodoTests: 0,
+        numTotalTestSuites: 1,
+        numTotalTests: 4,
+        success: true,
+        testResults: [{
+          assertionResults: [],
+          message: "",
+          name: "C:\\repo\\tests\\contract\\host-path-identity-win32.test.ts",
+          status: "passed",
+        }],
+      }),
+    }, "tests/contract/host-path-identity-win32.test.ts");
+
+    expect(result).toMatchObject({
+      classification: "dedicated-pass",
+      ok: true,
+      suite: {
+        numFailedTests: 0,
+        numPassedTests: 4,
+        numPendingTests: 0,
+        numTodoTests: 0,
+        numTotalTests: 4,
+      },
+    });
+  });
+
+  it("keeps Harness EPROCESSCLEANUP invalid authoritative over a candidate pass envelope", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      kill: () => boolean;
+      pid: number;
+      stderr: PassThrough;
+      stdout: PassThrough;
+    };
+    child.kill = () => true;
+    child.pid = 4401;
+    child.stderr = new PassThrough();
+    child.stdout = new PassThrough();
+    const candidatePass = serializeHostPathIdentityEnvelope({
+      classification: "dedicated-pass",
+      outcome: "pass",
+    });
+    const result = await runProcessWithDeadline({
+      args: [],
+      cleanupProcessTree: async () => {
+        throw new Error("cleanup proof missing");
+      },
+      cwd: process.cwd(),
+      executable: process.execPath,
+      killGraceMs: 50,
+      outputLimitBytes: 4_096,
+      spawnProcess: (() => {
+        queueMicrotask(() => {
+          child.stdout.end(`${candidatePass}\n`);
+          child.stderr.end();
+          child.emit("exit", 0, null);
+          child.emit("close", 0, null);
+        });
+        return child;
+      }) as never,
+      timeoutMs: 500,
+    });
+
+    expect(result.stdout.toString("utf8")).toContain('"outcome":"pass"');
+    expect(result).toMatchObject({
+      status: "invalid",
+      termination: { kind: "spawn-error", stableCode: "EPROCESSCLEANUP" },
     });
   });
 

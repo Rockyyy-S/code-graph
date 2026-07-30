@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
   link,
   mkdir,
@@ -11,14 +10,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { HostPathIdentityBroker } from "../../apps/graph-service/src/host-path-identity.js";
 
 const temporaryRoots: string[] = [];
-/** PowerShell 卷探测必须在有界时间内失败关闭并生成结构化诊断。 */
-const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;
-/** 外层 hook 预算必须显著大于内部探测 deadline，保证 timeout 诊断可先完成输出。 */
-const WINDOWS_CONTRACT_HOOK_TIMEOUT_MS = 30_000;
 
 /** 仅删除本测试通过 mkdtemp 创建并登记的隔离目录。 */
 afterEach(async () => {
@@ -32,91 +27,6 @@ async function createWindowsRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "codegraph-host-path-identity-"));
   temporaryRoots.push(root);
   return root;
-}
-
-/** 以有界子进程独立复验实际 tmpdir 的卷能力与 ordinary/non-reparse 根属性。 */
-function probeWindowsTestRoot(input: string): {
-  drive: string;
-  driveType: string;
-  fileSystem: string;
-  ordinary: boolean;
-  reparse: boolean;
-  root: string;
-} {
-  const driveLetter = path.parse(path.resolve(input)).root.match(/^([A-Za-z]):\\$/u)?.[1];
-  if (driveLetter === undefined) {
-    throw new Error(`CODEGRAPH_WIN32_CONTRACT_PREFLIGHT ${JSON.stringify({
-      candidateRoot: input,
-      code: "ROOT_WITHOUT_DRIVE",
-      processPlatform: process.platform,
-    })}`);
-  }
-  const probeRoot = path.resolve(input);
-  const result = spawnSync(
-    "powershell.exe",
-    [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      [
-        "$ErrorActionPreference='Stop'",
-        `$volume=Get-Volume -DriveLetter '${driveLetter}' -ErrorAction Stop`,
-        "$item=Get-Item -LiteralPath $env:CODEGRAPH_CONTRACT_TMPDIR -Force -ErrorAction Stop",
-        "$result=[ordered]@{drive=[string]$volume.DriveLetter;driveType=[string]$volume.DriveType;fileSystem=[string]$volume.FileSystem;ordinary=[bool]$item.PSIsContainer;reparse=[bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint);root=[IO.Path]::GetFullPath($item.FullName)}",
-        "$result | ConvertTo-Json -Compress",
-      ].join(";"),
-    ],
-    {
-      encoding: "utf8",
-      env: { ...process.env, CODEGRAPH_CONTRACT_TMPDIR: probeRoot },
-      shell: false,
-      timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS,
-      windowsHide: true,
-    },
-  );
-  const spawnErrorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  const diagnostic = {
-    candidateRoot: probeRoot,
-    code: spawnErrorCode === "ETIMEDOUT"
-      ? "GET_VOLUME_TIMEOUT"
-      : result.error !== undefined || result.status !== 0
-        ? "GET_VOLUME_ERROR"
-        : "OK",
-    getVolume: {
-      status: result.status,
-      stderr: result.stderr.slice(0, 8_192),
-      stdout: result.stdout.slice(0, 8_192),
-      timeout: spawnErrorCode === "ETIMEDOUT",
-    },
-    processPlatform: process.platform,
-  };
-  if (diagnostic.code !== "OK") {
-    throw new Error(`CODEGRAPH_WIN32_CONTRACT_PREFLIGHT ${JSON.stringify(diagnostic)}`);
-  }
-  let probe;
-  try {
-    probe = JSON.parse(result.stdout) as ReturnType<typeof probeWindowsTestRoot>;
-  } catch {
-    throw new Error(`CODEGRAPH_WIN32_CONTRACT_PREFLIGHT ${JSON.stringify({
-      ...diagnostic,
-      code: "GET_VOLUME_INVALID_JSON",
-    })}`);
-  }
-  if (
-    probe.fileSystem !== "NTFS" ||
-    probe.driveType !== "Fixed" ||
-    probe.ordinary !== true ||
-    probe.reparse !== false ||
-    path.resolve(probe.root).toLowerCase() !== probeRoot.toLowerCase()
-  ) {
-    throw new Error(`CODEGRAPH_WIN32_CONTRACT_PREFLIGHT ${JSON.stringify({
-      ...diagnostic,
-      code: "UNSAFE_TEST_ROOT",
-      probe,
-    })}`);
-  }
-  return probe;
 }
 
 /** 只翻转 ASCII 字母大小写，不对 Unicode 执行 JavaScript case-fold。 */
@@ -139,23 +49,6 @@ function createBroker(indexingRoot: string): HostPathIdentityBroker {
 }
 
 describe("Windows host path identity contract", () => {
-  beforeAll(() => {
-    if (process.platform !== "win32") {
-      throw new Error(`CODEGRAPH_WIN32_CONTRACT_PREFLIGHT ${JSON.stringify({
-        candidateRoot: tmpdir(),
-        code: "NON_WIN32",
-        processPlatform: process.platform,
-      })}`);
-    }
-    const probe = probeWindowsTestRoot(tmpdir());
-    expect(probe).toMatchObject({
-      driveType: "Fixed",
-      fileSystem: "NTFS",
-      ordinary: true,
-      reparse: false,
-    });
-  }, WINDOWS_CONTRACT_HOOK_TIMEOUT_MS);
-
   it("binds root, directory and leaf casing aliases plus hardlinks in one snapshot", async () => {
     const root = await createWindowsRoot();
     const directoryName = "MixedDirectory";

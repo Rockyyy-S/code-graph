@@ -55,30 +55,35 @@ describe("contract execution partitions", () => {
     expect(verifier).toContain(
       "runVitestWithRequiredCounts(dedicatedContractConfigPath, contractTestPath)",
     );
-    expect(verifier).toContain('report.testResults.length !== 1');
-    expect(verifier).toContain('report.numTotalTests <= 0');
+    expect(verifier).toContain("suites.length !== 1");
+    expect(verifier).toContain("report.numTotalTests !== 4");
+    expect(verifier).toContain("report.numTotalTestSuites <= 0");
     expect(`${portableConfig}\n${dedicatedConfig}\n${scripts.contract}\n${verifier}`).not.toContain(
       "passWithNoTests: true",
     );
   });
 
-  it("keeps the Win32 preflight deadline inside an observable outer hook budget", async () => {
-    const [dedicatedSource, dedicatedConfig] = await Promise.all([
+  it("runs Win32 preflight in the verifier before the hook-free dedicated suite", async () => {
+    const [dedicatedSource, dedicatedConfig, verifier] = await Promise.all([
       readFile(path.join(repositoryRoot, dedicatedPath), "utf8"),
       readFile(path.join(repositoryRoot, "vitest.contract.win32.config.ts"), "utf8"),
+      readFile(path.join(repositoryRoot, "scripts/ci/verify-host-path-identity-v1.mjs"), "utf8"),
     ]);
 
-    expect(dedicatedSource).toContain(
-      "const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;",
+    expect(verifier).toContain(
+      "export const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;",
     );
-    expect(dedicatedSource).toContain(
-      "const WINDOWS_CONTRACT_HOOK_TIMEOUT_MS = 30_000;",
+    expect(verifier).toMatch(
+      /const preflight = runWindowsContractPreflight\(\);[\s\S]*if \(!preflight\.ok\)[\s\S]*return 1;[\s\S]*runVitestWithRequiredCounts/u,
     );
-    expect(dedicatedSource).toContain("timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS");
-    expect(dedicatedSource).toContain("}, WINDOWS_CONTRACT_HOOK_TIMEOUT_MS);");
-    expect(dedicatedConfig).toContain("hookTimeout: 30_000");
-    expect(dedicatedSource).toContain('? "GET_VOLUME_TIMEOUT"');
-    expect(dedicatedSource.match(/CODEGRAPH_WIN32_CONTRACT_PREFLIGHT/gu)?.length).toBeGreaterThan(3);
+    expect(verifier).toContain("timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS");
+    expect(verifier).toContain('classification: "preflight-timeout"');
+    expect(verifier).toContain('classification: "suite-hook-failure"');
+    expect(verifier).toContain('classification: "test-assertion-failure"');
+    expect(dedicatedSource).not.toContain("beforeAll");
+    expect(dedicatedSource).not.toContain("Get-Volume");
+    expect(dedicatedSource).not.toContain("spawnSync");
+    expect(dedicatedConfig).not.toContain("hookTimeout");
     expect(dedicatedSource.match(/^  it\(/gmu)).toHaveLength(4);
   });
 });
