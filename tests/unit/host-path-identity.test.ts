@@ -347,6 +347,7 @@ describe("host path identity broker", () => {
       return processResult as never;
     });
     const result = runWindowsContractPreflight({
+      environment: {},
       platform: "win32",
       spawnSyncImpl: spawnSyncImpl as never,
       testRoot: "C:\\gate-root",
@@ -359,6 +360,7 @@ describe("host path identity broker", () => {
   it("emits one stable preflight pass envelope for an exact fixed NTFS root", () => {
     const root = "C:\\gate-root";
     const result = runWindowsContractPreflight({
+      environment: {},
       platform: "win32",
       spawnSyncImpl: vi.fn(() => ({
         status: 0,
@@ -388,6 +390,40 @@ describe("host path identity broker", () => {
       outcome: "pass",
       schemaVersion: 1,
     });
+  });
+
+  it("keeps explicit mock preflight isolated from launcher-only outer pollution", () => {
+    vi.stubEnv("CODEGRAPH_TRUSTED_PNPM_EXE", "C:\\trusted\\pnpm.exe");
+    vi.stubEnv(
+      "CODEGRAPH_HOST_PATH_IDENTITY_ATTESTATION_PATH",
+      "C:\\trusted\\invocation.json",
+    );
+    const spawnSyncImpl = vi.fn(() => ({
+      status: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        drive: "C",
+        driveType: "Fixed",
+        fileSystem: "NTFS",
+        ordinary: true,
+        reparse: false,
+        root: "C:\\gate-root",
+      }),
+    })) as never;
+
+    try {
+      const result = runWindowsContractPreflight({
+        environment: {},
+        platform: "win32",
+        spawnSyncImpl,
+        testRoot: "C:\\gate-root",
+      });
+
+      expect(result).toMatchObject({ classification: "preflight-pass", ok: true });
+      expect(spawnSyncImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it.each([
