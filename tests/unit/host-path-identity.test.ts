@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   HostPathIdentityBroker,
@@ -150,18 +152,37 @@ describe("host path identity broker", () => {
   });
 
   it("keeps a missing dedicated launcher as a stable shell:false ENOENT failure", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "host-path-invocation-"));
+    const attestationPath = path.join(root, "invocation.json");
     const trustedExecutable = "C:\\missing-trusted-tools\\pnpm.exe";
     const environment = {
+      CODEGRAPH_HOST_PATH_IDENTITY_ATTESTATION_PATH: attestationPath,
       CODEGRAPH_TRUSTED_PNPM_EXE: trustedExecutable,
       PATH: "C:\\malicious-path",
     };
+    try {
+      const result = runHostPathIdentityPnpm(["exec", "vitest"], {
+        environment,
+      });
+      const attestation = JSON.parse(readFileSync(attestationPath, "utf8"));
 
-    const result = runHostPathIdentityPnpm(["exec", "vitest"], {
-      environment,
-    });
-
-    expect(result.status).toBeNull();
-    expect(result.error).toMatchObject({ code: "ENOENT", path: trustedExecutable });
+      expect(result.status).toBeNull();
+      expect(result.error).toMatchObject({ code: "ENOENT", path: trustedExecutable });
+      expect(attestation).toMatchObject({
+        npmExecPathAbsent: true,
+        pathLookupBypassed: true,
+        schemaVersion: 1,
+        trustedExecutable,
+      });
+      expect(attestation.invocations).toEqual([
+        expect.objectContaining({
+          executable: trustedExecutable,
+          shell: false,
+        }),
+      ]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
   it("preserves controlled local npm_execpath compatibility without a dedicated launcher", () => {

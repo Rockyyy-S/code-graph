@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -209,12 +210,64 @@ export function createHostPathIdentityPnpmInvocation(environment, args) {
 export function runHostPathIdentityPnpm(args, options = {}) {
   const environment = options.environment ?? process.env;
   const invocation = createHostPathIdentityPnpmInvocation(environment, args);
+  recordHostPathIdentityInvocation(environment, invocation, args);
   return spawnSync(invocation.executable, invocation.args, {
     ...(options.spawnOptions ?? {}),
     env: environment,
     shell: false,
     windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
   });
+}
+
+/**
+ * 将固定可信 launcher 与 shell:false 实际调用写入 Harness 指定的有界结构化证明文件。
+ *
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} environment 受控 Gate 环境。
+ * @param {{args:string[],executable:string,windowsVerbatimArguments?:boolean}} invocation 实际调用。
+ * @param {string[]} args 调用参数，仅记录摘要。
+ */
+function recordHostPathIdentityInvocation(environment, invocation, args) {
+  const attestationPath = environment.CODEGRAPH_HOST_PATH_IDENTITY_ATTESTATION_PATH;
+  if (attestationPath === undefined) {
+    return;
+  }
+  if (!path.isAbsolute(attestationPath) || attestationPath.includes("\0")) {
+    throw new Error("host identity invocation attestation 路径必须是绝对普通路径。");
+  }
+  const trustedExecutable = environment.CODEGRAPH_TRUSTED_PNPM_EXE;
+  if (
+    trustedExecutable === undefined ||
+    invocation.executable !== trustedExecutable ||
+    environment.npm_execpath !== undefined
+  ) {
+    throw new Error("host identity invocation attestation 未绑定 absent npm_execpath 与可信 launcher。");
+  }
+  let previous = { invocations: [] };
+  try {
+    previous = JSON.parse(readFileSync(attestationPath, "utf8"));
+  } catch (error) {
+    if (!(error && typeof error === "object" && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
+  const invocations = Array.isArray(previous.invocations) ? previous.invocations : [];
+  if (invocations.length >= 8) {
+    throw new Error("host identity invocation attestation 超过固定事件上限。");
+  }
+  invocations.push({
+    argsSha256: createHash("sha256").update(JSON.stringify(args), "utf8").digest("hex"),
+    executable: invocation.executable,
+    shell: false,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+  });
+  writeFileSync(attestationPath, `${JSON.stringify({
+    invocations,
+    npmExecPathAbsent: true,
+    pathLookupBypassed: true,
+    processPlatform: process.platform,
+    schemaVersion: 1,
+    trustedExecutable,
+  })}\n`, { encoding: "utf8", flag: "w" });
 }
 
 /**
@@ -508,8 +561,8 @@ function runVitestWithRequiredCounts(configPath, exactPath) {
   if (result.stderr.length > 0) {
     process.stderr.write(result.stderr);
   }
-  if (result.error !== undefined || result.status !== 0) {
-    console.error("Win32 host identity dedicated contract 未通过。");
+  if (result.error !== undefined) {
+    console.error("Win32 host identity dedicated contract 无法启动。");
     return 1;
   }
   try {
@@ -519,8 +572,29 @@ function runVitestWithRequiredCounts(configPath, exactPath) {
       .findLast((line) => line.trimStart().startsWith("{"));
     const report = JSON.parse(jsonLine ?? "null");
     const normalizedResultPath = report?.testResults?.[0]?.name?.replaceAll("\\", "/");
+    if (result.status !== 0 || report?.success !== true) {
+      const failures = (report?.testResults ?? []).slice(0, 4).map((suite) => ({
+        assertionFailures: (suite.assertionResults ?? [])
+          .filter(({ status }) => status === "failed")
+          .slice(0, 8)
+          .map(({ failureMessages, fullName, title }) => ({
+            failureMessages: (failureMessages ?? []).slice(0, 4),
+            fullName,
+            title,
+          })),
+        message: typeof suite.message === "string" ? suite.message.slice(0, 16_384) : "",
+        name: suite.name,
+        status: suite.status,
+      }));
+      console.error(`CODEGRAPH_WIN32_DEDICATED_FAILURE ${JSON.stringify({
+        failures,
+        numFailedTestSuites: report?.numFailedTestSuites,
+        numFailedTests: report?.numFailedTests,
+        processStatus: result.status,
+      })}`);
+      return 1;
+    }
     if (
-      report?.success !== true ||
       report.testResults.length !== 1 ||
       !normalizedResultPath?.endsWith(`/${exactPath}`) ||
       report.numTotalTestSuites <= 0 ||
