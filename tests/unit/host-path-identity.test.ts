@@ -11,6 +11,8 @@ import {
   type HostPathSnapshotCandidateV1,
 } from "../../apps/graph-service/src/host-path-identity.js";
 import {
+  createHostPathIdentityPnpmInvocation,
+  runHostPathIdentityPnpm,
   validateCandidateSourceIdentity,
   validateHostPathIdentitySource,
 } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
@@ -119,6 +121,58 @@ function createBasicFake(): FakeSnapshotProvider {
 }
 
 describe("host path identity broker", () => {
+  it("uses the dedicated trusted pnpm.exe before npm_execpath or PATH", () => {
+    const trustedExecutable = "C:\\trusted-tools\\pnpm.exe";
+    const invocation = createHostPathIdentityPnpmInvocation({
+      CODEGRAPH_TRUSTED_PNPM_EXE: trustedExecutable,
+      PATH: "C:\\malicious-path",
+      npm_execpath: "C:\\malicious-path\\pnpm.cmd",
+    }, ["exec", "vitest"]);
+
+    expect(invocation).toEqual({
+      args: ["exec", "vitest"],
+      executable: trustedExecutable,
+    });
+  });
+
+  it.each([
+    ["empty", ""],
+    ["relative", "tools\\pnpm.exe"],
+    ["wrong basename", "C:\\trusted-tools\\pnpm-copy.exe"],
+    ["UNC", "\\\\server\\trusted-tools\\pnpm.exe"],
+    ["device path", "\\\\?\\C:\\trusted-tools\\pnpm.exe"],
+  ])("fails closed for an invalid dedicated launcher: %s", (_label, trustedExecutable) => {
+    expect(() => createHostPathIdentityPnpmInvocation({
+      CODEGRAPH_TRUSTED_PNPM_EXE: trustedExecutable,
+      PATH: "C:\\malicious-path",
+      npm_execpath: "C:\\fallback\\pnpm.cmd",
+    }, ["exec", "vitest"])).toThrow(/禁止回退/u);
+  });
+
+  it("keeps a missing dedicated launcher as a stable shell:false ENOENT failure", () => {
+    const trustedExecutable = "C:\\missing-trusted-tools\\pnpm.exe";
+    const environment = {
+      CODEGRAPH_TRUSTED_PNPM_EXE: trustedExecutable,
+      PATH: "C:\\malicious-path",
+    };
+
+    const result = runHostPathIdentityPnpm(["exec", "vitest"], {
+      environment,
+    });
+
+    expect(result.status).toBeNull();
+    expect(result.error).toMatchObject({ code: "ENOENT", path: trustedExecutable });
+  });
+
+  it("preserves controlled local npm_execpath compatibility without a dedicated launcher", () => {
+    expect(createHostPathIdentityPnpmInvocation({
+      npm_execpath: "C:\\local-tools\\pnpm.exe",
+    }, ["--version"])).toEqual({
+      args: ["--version"],
+      executable: "C:\\local-tools\\pnpm.exe",
+    });
+  });
+
   it("treats LF and CRLF worktree representations as the same exact candidate source", () => {
     const lf = Buffer.from("export const identity = true;\n", "utf8");
     const crlf = Buffer.from("export const identity = true;\r\n", "utf8");

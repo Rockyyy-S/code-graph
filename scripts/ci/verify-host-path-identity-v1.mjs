@@ -165,6 +165,59 @@ export function validateCandidateSourceIdentity(input) {
 }
 
 /**
+ * 为 Win32 Hosted 分区优先绑定 Harness 注入的专用 pnpm.exe；专用值存在但非法时禁止回退。
+ *
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} environment 受控 Gate 环境。
+ * @param {string[]} args pnpm 参数。
+ * @returns {{ args: string[]; executable: string; windowsVerbatimArguments?: boolean }} shell:false 调用形状。
+ */
+export function createHostPathIdentityPnpmInvocation(environment, args) {
+  const trustedExecutable = environment.CODEGRAPH_TRUSTED_PNPM_EXE;
+  if (trustedExecutable !== undefined) {
+    const nativeAbsolute = path.isAbsolute(trustedExecutable);
+    const win32Absolute = path.win32.isAbsolute(trustedExecutable);
+    const isLocalWindowsPath = !win32Absolute || /^[a-z]:[\\/]/iu.test(trustedExecutable);
+    const basename = win32Absolute
+      ? path.win32.basename(trustedExecutable)
+      : path.basename(trustedExecutable);
+    if (
+      trustedExecutable.length === 0 ||
+      trustedExecutable.includes("\0") ||
+      (!nativeAbsolute && !win32Absolute) ||
+      !isLocalWindowsPath ||
+      basename.toLowerCase() !== "pnpm.exe"
+    ) {
+      throw new Error(
+        "Win32 host identity 专用 pnpm launcher 必须是绝对本地 pnpm.exe，且非法时禁止回退。",
+      );
+    }
+    return { args, executable: trustedExecutable };
+  }
+  return createPnpmInvocation(environment.npm_execpath, args);
+}
+
+/**
+ * 以 shell:false 执行解析后的 pnpm 调用，并保持 Harness 提供的 sanitized env 不扩散。
+ *
+ * @param {string[]} args pnpm 参数。
+ * @param {{
+ *   environment?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+ *   spawnOptions?: import("node:child_process").SpawnSyncOptions;
+ * }} [options] 可测试的进程边界。
+ * @returns {import("node:child_process").SpawnSyncReturns<Buffer | string>} 同步执行结果。
+ */
+export function runHostPathIdentityPnpm(args, options = {}) {
+  const environment = options.environment ?? process.env;
+  const invocation = createHostPathIdentityPnpmInvocation(environment, args);
+  return spawnSync(invocation.executable, invocation.args, {
+    ...(options.spawnOptions ?? {}),
+    env: environment,
+    shell: false,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+  });
+}
+
+/**
  * 只接受无 BOM/NUL、合法 UTF-8 且换行仅为 LF 或 CRLF 的字节，并规范化 CRLF。
  *
  * @param {Buffer} bytes 原始文件字节。
@@ -412,19 +465,18 @@ async function validateGateRegistration() {
 
 /** 使用固定配置与路径运行不可由 Gate 参数缩小的 Vitest 黑盒测试。 */
 function runVitest(configPath, paths) {
-  const invocation = createPnpmInvocation(process.env.npm_execpath, [
+  const result = runHostPathIdentityPnpm([
     "exec",
     "vitest",
     "run",
     "--config",
     configPath,
     ...paths,
-  ]);
-  const result = spawnSync(invocation.executable, invocation.args, {
-    cwd: repositoryRoot,
-    env: process.env,
-    stdio: "inherit",
-    windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+  ], {
+    spawnOptions: {
+      cwd: repositoryRoot,
+      stdio: "inherit",
+    },
   });
   if (result.error !== undefined) {
     console.error("Win32 host identity 回归集无法启动。Fix: 检查 pnpm 与测试运行环境。");
@@ -435,7 +487,7 @@ function runVitest(configPath, paths) {
 
 /** 使用独立配置精确运行 Win32 suite，并证明文件数、测试数非零且没有 skip/todo。 */
 function runVitestWithRequiredCounts(configPath, exactPath) {
-  const invocation = createPnpmInvocation(process.env.npm_execpath, [
+  const result = runHostPathIdentityPnpm([
     "exec",
     "vitest",
     "run",
@@ -443,13 +495,12 @@ function runVitestWithRequiredCounts(configPath, exactPath) {
     configPath,
     exactPath,
     "--reporter=json",
-  ]);
-  const result = spawnSync(invocation.executable, invocation.args, {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-    env: process.env,
-    maxBuffer: 16 * 1024 * 1024,
-    windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
+  ], {
+    spawnOptions: {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    },
   });
   if (result.stdout.length > 0) {
     process.stdout.write(result.stdout);
