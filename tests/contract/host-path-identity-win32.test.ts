@@ -15,6 +15,10 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { HostPathIdentityBroker } from "../../apps/graph-service/src/host-path-identity.js";
 
 const temporaryRoots: string[] = [];
+/** PowerShell 卷探测必须在有界时间内失败关闭并生成结构化诊断。 */
+const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;
+/** 外层 hook 预算必须显著大于内部探测 deadline，保证 timeout 诊断可先完成输出。 */
+const WINDOWS_CONTRACT_HOOK_TIMEOUT_MS = 30_000;
 
 /** 仅删除本测试通过 mkdtemp 创建并登记的隔离目录。 */
 afterEach(async () => {
@@ -67,7 +71,7 @@ function probeWindowsTestRoot(input: string): {
       encoding: "utf8",
       env: { ...process.env, CODEGRAPH_CONTRACT_TMPDIR: probeRoot },
       shell: false,
-      timeout: 10_000,
+      timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS,
       windowsHide: true,
     },
   );
@@ -150,7 +154,7 @@ describe("Windows host path identity contract", () => {
       ordinary: true,
       reparse: false,
     });
-  });
+  }, WINDOWS_CONTRACT_HOOK_TIMEOUT_MS);
 
   it("binds root, directory and leaf casing aliases plus hardlinks in one snapshot", async () => {
     const root = await createWindowsRoot();

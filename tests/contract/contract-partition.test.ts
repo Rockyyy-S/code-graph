@@ -61,4 +61,24 @@ describe("contract execution partitions", () => {
       "passWithNoTests: true",
     );
   });
+
+  it("keeps the Win32 preflight deadline inside an observable outer hook budget", async () => {
+    const [dedicatedSource, dedicatedConfig] = await Promise.all([
+      readFile(path.join(repositoryRoot, dedicatedPath), "utf8"),
+      readFile(path.join(repositoryRoot, "vitest.contract.win32.config.ts"), "utf8"),
+    ]);
+
+    expect(dedicatedSource).toContain(
+      "const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;",
+    );
+    expect(dedicatedSource).toContain(
+      "const WINDOWS_CONTRACT_HOOK_TIMEOUT_MS = 30_000;",
+    );
+    expect(dedicatedSource).toContain("timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS");
+    expect(dedicatedSource).toContain("}, WINDOWS_CONTRACT_HOOK_TIMEOUT_MS);");
+    expect(dedicatedConfig).toContain("hookTimeout: 30_000");
+    expect(dedicatedSource).toContain('? "GET_VOLUME_TIMEOUT"');
+    expect(dedicatedSource.match(/CODEGRAPH_WIN32_CONTRACT_PREFLIGHT/gu)?.length).toBeGreaterThan(3);
+    expect(dedicatedSource.match(/^  it\(/gmu)).toHaveLength(4);
+  });
 });
