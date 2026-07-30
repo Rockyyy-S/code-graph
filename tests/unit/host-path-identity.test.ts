@@ -200,6 +200,101 @@ describe("host path identity broker", () => {
     });
   });
 
+  /** 构造已经由外层 Harness 验证、并与当前 dedicated 根绑定的可信证明。 */
+  function createTrustedWin32Preflight(root: string): string {
+    return JSON.stringify({
+      schemaVersion: 1,
+      processPlatform: "win32",
+      selectedRoot: root,
+      drive: "C",
+      fileSystem: "NTFS",
+      driveType: "Fixed",
+      getVolume: {
+        status: 0,
+        stdout: '[{"DriveLetter":"C","FileSystem":"NTFS","DriveType":"Fixed"}]',
+        stderr: "",
+        timeout: false,
+      },
+      root: { ordinary: true, reparse: false },
+      probeDurationMs: 1_434,
+    });
+  }
+
+  it("reuses the trusted outer Win32 proof without starting PowerShell again", () => {
+    const root = "C:\\gate-root";
+    const spawnSyncImpl = vi.fn();
+    const result = runWindowsContractPreflight({
+      environment: {
+        CODEGRAPH_TRUSTED_PNPM_EXE: "C:\\trusted\\pnpm.exe",
+        CODEGRAPH_TRUSTED_WIN32_PREFLIGHT_V1: createTrustedWin32Preflight(root),
+      },
+      platform: "win32",
+      spawnSyncImpl: spawnSyncImpl as never,
+      testRoot: root,
+    });
+
+    expect(result).toMatchObject({
+      classification: "preflight-pass",
+      ok: true,
+      preflight: {
+        code: "OK",
+        probe: {
+          driveType: "Fixed",
+          fileSystem: "NTFS",
+          ordinary: true,
+          reparse: false,
+          root,
+        },
+        source: "trusted-outer-preflight-v1",
+      },
+    });
+    expect(spawnSyncImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing proof", undefined, "TRUSTED_PREFLIGHT_MISSING"],
+    ["malformed proof", "{invalid", "TRUSTED_PREFLIGHT_INVALID_JSON"],
+    [
+      "unsafe proof",
+      createTrustedWin32Preflight("C:\\gate-root").replace(
+        '"fileSystem":"NTFS"',
+        '"fileSystem":"ReFS"',
+      ),
+      "TRUSTED_PREFLIGHT_UNSAFE_ROOT",
+    ],
+    [
+      "root mismatch",
+      createTrustedWin32Preflight("D:\\other-root"),
+      "TRUSTED_PREFLIGHT_ROOT_MISMATCH",
+    ],
+    [
+      "deadline drift",
+      createTrustedWin32Preflight("C:\\gate-root").replace(
+        '"probeDurationMs":1434',
+        '"probeDurationMs":10001',
+      ),
+      "TRUSTED_PREFLIGHT_DEADLINE_DRIFT",
+    ],
+  ])("fails closed for trusted Hosted execution with %s", (_label, proof, code) => {
+    const spawnSyncImpl = vi.fn();
+    const result = runWindowsContractPreflight({
+      environment: {
+        CODEGRAPH_TRUSTED_PNPM_EXE: "C:\\trusted\\pnpm.exe",
+        CODEGRAPH_TRUSTED_WIN32_PREFLIGHT_V1: proof,
+      },
+      platform: "win32",
+      spawnSyncImpl: spawnSyncImpl as never,
+      testRoot: "C:\\gate-root",
+    });
+
+    expect(result).toMatchObject({
+      classification: "preflight-trusted-proof-invalid",
+      ok: false,
+      preflight: { code },
+    });
+    expect(spawnSyncImpl).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       "timeout",

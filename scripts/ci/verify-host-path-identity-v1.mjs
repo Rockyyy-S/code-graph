@@ -65,6 +65,8 @@ const requiredProductionCalls = new Map([
 /** PowerShell/Get-Volume 的内部安全 deadline 固定为 10 秒，禁止由调用方放宽。 */
 export const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;
 const WINDOWS_GATE_ENVELOPE_SCHEMA_VERSION = 1;
+const TRUSTED_WINDOWS_PREFLIGHT_ENV = "CODEGRAPH_TRUSTED_WIN32_PREFLIGHT_V1";
+const MAX_TRUSTED_WINDOWS_PREFLIGHT_BYTES = 32 * 1024;
 
 /** 独立校验完整生产闭包与固定原生脚本，执行 mutation oracle 后运行黑盒回归。 */
 export async function verifyHostPathIdentityV1() {
@@ -303,9 +305,122 @@ function boundedProcessText(value) {
 }
 
 /**
+ * 将 Harness 已验证的外层 Win32 preflight 重新绑定到当前 dedicated 根。
+ *
+ * @param {{
+ *   base: object;
+ *   candidateRoot: string;
+ *   driveLetter: string;
+ *   environment: NodeJS.ProcessEnv | Record<string, string | undefined>;
+ * }} input 可信外层证明及当前进程边界。
+ * @returns {{classification:string;ok:boolean;preflight:object}|null} 无 Hosted 标记时返回 null。
+ */
+function reuseTrustedWindowsContractPreflight(input) {
+  const serialized = input.environment[TRUSTED_WINDOWS_PREFLIGHT_ENV];
+  const trustedLauncher = input.environment.CODEGRAPH_TRUSTED_PNPM_EXE;
+  if (serialized === undefined && trustedLauncher === undefined) {
+    return null;
+  }
+  const fail = (code, proof) => ({
+    classification: "preflight-trusted-proof-invalid",
+    ok: false,
+    preflight: {
+      ...input.base,
+      code,
+      source: "trusted-outer-preflight-v1",
+      ...(proof === undefined ? {} : { proof }),
+    },
+  });
+  if (trustedLauncher === undefined) {
+    return fail("TRUSTED_PREFLIGHT_UNBOUND");
+  }
+  if (serialized === undefined) {
+    return fail("TRUSTED_PREFLIGHT_MISSING");
+  }
+  if (
+    serialized.length === 0 ||
+    serialized.includes("\0") ||
+    Buffer.byteLength(serialized, "utf8") > MAX_TRUSTED_WINDOWS_PREFLIGHT_BYTES
+  ) {
+    return fail("TRUSTED_PREFLIGHT_INVALID_ENVELOPE");
+  }
+  let proof;
+  try {
+    proof = JSON.parse(serialized);
+  } catch {
+    return fail("TRUSTED_PREFLIGHT_INVALID_JSON");
+  }
+  if (
+    proof === null ||
+    typeof proof !== "object" ||
+    Array.isArray(proof) ||
+    proof.schemaVersion !== 1 ||
+    proof.processPlatform !== "win32" ||
+    proof.getVolume === null ||
+    typeof proof.getVolume !== "object" ||
+    Array.isArray(proof.getVolume)
+  ) {
+    return fail("TRUSTED_PREFLIGHT_INVALID_ENVELOPE");
+  }
+  if (proof.getVolume.timeout !== false || proof.getVolume.status !== 0) {
+    return fail("TRUSTED_PREFLIGHT_QUERY_FAILED", proof);
+  }
+  if (
+    !Number.isInteger(proof.probeDurationMs) ||
+    proof.probeDurationMs < 0 ||
+    proof.probeDurationMs > WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS
+  ) {
+    return fail("TRUSTED_PREFLIGHT_DEADLINE_DRIFT", proof);
+  }
+  if (
+    typeof proof.selectedRoot !== "string" ||
+    path.win32.resolve(proof.selectedRoot).toLowerCase() !== input.candidateRoot.toLowerCase()
+  ) {
+    return fail("TRUSTED_PREFLIGHT_ROOT_MISMATCH", proof);
+  }
+  if (
+    proof.drive !== input.driveLetter ||
+    proof.fileSystem !== "NTFS" ||
+    proof.driveType !== "Fixed" ||
+    proof.root?.ordinary !== true ||
+    proof.root?.reparse !== false
+  ) {
+    return fail("TRUSTED_PREFLIGHT_UNSAFE_ROOT", proof);
+  }
+  const processEvidence = {
+    ...input.base,
+    getVolume: {
+      status: proof.getVolume.status,
+      stderr: boundedProcessText(proof.getVolume.stderr),
+      stdout: boundedProcessText(proof.getVolume.stdout),
+      timeout: false,
+    },
+    source: "trusted-outer-preflight-v1",
+    trustedOuterProofSha256: createHash("sha256").update(serialized, "utf8").digest("hex"),
+  };
+  return {
+    classification: "preflight-pass",
+    ok: true,
+    preflight: {
+      ...processEvidence,
+      code: "OK",
+      probe: {
+        drive: proof.drive,
+        driveType: proof.driveType,
+        fileSystem: proof.fileSystem,
+        ordinary: proof.root.ordinary,
+        reparse: proof.root.reparse,
+        root: input.candidateRoot,
+      },
+    },
+  };
+}
+
+/**
  * 在 dedicated Vitest 启动前独立证明真实 Win32 固定 NTFS 根。
  *
  * @param {{
+ *   environment?: NodeJS.ProcessEnv | Record<string, string | undefined>;
  *   platform?: NodeJS.Platform;
  *   spawnSyncImpl?: typeof spawnSync;
  *   testRoot?: string;
@@ -314,6 +429,7 @@ function boundedProcessText(value) {
  */
 export function runWindowsContractPreflight(options = {}) {
   const platform = options.platform ?? process.platform;
+  const environment = options.environment ?? process.env;
   const candidateRoot = path.win32.resolve(options.testRoot ?? tmpdir());
   const base = {
     candidateRoot,
@@ -335,6 +451,15 @@ export function runWindowsContractPreflight(options = {}) {
       preflight: { ...base, code: "ROOT_WITHOUT_DRIVE" },
     };
   }
+  const trustedPreflight = reuseTrustedWindowsContractPreflight({
+    base,
+    candidateRoot,
+    driveLetter,
+    environment,
+  });
+  if (trustedPreflight !== null) {
+    return trustedPreflight;
+  }
   const result = (options.spawnSyncImpl ?? spawnSync)(
     "powershell.exe",
     [
@@ -352,7 +477,7 @@ export function runWindowsContractPreflight(options = {}) {
     ],
     {
       encoding: "utf8",
-      env: { ...process.env, CODEGRAPH_CONTRACT_TMPDIR: candidateRoot },
+      env: { ...environment, CODEGRAPH_CONTRACT_TMPDIR: candidateRoot },
       shell: false,
       timeout: WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS,
       windowsHide: true,

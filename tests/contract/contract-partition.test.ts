@@ -73,6 +73,9 @@ describe("contract execution partitions", () => {
     expect(verifier).toContain(
       "export const WINDOWS_TEST_ROOT_PROBE_TIMEOUT_MS = 10_000;",
     );
+    expect(verifier).toContain("CODEGRAPH_TRUSTED_WIN32_PREFLIGHT_V1");
+    expect(verifier).toContain('fail("TRUSTED_PREFLIGHT_MISSING")');
+    expect(verifier).toContain('source: "trusted-outer-preflight-v1"');
     expect(verifier).toMatch(
       /const preflight = runWindowsContractPreflight\(\);[\s\S]*if \(!preflight\.ok\)[\s\S]*return 1;[\s\S]*runVitestWithRequiredCounts/u,
     );
