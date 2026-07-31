@@ -12,6 +12,12 @@ import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
 import {
   createTypeScriptAnalyzer,
 } from "../../packages/adapters/analyzer-typescript/src/index.js";
+import {
+  observeTypeScriptConfiguration,
+  readWorkerAnalysisCacheStatsForTests,
+  resetWorkerAnalysisCacheForTests,
+  WORKER_ANALYSIS_CACHE_LIMITS,
+} from "../../packages/adapters/analyzer-typescript/src/worker-analysis.js";
 
 const digestPort = { digest: sha256CanonicalJson };
 const workspaceKey = "a".repeat(64);
@@ -22,6 +28,38 @@ function byteFile(relativePath: string, source: string) {
     bytes: new TextEncoder().encode(source),
     contentHash: sha256CanonicalJson({ source }),
     path: relativePath,
+  });
+}
+
+/** 构造直接进入 Worker 核心的受控源码文件，便于观测同进程增量缓存。 */
+function workerSourceFile(relativePath: string, source = "export {};\n") {
+  return Object.freeze({
+    ...byteFile(relativePath, source),
+    fileId: buildGraphEntityId(workspaceKey, "file", relativePath),
+    language: "typescript" as const,
+  });
+}
+
+/**
+ * 构造 fresh 请求级 proof；raw snapshot/token 每批轮换，canonical 投影由调用方显式给出。
+ */
+function hostPathIdentitySidecar(
+  logicalPaths: readonly string[],
+  snapshotIdentity: string,
+  canonicalByLogicalPath: Readonly<Record<string, string>> = {},
+) {
+  return Object.freeze({
+    entries: Object.freeze(logicalPaths.map((logicalPath) => {
+      const canonicalLogicalPath = canonicalByLogicalPath[logicalPath] ?? logicalPath;
+      return Object.freeze({
+        canonicalLogicalPath,
+        identity: `${snapshotIdentity}:${canonicalLogicalPath}`,
+        logicalPath,
+      });
+    })),
+    proofDigest: `proof-${snapshotIdentity}`,
+    snapshotIdentity,
+    version: 1 as const,
   });
 }
 
@@ -743,6 +781,91 @@ describe("Story 1.5 TypeScript Analyzer Worker", () => {
       });
     } finally {
       await analyzer.close();
+    }
+  });
+
+  it("CR11-005 reuses a proof-backed Program when only request tokens rotate", () => {
+    resetWorkerAnalysisCacheForTests();
+    const logicalPaths = Array.from(
+      { length: 4_096 },
+      (_, index) => `src/file-${index.toString().padStart(4, "0")}.ts`,
+    );
+    const sourceFiles = logicalPaths.map((logicalPath) => workerSourceFile(logicalPath));
+    const request = (snapshotIdentity: string) => ({
+      caseSensitiveFileNames: false,
+      configurationFiles: [],
+      hostPathIdentitySidecar: hostPathIdentitySidecar(logicalPaths, snapshotIdentity),
+      sourceFiles,
+    });
+
+    try {
+      observeTypeScriptConfiguration(request("snapshot-a"));
+      const afterFirst = readWorkerAnalysisCacheStatsForTests();
+      observeTypeScriptConfiguration(request("snapshot-b"));
+      const afterSecond = readWorkerAnalysisCacheStatsForTests();
+
+      expect(afterFirst.programBuilds).toBe(1);
+      expect(afterSecond.programBuilds).toBe(afterFirst.programBuilds);
+      expect(afterSecond.programReuses).toBe(1);
+      expect(afterSecond.projectStateCount).toBe(1);
+      expect(afterSecond.sourceFileObjectCount)
+        .toBeLessThanOrEqual(WORKER_ANALYSIS_CACHE_LIMITS.maxSourceFileObjectCount);
+      expect(afterSecond.retainedBytes)
+        .toBeLessThanOrEqual(WORKER_ANALYSIS_CACHE_LIMITS.maxRetainedBytes);
+    } finally {
+      resetWorkerAnalysisCacheForTests();
+    }
+  });
+
+  it("CR11-005 invalidates canonical identity changes and incrementally rebuilds changed content", () => {
+    resetWorkerAnalysisCacheForTests();
+    const upperPath = "src/Ω.ts";
+    const lowerPath = "src/ω.ts";
+    const logicalPaths = [upperPath, lowerPath];
+    const stableFiles = logicalPaths.map((logicalPath) => workerSourceFile(logicalPath));
+    const request = (
+      snapshotIdentity: string,
+      sourceFiles = stableFiles,
+      canonicalByLogicalPath: Readonly<Record<string, string>> = {},
+    ) => ({
+      caseSensitiveFileNames: false,
+      configurationFiles: [],
+      hostPathIdentitySidecar: hostPathIdentitySidecar(
+        logicalPaths,
+        snapshotIdentity,
+        canonicalByLogicalPath,
+      ),
+      sourceFiles,
+    });
+
+    try {
+      observeTypeScriptConfiguration(request("distinct-a"));
+      observeTypeScriptConfiguration(request("distinct-b"));
+      const afterEquivalentProof = readWorkerAnalysisCacheStatsForTests();
+      expect(afterEquivalentProof.programBuilds).toBe(1);
+      expect(afterEquivalentProof.programReuses).toBe(1);
+      expect(afterEquivalentProof.reusedSourceFiles).toBe(2);
+
+      const changedFiles = [
+        stableFiles[0]!,
+        workerSourceFile(lowerPath, "export const changed = true;\n"),
+      ];
+      observeTypeScriptConfiguration(request("distinct-c", changedFiles));
+      const afterContentChange = readWorkerAnalysisCacheStatsForTests();
+      expect(afterContentChange.programBuilds).toBe(1);
+      expect(afterContentChange.programReuses).toBe(2);
+      /** 两个 root 中仅未变文件可复用，精确增量证明变更 SourceFile 已重建。 */
+      expect(afterContentChange.reusedSourceFiles).toBe(3);
+
+      observeTypeScriptConfiguration(request("aliased", stableFiles, {
+        [lowerPath]: upperPath,
+        [upperPath]: upperPath,
+      }));
+      const afterIdentityChange = readWorkerAnalysisCacheStatsForTests();
+      expect(afterIdentityChange.programBuilds).toBe(2);
+      expect(afterIdentityChange.programReuses).toBe(2);
+    } finally {
+      resetWorkerAnalysisCacheForTests();
     }
   });
 

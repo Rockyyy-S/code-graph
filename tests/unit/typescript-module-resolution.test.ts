@@ -145,6 +145,39 @@ describe("Story 1.5 module target priority", () => {
     });
   });
 
+  it("CR11-006 preserves opaque manifest identity and isolates proof-scoped indexes", () => {
+    const upperPath = "src/Ω.ts";
+    const lowerPath = "src/ω.ts";
+    const manifest = [
+      { fileId: "file-upper", path: upperPath },
+      { fileId: "file-lower", path: lowerPath },
+    ];
+    /** 第一批 proof 声明两个文本折叠路径是同一对象，因此稳定选择首个 manifest 身份。 */
+    const aliasedKey = (logicalPath: string) =>
+      logicalPath === upperPath || logicalPath === lowerPath ? "object-shared" : logicalPath;
+    /** 第二批 proof 声明它们是不同对象，不能复用上一批 manifest 派生索引。 */
+    const distinctKey = (logicalPath: string) =>
+      logicalPath === upperPath ? "object-upper" :
+        logicalPath === lowerPath ? "object-lower" : logicalPath;
+    const resolve = (hostPathIdentityKey: (logicalPath: string) => string) =>
+      resolveModuleTarget({
+        caseSensitiveFileNames: false,
+        hostPathIdentityKey,
+        indexingManifest: manifest,
+        resolvedLogicalPath: lowerPath,
+        sourcePath: "src/index.ts",
+        specifier: "./ω.js",
+        workspaceKey,
+      });
+
+    expect(resolve(aliasedKey)).toMatchObject({
+      target: { id: "file-upper", kind: "internal-file" },
+    });
+    expect(resolve(distinctKey)).toMatchObject({
+      target: { id: "file-lower", kind: "internal-file" },
+    });
+  });
+
   it("does not disguise a resolved external file with invalid metadata as unresolved", () => {
     expect(resolveModuleTarget({
       indexingManifest: [],

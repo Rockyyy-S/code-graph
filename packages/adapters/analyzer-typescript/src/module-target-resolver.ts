@@ -15,6 +15,8 @@ import {
 export interface ResolveModuleTargetOptions {
   /** 路径比较必须与 TypeScript host 的真实大小写语义一致。 */
   caseSensitiveFileNames?: boolean;
+  /** 请求级稳定 canonical key；调用方必须在进入此层前丢弃 raw proof/token。 */
+  hostPathIdentityKey?: (logicalPath: string) => string;
   indexingManifest: readonly { fileId: string; path: string }[];
   normalizedRange?: SourceRangeV1;
   /** 仅当源码明确归属已封口项目配置时，静态内部解析才可声明 high。 */
@@ -27,9 +29,17 @@ export interface ResolveModuleTargetOptions {
   workspaceKey: string;
 }
 
+interface ManifestIndexCacheEntry {
+  byCaseSensitivity: Map<boolean, ReadonlyMap<string, { fileId: string; path: string }>>;
+  byHostPathIdentityKey: WeakMap<
+    (logicalPath: string) => string,
+    ReadonlyMap<string, { fileId: string; path: string }>
+  >;
+}
+
 const manifestIndexCache = new WeakMap<
   readonly { fileId: string; path: string }[],
-  Map<boolean, ReadonlyMap<string, { fileId: string; path: string }>>
+  ManifestIndexCacheEntry
 >();
 
 /** 固定优先级解析结果。 */
@@ -58,8 +68,15 @@ export function resolveModuleTarget(options: ResolveModuleTargetOptions): Resolv
   const caseSensitiveFileNames = options.caseSensitiveFileNames ?? true;
   if (resolvedLogicalPath !== undefined &&
     !hasNodeModulesSegment(resolvedLogicalPath, caseSensitiveFileNames)) {
-    const internalFile = manifestIndex(options.indexingManifest, caseSensitiveFileNames)
-      .get(normalizeHostPathIdentity(resolvedLogicalPath, caseSensitiveFileNames));
+    const internalFile = manifestIndex(
+      options.indexingManifest,
+      caseSensitiveFileNames,
+      options.hostPathIdentityKey,
+    ).get(pathIdentityKey(
+      resolvedLogicalPath,
+      caseSensitiveFileNames,
+      options.hostPathIdentityKey,
+    ));
     if (internalFile !== undefined) {
       return Object.freeze({
         confidence: options.resolutionKind === "dynamic"
@@ -150,20 +167,41 @@ export function resolveModuleTarget(options: ResolveModuleTargetOptions): Resolv
 function manifestIndex(
   manifest: readonly { fileId: string; path: string }[],
   caseSensitiveFileNames: boolean,
+  hostPathIdentityKey?: (logicalPath: string) => string,
 ): ReadonlyMap<string, { fileId: string; path: string }> {
-  const cachedByCase = manifestIndexCache.get(manifest);
-  const cached = cachedByCase?.get(caseSensitiveFileNames);
+  const cachedEntry = manifestIndexCache.get(manifest);
+  const cached = hostPathIdentityKey === undefined
+    ? cachedEntry?.byCaseSensitivity.get(caseSensitiveFileNames)
+    : cachedEntry?.byHostPathIdentityKey.get(hostPathIdentityKey);
   if (cached !== undefined) {return cached;}
   const index = new Map<string, { fileId: string; path: string }>();
   for (const entry of manifest) {
     const normalizedPath = normalizeRelativeGraphPath(entry.path);
-    const key = normalizeHostPathIdentity(normalizedPath, caseSensitiveFileNames);
+    const key = pathIdentityKey(normalizedPath, caseSensitiveFileNames, hostPathIdentityKey);
     if (!index.has(key)) {index.set(key, { fileId: entry.fileId, path: normalizedPath });}
   }
-  const nextByCase = cachedByCase ?? new Map();
-  nextByCase.set(caseSensitiveFileNames, index);
-  manifestIndexCache.set(manifest, nextByCase);
+  const nextEntry = cachedEntry ?? {
+    byCaseSensitivity: new Map(),
+    byHostPathIdentityKey: new WeakMap(),
+  };
+  if (hostPathIdentityKey === undefined) {
+    nextEntry.byCaseSensitivity.set(caseSensitiveFileNames, index);
+  } else {
+    /** resolver 是弱键，proof-aware 派生索引只能活在其请求作用域内。 */
+    nextEntry.byHostPathIdentityKey.set(hostPathIdentityKey, index);
+  }
+  manifestIndexCache.set(manifest, nextEntry);
   return index;
+}
+
+/** 已规范 logical path 统一进入显式 canonical resolver，缺省时保持旧 host 文本语义。 */
+function pathIdentityKey(
+  normalizedLogicalPath: string,
+  caseSensitiveFileNames: boolean,
+  hostPathIdentityKey?: (logicalPath: string) => string,
+): string {
+  return hostPathIdentityKey?.(normalizedLogicalPath) ??
+    normalizeHostPathIdentity(normalizedLogicalPath, caseSensitiveFileNames);
 }
 
 /** node_modules 即使位于 indexing root 物理前缀下也不是内部源码。 */

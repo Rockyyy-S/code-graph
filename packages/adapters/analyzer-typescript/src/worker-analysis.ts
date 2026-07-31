@@ -381,7 +381,13 @@ export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutput
     fileId: file.fileId,
     path: file.path,
   }));
-  const externalFallbackIndex = buildExternalPackageFallbackIndex(files);
+  /** manifest 派生索引与 Worker 文件表共享稳定 canonical key，不携带请求 raw proof。 */
+  const hostPathIdentityKey = (logicalPath: string) =>
+    files.lookupKey(toVirtualPath(logicalPath));
+  const externalFallbackIndex = buildExternalPackageFallbackIndex(
+    files,
+    incrementalState.directoryIndex,
+  );
   const requestBudget = { bytes: 0, facts: 0 };
   const results = [...input.sourceFiles].sort((left, right) => compareText(left.path, right.path))
     .map((file) => {
@@ -422,11 +428,12 @@ export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutput
         const resolvedLogicalPath = resolved === undefined
           ? undefined
           : toLogicalPath(files.canonicalPath(resolved.resolvedFileName)) ?? undefined;
+        const canonicalContainingPath = toLogicalPath(files.canonicalPath(containingFile)) ?? file.path;
         const metadataBoundaryPath = resolvedLogicalPath ??
           findExternalPackageMetadataBoundary(
             externalFallbackIndex,
             relation.specifier,
-            file.path,
+            canonicalContainingPath,
           );
         const resolvedPackage = resolvedLogicalPath === undefined
           ? undefined
@@ -439,6 +446,7 @@ export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutput
         const target = resolveModuleTarget({
           /** proof 已收敛对象身份；此处布尔值只保留 ASCII node_modules/manifest 文本语义。 */
           caseSensitiveFileNames: files.caseSensitiveFileNames,
+          hostPathIdentityKey,
           indexingManifest,
           normalizedRange: relation.normalizedRange,
           projectContextComplete:
@@ -902,43 +910,66 @@ interface CachedModuleResolution {
   retainedBytes: number;
 }
 
-/** 文件路径集合只构建一次目录树，所有目录查询均为 O(1)+直接子目录输出。 */
+/** 文件路径集合只构建一次目录树；精确查询 O(1)，后代枚举只访问命中子树。 */
 class VirtualDirectoryIndex {
+  readonly #canonicalDirectoryByFallbackKey = new Map<string, string>();
   readonly #canonicalDirectories = new Map<string, string>();
-  readonly #canonicalFiles = new Map<string, string>();
   readonly #children = new Map<string, Map<string, string>>();
-  readonly #fileKeys: readonly string[];
+  readonly #filesByDirectory = new Map<string, Map<string, string>>();
+  readonly #pathIdentityProjection: StableHostPathProjection | null;
   public readonly caseSensitiveFileNames: boolean;
   public readonly directoryEntryCount: number;
   public readonly retainedBytes: number;
 
   public constructor(files: VirtualFileMap) {
     this.caseSensitiveFileNames = files.caseSensitiveFileNames;
-    this.#canonicalDirectories.set(this.#lookupKey(VIRTUAL_ROOT), VIRTUAL_ROOT);
-    for (const fileName of files.keys()) {
-      const canonicalFile = normalizeVirtualPath(fileName);
-      this.#canonicalFiles.set(this.#lookupKey(canonicalFile), canonicalFile);
+    this.#pathIdentityProjection = files.pathIdentityProjection;
+    const canonicalFiles = [...files.keys()]
+      .map((fileName) => normalizeVirtualPath(fileName))
+      .sort(compareText);
+    if (!this.caseSensitiveFileNames) {
+      this.#rememberCanonicalDirectory(VIRTUAL_ROOT);
+      for (const canonicalFile of canonicalFiles) {
+        const segments = canonicalFile.split("/").filter(Boolean);
+        let current = "";
+        for (let index = 0; index < segments.length - 1; index += 1) {
+          current = `${current}/${segments[index]}`;
+          this.#rememberCanonicalDirectory(current);
+        }
+      }
     }
-    this.#fileKeys = Object.freeze([...this.#canonicalFiles.keys()].sort(compareText));
-    for (const fileName of files.keys()) {
+    this.#canonicalDirectories.set(
+      this.#directoryLookupKey(VIRTUAL_ROOT),
+      this.#canonicalDirectory(VIRTUAL_ROOT),
+    );
+    for (const canonicalFile of canonicalFiles) {
       cacheMetrics.directoryIndexBuildFileVisits += 1;
-      const segments = normalizeVirtualPath(fileName).split("/").filter(Boolean);
+      const segments = canonicalFile.split("/").filter(Boolean);
       let current = "";
       for (let index = 0; index < segments.length - 1; index += 1) {
         const parent = current.length === 0 ? "/" : normalizeVirtualPath(current);
         current = `${current}/${segments[index]}`;
         const normalizedCurrent = normalizeVirtualPath(current);
-        const parentKey = this.#lookupKey(parent);
-        const currentKey = this.#lookupKey(normalizedCurrent);
-        this.#canonicalDirectories.set(currentKey, normalizedCurrent);
+        const parentKey = this.#directoryLookupKey(parent);
+        const currentKey = this.#directoryLookupKey(normalizedCurrent);
+        const canonicalDirectory = this.#canonicalDirectory(normalizedCurrent);
+        this.#canonicalDirectories.set(currentKey, canonicalDirectory);
         const children = this.#children.get(parentKey) ?? new Map<string, string>();
-        children.set(currentKey, normalizedCurrent);
+        children.set(currentKey, canonicalDirectory);
         this.#children.set(parentKey, children);
       }
+      const parentDirectory = path.posix.dirname(canonicalFile);
+      const parentKey = this.#directoryLookupKey(parentDirectory);
+      const directoryFiles = this.#filesByDirectory.get(parentKey) ?? new Map<string, string>();
+      directoryFiles.set(this.#lookupKey(canonicalFile), canonicalFile);
+      this.#filesByDirectory.set(parentKey, directoryFiles);
     }
     const childLinkCount = [...this.#children.values()]
       .reduce((sum, children) => sum + children.size, 0);
-    this.directoryEntryCount = this.#canonicalDirectories.size + childLinkCount;
+    const fileLinkCount = [...this.#filesByDirectory.values()]
+      .reduce((sum, directoryFiles) => sum + directoryFiles.size, 0);
+    this.directoryEntryCount = this.#canonicalDirectoryByFallbackKey.size +
+      this.#canonicalDirectories.size + childLinkCount + fileLinkCount;
     if (this.directoryEntryCount > WORKER_ANALYSIS_CACHE_LIMITS.maxDirectoryEntryCount) {
       throw new WorkerAnalysisError(
         "ANALYZER_RESOURCE_LIMIT",
@@ -947,14 +978,18 @@ class VirtualDirectoryIndex {
     }
     this.retainedBytes = [...this.#canonicalDirectories.entries()].reduce((sum, [key, directory]) =>
       sum + new TextEncoder().encode(`${key}\0${directory}`).byteLength + 192, 0) +
-      [...this.#canonicalFiles.entries()].reduce((sum, [key, fileName]) =>
-        sum + new TextEncoder().encode(`${key}\0${fileName}`).byteLength + 96, 0) +
-      childLinkCount * 96;
+      [...this.#canonicalDirectoryByFallbackKey.entries()].reduce((sum, [key, directory]) =>
+        sum + new TextEncoder().encode(`${key}\0${directory}`).byteLength + 96, 0) +
+      [...this.#filesByDirectory.entries()].reduce((sum, [directoryKey, directoryFiles]) =>
+        sum + new TextEncoder().encode(directoryKey).byteLength +
+          [...directoryFiles.entries()].reduce((fileSum, [key, fileName]) =>
+            fileSum + new TextEncoder().encode(`${key}\0${fileName}`).byteLength + 96, 0), 0) +
+      childLinkCount * 96 + (this.#pathIdentityProjection?.retainedBytes ?? 0);
   }
 
   public directoryExists(directoryName: string): boolean {
     cacheMetrics.directoryExistsCalls += 1;
-    return this.#canonicalDirectories.has(this.#lookupKey(
+    return this.#canonicalDirectories.has(this.#directoryLookupKey(
       normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/",
     ));
   }
@@ -962,39 +997,68 @@ class VirtualDirectoryIndex {
   public getDirectories(directoryName: string): string[] {
     cacheMetrics.getDirectoriesCalls += 1;
     const normalized = normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/";
-    return [...(this.#children.get(this.#lookupKey(normalized))?.values() ?? [])].sort(compareText);
+    return [...(this.#children.get(this.#directoryLookupKey(normalized))?.values() ?? [])]
+      .sort(compareText);
   }
 
-  /** 排序路径表用二分前缀定位目录后代，避免每个 project 重扫并重排全部文件。 */
+  /** 沿目录树只访问目标目录后代，不假设 opaque identity key 仍保留文本路径前缀。 */
   public filesWithin(directoryName: string): readonly string[] {
     const normalized = normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/";
-    const prefix = `${this.#lookupKey(normalized).replace(/\/$/u, "")}/`;
-    const start = lowerBound(this.#fileKeys, prefix);
+    const queue = [this.#directoryLookupKey(normalized)];
+    const visited = new Set<string>();
     const descendants: string[] = [];
-    for (let index = start; index < this.#fileKeys.length; index += 1) {
-      const key = this.#fileKeys[index]!;
-      if (!key.startsWith(prefix)) {break;}
-      descendants.push(this.#canonicalFiles.get(key)!);
+    for (let index = 0; index < queue.length; index += 1) {
+      const directoryKey = queue[index]!;
+      if (visited.has(directoryKey)) {continue;}
+      visited.add(directoryKey);
+      descendants.push(...(this.#filesByDirectory.get(directoryKey)?.values() ?? []));
+      queue.push(...(this.#children.get(directoryKey)?.keys() ?? []));
     }
     return descendants.sort(compareText);
   }
 
-  /** 所有虚拟目录 key 与 VirtualFileMap 使用完全相同的 host 大小写语义。 */
-  #lookupKey(fileName: string): string {
-    return normalizeHostPathIdentity(fileName, this.caseSensitiveFileNames);
-  }
-}
+  /** 暴露 proof-aware 稳定 key，供 readDirectory 去重共享同一对象语义。 */
+  public lookupKey(fileName: string): string {return this.#lookupKey(fileName);}
 
-/** 对规范排序字符串数组执行无分配 lower-bound。 */
-function lowerBound(values: readonly string[], target: string): number {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (compareText(values[middle]!, target) < 0) {low = middle + 1;}
-    else {high = middle;}
+  /** package fallback 等目录边界查询复用同一份已知目录 canonical 表。 */
+  public directoryLookupKey(directoryName: string): string {
+    return this.#directoryLookupKey(directoryName);
   }
-  return low;
+
+  /** 只对已知存在目录应用文本 canonical fallback，未知文件探测仍保持 proof-aware 精确 key。 */
+  #directoryLookupKey(directoryName: string): string {
+    const normalized = normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/";
+    if (this.caseSensitiveFileNames) {return normalized;}
+    return this.#canonicalDirectoryByFallbackKey.get(
+      normalizeHostPathIdentity(normalized, false),
+    ) ?? normalized;
+  }
+
+  #canonicalDirectory(directoryName: string): string {
+    const normalized = normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/";
+    if (this.caseSensitiveFileNames) {return normalized;}
+    return this.#canonicalDirectoryByFallbackKey.get(
+      normalizeHostPathIdentity(normalized, false),
+    ) ?? normalized;
+  }
+
+  /** 从 proof-backed 文件父目录派生有界 fallback；稳定选择不依赖请求枚举顺序。 */
+  #rememberCanonicalDirectory(directoryName: string): void {
+    const normalized = normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/";
+    const fallbackKey = normalizeHostPathIdentity(normalized, false);
+    const existing = this.#canonicalDirectoryByFallbackKey.get(fallbackKey);
+    if (existing === undefined || compareText(normalized, existing) < 0) {
+      this.#canonicalDirectoryByFallbackKey.set(fallbackKey, normalized);
+    }
+  }
+
+  /** 文件 key 始终保持 proof-aware 精确对象语义，禁止目录 fallback 泄漏到未知文件探测。 */
+  #lookupKey(fileName: string): string {
+    const normalized = normalizeVirtualPath(fileName);
+    return this.caseSensitiveFileNames
+      ? normalized
+      : this.#pathIdentityProjection?.lookupKey(normalized) ?? normalized;
+  }
 }
 
 /** 建立或刷新请求级状态，并在路径集合不变时复用目录索引与解析缓存。 */
@@ -1011,10 +1075,14 @@ function prepareIncrementalProjectState(
   const key = JSON.stringify({
     caseSensitiveFileNames: files.caseSensitiveFileNames,
     configurationEntryPaths: [...(configurationEntryPaths ?? [])].sort(compareText),
+    pathIdentitySignature: files.pathIdentitySignature,
     sourceIdentities,
   });
   const allFileVirtualPaths = new Set(allFiles.map((file) => toVirtualPath(file.path)));
-  const filePathSignature = JSON.stringify([...files.keys()].sort(compareText));
+  const filePathSignature = JSON.stringify({
+    pathIdentitySignature: files.pathIdentitySignature,
+    paths: [...files.keys()].sort(compareText),
+  });
   const sourcePaths = new Set(sourceFiles.map((file) => file.path));
   const metadataSignature = JSON.stringify(allFiles
     .filter((file) => !sourcePaths.has(file.path))
@@ -1025,10 +1093,8 @@ function prepareIncrementalProjectState(
         .map((fileName) => `${fileName}\0blocked`)
         .sort(compareText),
     ));
-  /** snapshot-bound host mapping 不得跨请求留在 Program/module-resolution cache 中。 */
-  const existing = files.hasRequestScopedHostIdentity
-    ? undefined
-    : incrementalProjectCache.get(key);
+  /** cache key 只含稳定 canonical 投影；请求级 snapshot、proof digest 与 opaque token 已丢弃。 */
+  const existing = incrementalProjectCache.get(key);
   const directoryIndex = existing?.filePathSignature === filePathSignature
     ? existing.directoryIndex
     : new VirtualDirectoryIndex(files);
@@ -1327,12 +1393,13 @@ function enforceIncrementalCacheBudgets(): void {
 }
 
 /**
- * Worker 只消费 graph-service 已验证的请求级 sidecar，不自行推导宿主对象身份。
+ * 请求 proof 仅在构造期校验；持久状态只保留可跨 snapshot 比较的 logical→canonical 投影。
  * 未被 proof 覆盖的现存文件、冲突 canonical 映射或 snapshot 元数据缺失都立即失败。
  */
-class RequestHostPathIdentityIndex {
+class StableHostPathProjection {
   readonly #canonicalByLogicalPath = new Map<string, string>();
-  readonly #identityByLogicalPath = new Map<string, string>();
+  public readonly retainedBytes: number;
+  public readonly signature: string;
 
   public constructor(
     sidecar: AnalyzerHostPathIdentitySidecarV1,
@@ -1345,6 +1412,7 @@ class RequestHostPathIdentityIndex {
       throw new TypeError("Analyzer host path identity sidecar 元数据不合法。");
     }
     const canonicalByIdentity = new Map<string, string>();
+    const identityByLogicalPath = new Map<string, string>();
     for (const entry of sidecar.entries) {
       if (typeof entry !== "object" || entry === null ||
         typeof entry.logicalPath !== "string" ||
@@ -1355,7 +1423,7 @@ class RequestHostPathIdentityIndex {
       const canonicalLogicalPath = normalizeRelativeGraphPath(entry.canonicalLogicalPath);
       if (logicalPath !== entry.logicalPath || canonicalLogicalPath !== entry.canonicalLogicalPath ||
         typeof entry.identity !== "string" || entry.identity.length === 0 ||
-        entry.identity.includes("\0") || this.#identityByLogicalPath.has(logicalPath)) {
+        entry.identity.includes("\0") || identityByLogicalPath.has(logicalPath)) {
         throw new TypeError("Analyzer host path identity sidecar 条目不合法或重复。");
       }
       const existingCanonical = canonicalByIdentity.get(entry.identity);
@@ -1363,11 +1431,11 @@ class RequestHostPathIdentityIndex {
         throw new TypeError("Analyzer host path identity sidecar 对同一对象给出了冲突 canonical path。");
       }
       canonicalByIdentity.set(entry.identity, canonicalLogicalPath);
-      this.#identityByLogicalPath.set(logicalPath, entry.identity);
+      identityByLogicalPath.set(logicalPath, entry.identity);
       this.#canonicalByLogicalPath.set(logicalPath, canonicalLogicalPath);
     }
     for (const logicalPath of requiredLogicalPaths) {
-      if (!this.#identityByLogicalPath.has(logicalPath)) {
+      if (!identityByLogicalPath.has(logicalPath)) {
         throw new TypeError("Analyzer 现存路径缺少同批 HostPathIdentityBroker proof。");
       }
     }
@@ -1376,35 +1444,48 @@ class RequestHostPathIdentityIndex {
         throw new TypeError("Analyzer host proof canonical path 未绑定受控文件或 blocked fence。");
       }
     }
+    const stableEntries = [...this.#canonicalByLogicalPath.entries()]
+      .sort(([left], [right]) => compareText(left, right));
+    this.signature = JSON.stringify(stableEntries);
+    this.retainedBytes = stableEntries.reduce((sum, [logicalPath, canonicalLogicalPath]) =>
+      sum + new TextEncoder().encode(`${logicalPath}\0${canonicalLogicalPath}`).byteLength + 96, 0);
   }
 
   public canonicalLogicalPath(logicalPath: string): string | undefined {
     return this.#canonicalByLogicalPath.get(logicalPath);
   }
 
-  public identity(logicalPath: string): string | undefined {
-    return this.#identityByLogicalPath.get(logicalPath);
+  /** 已证明路径投影到稳定 canonical key；未知探测路径保持精确文本，禁止启发式折叠。 */
+  public lookupKey(fileName: string): string {
+    const normalized = normalizeVirtualPath(fileName);
+    const logicalPath = toLogicalPath(normalized);
+    const canonicalLogicalPath = logicalPath === null
+      ? undefined
+      : this.#canonicalByLogicalPath.get(logicalPath);
+    return canonicalLogicalPath === undefined ? normalized : toVirtualPath(canonicalLogicalPath);
   }
 }
 
-/** 虚拟文件表按 opaque host proof 查找，但枚举、realpath 与解析结果始终返回 manifest casing。 */
+/** 虚拟文件表只保留 proof 的稳定 canonical 投影，枚举、realpath 与解析返回 manifest casing。 */
 class VirtualFileMap implements ReadonlyMap<string, string> {
   readonly #canonicalByKey = new Map<string, string>();
   readonly #files = new Map<string, string>();
-  readonly #hostIdentityIndex: RequestHostPathIdentityIndex | null;
+  readonly #pathIdentityProjection: StableHostPathProjection | null;
   public readonly caseSensitiveFileNames: boolean;
-  public readonly hasRequestScopedHostIdentity: boolean;
 
   public constructor(
     caseSensitiveFileNames: boolean,
-    hostIdentityIndex: RequestHostPathIdentityIndex | null,
+    pathIdentityProjection: StableHostPathProjection | null,
   ) {
     this.caseSensitiveFileNames = caseSensitiveFileNames;
-    this.#hostIdentityIndex = hostIdentityIndex;
-    this.hasRequestScopedHostIdentity = hostIdentityIndex !== null;
+    this.#pathIdentityProjection = pathIdentityProjection;
   }
 
   public get size(): number {return this.#files.size;}
+  public get pathIdentityProjection(): StableHostPathProjection | null {
+    return this.#pathIdentityProjection;
+  }
+  public get pathIdentitySignature(): string {return this.#pathIdentityProjection?.signature ?? "";}
 
   public add(fileName: string, text: string): void {
     const canonicalPath = this.canonicalPath(fileName);
@@ -1425,7 +1506,7 @@ class VirtualFileMap implements ReadonlyMap<string, string> {
     const normalized = normalizeVirtualPath(fileName);
     const logicalPath = toLogicalPath(normalized);
     if (logicalPath !== null) {
-      const canonicalLogicalPath = this.#hostIdentityIndex?.canonicalLogicalPath(logicalPath);
+      const canonicalLogicalPath = this.#pathIdentityProjection?.canonicalLogicalPath(logicalPath);
       if (canonicalLogicalPath !== undefined) {return toVirtualPath(canonicalLogicalPath);}
     }
     return this.#canonicalByKey.get(this.#lookupKey(normalized)) ?? normalized;
@@ -1450,10 +1531,7 @@ class VirtualFileMap implements ReadonlyMap<string, string> {
   #lookupKey(fileName: string): string {
     const normalized = normalizeVirtualPath(fileName);
     if (this.caseSensitiveFileNames) {return normalized;}
-    const logicalPath = toLogicalPath(normalized);
-    const identity = logicalPath === null ? undefined : this.#hostIdentityIndex?.identity(logicalPath);
-    /** 未知/缺失路径保留精确 logical path，不得伪造或近似对象 identity。 */
-    return identity === undefined ? normalized : `\0host-object:${identity}`;
+    return this.#pathIdentityProjection?.lookupKey(normalized) ?? normalized;
   }
 }
 
@@ -1471,12 +1549,12 @@ function createVirtualFileMap(
     ...files.map((file) => normalizeRelativeGraphPath(file.path)),
     ...[...blockedResolutionPaths].map((entry) => normalizeRelativeGraphPath(entry)),
   ]);
-  const hostIdentityIndex = caseSensitiveFileNames
+  const pathIdentityProjection = caseSensitiveFileNames
     ? null
     : hostPathIdentitySidecar === undefined
       ? (() => {throw new TypeError("大小写不敏感 Analyzer 请求缺少 host proof sidecar。");})()
-      : new RequestHostPathIdentityIndex(hostPathIdentitySidecar, requiredLogicalPaths);
-  const result = new VirtualFileMap(caseSensitiveFileNames, hostIdentityIndex);
+      : new StableHostPathProjection(hostPathIdentitySidecar, requiredLogicalPaths);
+  const result = new VirtualFileMap(caseSensitiveFileNames, pathIdentityProjection);
   for (const file of files) {
     const virtualPath = toVirtualPath(file.path);
     const text = decodeUtf8(file.bytes, file.path);
@@ -1585,7 +1663,7 @@ function readVirtualDirectory(
   for (const traversalRoot of new Set(traversalRoots)) {
     for (const fileName of directoryIndex.filesWithin(traversalRoot)) {
       candidates.set(
-        normalizeHostPathIdentity(fileName, directoryIndex.caseSensitiveFileNames),
+        directoryIndex.lookupKey(fileName),
         fileName,
       );
     }
@@ -1748,10 +1826,7 @@ function findExternalPackageMetadataBoundary(
     const packageRoot = containingDirectory === "."
       ? packageTail
       : `${containingDirectory}/${packageTail}`;
-    const packageRootKey = normalizeHostPathIdentity(
-      packageRoot,
-      index.caseSensitiveFileNames,
-    );
+    const packageRootKey = index.pathIdentityKey(packageRoot);
     const candidate = index.firstCandidateByPackageRoot.get(packageRootKey);
     if (candidate !== undefined) {return candidate;}
     const manifestRoot = index.manifestRootByKey.get(packageRootKey);
@@ -1840,24 +1915,28 @@ function assertWorkerInputAdmission(
 interface ExternalPackageFallbackIndex {
   firstCandidateByPackageRoot: ReadonlyMap<string, string>;
   manifestRootByKey: ReadonlyMap<string, string>;
-  caseSensitiveFileNames: boolean;
+  pathIdentityKey: (logicalPath: string) => string;
 }
 
 /** 每请求单遍建立 package root→首候选索引，relation 回退查询保持 O(1)。 */
 function buildExternalPackageFallbackIndex(
   files: VirtualFileMap,
+  directoryIndex: VirtualDirectoryIndex,
 ): ExternalPackageFallbackIndex {
   const firstCandidateByPackageRoot = new Map<string, string>();
   const manifestRootByKey = new Map<string, string>();
+  /** package root 是目录边界；只允许命中已知目录的 canonical fallback。 */
+  const pathIdentityKey = (logicalPath: string) =>
+    directoryIndex.directoryLookupKey(toVirtualPath(logicalPath));
   for (const fileName of files.keys()) {
     cacheMetrics.externalPackageFallbackIndexBuildFileVisits += 1;
     const logicalPath = toLogicalPath(fileName);
     if (logicalPath === null) {continue;}
     const packageRoot = externalPackageRoot(logicalPath, files.caseSensitiveFileNames);
     if (packageRoot === null) {continue;}
-    const packageRootKey = normalizeHostPathIdentity(packageRoot, files.caseSensitiveFileNames);
-    if (normalizeHostPathIdentity(logicalPath, files.caseSensitiveFileNames) ===
-      normalizeHostPathIdentity(`${packageRoot}/package.json`, files.caseSensitiveFileNames)) {
+    const packageRootKey = pathIdentityKey(packageRoot);
+    if (files.lookupKey(toVirtualPath(logicalPath)) ===
+      files.lookupKey(toVirtualPath(`${packageRoot}/package.json`))) {
       manifestRootByKey.set(packageRootKey, packageRoot);
       continue;
     }
@@ -1870,9 +1949,9 @@ function buildExternalPackageFallbackIndex(
     firstCandidateByPackageRoot.delete(packageRootKey);
   }
   return Object.freeze({
-    caseSensitiveFileNames: files.caseSensitiveFileNames,
     firstCandidateByPackageRoot,
     manifestRootByKey,
+    pathIdentityKey,
   });
 }
 
