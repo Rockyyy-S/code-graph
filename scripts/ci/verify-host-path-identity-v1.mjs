@@ -26,6 +26,7 @@ const triggerPaths = [
   "apps/graph-service/src/workspace-scanner.ts",
   "ci/quality-gates.v1.yaml",
   "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
+  "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
   "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
   "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
   "packages/application/src/ports/analyzer-port.ts",
@@ -38,6 +39,7 @@ const triggerPaths = [
   "tests/unit/index-read-set.test.ts",
   "tests/unit/typescript-analyzer-worker.test.ts",
   "tests/unit/typescript-module-resolution.test.ts",
+  dedicatedContractConfigPath,
 ];
 const allowedProductionImports = new Set([
   "node:child_process",
@@ -1357,7 +1359,7 @@ export function validateMutationOracle(source) {
   }
 }
 
-/** Gate 必须阻断、固定执行本 verifier，并覆盖 producer 与 Story consumer 的二十条 owned path。 */
+/** Gate 必须阻断、固定执行本 verifier，并精确覆盖 producer、consumer 与 dedicated 配置的二十二条路径。 */
 async function validateGateRegistration() {
   const loaded = await loadQualityGateRegistry(repositoryRoot);
   const matching = loaded.registry.gates.filter(
@@ -1375,7 +1377,7 @@ async function validateGateRegistration() {
     JSON.stringify(definition.triggerPaths) !== JSON.stringify(triggerPaths)
   ) {
     throw new Error(
-      `ci/quality-gates.v1.yaml: ${gateId} 定义漂移。Fix: 恢复 blocking、固定 argv 与六条 owned triggerPaths。`,
+      `ci/quality-gates.v1.yaml: ${gateId} 定义漂移。Fix: 恢复 blocking、固定 argv 与二十二条 triggerPaths。`,
     );
   }
 }

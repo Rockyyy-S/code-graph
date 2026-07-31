@@ -157,6 +157,7 @@
           "apps/graph-service/src/workspace-scanner.ts",
           "ci/quality-gates.v1.yaml",
           "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
+          "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
           "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
           "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
           "packages/application/src/ports/analyzer-port.ts",
@@ -168,14 +169,15 @@
           "tests/unit/index-job-runtime.test.ts",
           "tests/unit/index-read-set.test.ts",
           "tests/unit/typescript-analyzer-worker.test.ts",
-          "tests/unit/typescript-module-resolution.test.ts"
+          "tests/unit/typescript-module-resolution.test.ts",
+          "vitest.contract.win32.config.ts"
         ],
         "command": ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
         "capabilityOwner": "qa",
         "blocking": true,
         "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@67b35a8c1516759c680c5835c1956cdd623f7476#host-path-identity-win32-v1"
       },
-      "gateDefinitionDigest": "19929fcba10eb40101932272abef40497ca1cd486c74288a1dfb05f63de09b99"
+      "gateDefinitionDigest": "f63e3f983bf8ed5a31278d0b801189829b7471e98d1f28e6227e58a89e0cc148"
     },
     {
       "gateDefinition": {

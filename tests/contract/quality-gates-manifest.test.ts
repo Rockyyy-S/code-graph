@@ -68,8 +68,8 @@ const expectedGates = [
     "qa",
   ],
   /**
-   * 第 24 个 gate 精确覆盖 producer 与 Story consumer 的二十条 owned path；triggerPaths 只描述影响面，
-   * 本地 architecture-required 仍必须始终执行该 blocking gate。
+   * 第 24 个 gate 精确覆盖 producer、Story consumer 与 dedicated Win32 配置的二十二条影响路径；
+   * triggerPaths 只描述影响面，本地 architecture-required 仍必须始终执行该 blocking gate。
    */
   [
     "host-path-identity-win32-v1",
@@ -84,6 +84,7 @@ const expectedGates = [
       "apps/graph-service/src/workspace-scanner.ts",
       "ci/quality-gates.v1.yaml",
       "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
+      "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
       "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
       "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
       "packages/application/src/ports/analyzer-port.ts",
@@ -96,6 +97,7 @@ const expectedGates = [
       "tests/unit/index-read-set.test.ts",
       "tests/unit/typescript-analyzer-worker.test.ts",
       "tests/unit/typescript-module-resolution.test.ts",
+      "vitest.contract.win32.config.ts",
     ],
   ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
