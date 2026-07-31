@@ -4,6 +4,7 @@ import path from "node:path";
 import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 import contractVitestConfig from "../../vitest.contract.config.js";
+import unitVitestConfig from "../../vitest.config.js";
 import { validateRepositoryContract } from "../../scripts/contracts/validate-repository-contract.mjs";
 
 const repositoryRoot = path.resolve(
@@ -13,6 +14,31 @@ const repositoryRoot = path.resolve(
 
 async function readText(relativePath: string): Promise<string> {
   return readFile(path.join(repositoryRoot, relativePath), "utf8");
+}
+
+type ProjectTestConfig = {
+  allowOnly?: boolean;
+  fileParallelism?: boolean;
+  include?: string[];
+  isolate?: boolean;
+  maxWorkers?: number | string;
+  name?: string;
+  pool?: string;
+  sequence?: { groupOrder?: number };
+  testTimeout?: number;
+};
+
+type RootTestConfig = {
+  allowOnly?: boolean;
+  fileParallelism?: boolean;
+  passWithNoTests?: boolean;
+  projects?: Array<{ test?: ProjectTestConfig }>;
+  reporters?: unknown[];
+  testTimeout?: number;
+};
+
+function getTestConfig(config: unknown): RootTestConfig {
+  return (config as { test?: RootTestConfig }).test ?? {};
 }
 
 describe("real root quality commands", () => {
@@ -45,15 +71,59 @@ describe("real root quality commands", () => {
     const unitConfig = await readText("vitest.config.ts");
     const contractConfig = await readText("vitest.contract.config.ts");
 
-    expect(unitConfig).toContain("passWithNoTests: false");
-    expect(contractConfig).toContain("passWithNoTests: false");
-    expect((contractVitestConfig as { test?: { fileParallelism?: boolean } }).test)
-      .toMatchObject({ fileParallelism: false });
+    const unitTestConfig = getTestConfig(unitVitestConfig);
+    const contractTestConfig = getTestConfig(contractVitestConfig);
+    const unitProjects = unitTestConfig.projects?.map((project) => project.test ?? {}) ?? [];
+    const contractProjects = contractTestConfig.projects?.map((project) => project.test ?? {}) ?? [];
+
+    expect(unitTestConfig).toMatchObject({
+      allowOnly: false,
+      passWithNoTests: false,
+      testTimeout: 10_000,
+    });
+    expect(contractTestConfig).toMatchObject({
+      allowOnly: false,
+      fileParallelism: false,
+      passWithNoTests: false,
+      testTimeout: 10_000,
+    });
+    expect(unitProjects).toHaveLength(2);
+    expect(contractProjects).toHaveLength(2);
+    expect(unitProjects.map((project) => project.name)).toEqual([
+      "unit",
+      "unit-process-deadline",
+    ]);
+    expect(contractProjects.map((project) => project.name)).toEqual([
+      "contract-portable",
+      "contract-graph-service-process",
+    ]);
+    expect(unitProjects.map((project) => project.sequence?.groupOrder)).toEqual([0, 1]);
+    expect(contractProjects.map((project) => project.sequence?.groupOrder)).toEqual([0, 1]);
+    expect(unitProjects[1]).toMatchObject({
+      allowOnly: false,
+      fileParallelism: false,
+      include: ["tests/unit/process-deadline.test.ts"],
+      isolate: true,
+      maxWorkers: 1,
+      pool: "forks",
+      testTimeout: 10_000,
+    });
+    expect(contractProjects[1]).toMatchObject({
+      allowOnly: false,
+      fileParallelism: false,
+      include: ["tests/contract/graph-service-process.test.ts"],
+      isolate: true,
+      maxWorkers: 1,
+      pool: "forks",
+      testTimeout: 10_000,
+    });
     expect(unitConfig).toContain("tests/fixtures/**");
     expect(contractConfig).toContain("tests/fixtures/**");
     expect(unitConfig).toContain("apps/**/*");
     expect(unitConfig).toContain("packages/**/*");
     expect(unitConfig).toContain("fail-on-skipped-reporter");
+    expect(contractConfig).toContain("fail-on-skipped-reporter");
+    expect(`${unitConfig}\n${contractConfig}`).not.toContain("passWithNoTests: true");
   });
 
   it("applies lint rules to product JavaScript and TSX", async () => {

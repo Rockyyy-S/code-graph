@@ -1,10 +1,38 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import portableVitestConfig from "../../vitest.contract.config.js";
+import unitVitestConfig from "../../vitest.config.js";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const contractRoot = path.join(repositoryRoot, "tests/contract");
+const processDeadlinePath = "tests/unit/process-deadline.test.ts";
+const graphServicePath = "tests/contract/graph-service-process.test.ts";
 const dedicatedPath: string = "tests/contract/host-path-identity-win32.test.ts";
+const unitIncludePatterns = [
+  "tests/unit/**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+  "apps/**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+  "packages/**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+];
+
+type ProjectTestConfig = {
+  allowOnly?: boolean;
+  exclude?: string[];
+  fileParallelism?: boolean;
+  include?: string[];
+  isolate?: boolean;
+  maxWorkers?: number | string;
+  name?: string;
+  pool?: string;
+  sequence?: { groupOrder?: number };
+};
+
+function getProjects(config: unknown): ProjectTestConfig[] {
+  const projects = (config as {
+    test?: { projects?: Array<{ test?: ProjectTestConfig }> };
+  }).test?.projects ?? [];
+  return projects.map((project) => project.test ?? {});
+}
 
 /** 从 dedicated 源码统计顶层业务测试，避免 verifier 计数合同随测试增删发生漂移。 */
 function countDedicatedTests(source: string): number {
@@ -27,18 +55,92 @@ async function collectContractTests(directory = contractRoot): Promise<string[]>
   return paths.flat().sort();
 }
 
+/** 枚举 unit 命令覆盖的三个源码根，确保普通与 deadline project 的并集无遗漏。 */
+async function collectUnitTests(): Promise<string[]> {
+  const roots = ["tests/unit", "apps", "packages"];
+  const testFilePattern = /\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/u;
+
+  async function collect(directory: string): Promise<string[]> {
+    const entries = await readdir(path.join(repositoryRoot, directory), { withFileTypes: true });
+    const paths = await Promise.all(entries.map(async (entry) => {
+      const relative = path.posix.join(directory.replaceAll("\\", "/"), entry.name);
+      if (entry.isDirectory()) {
+        return collect(relative);
+      }
+      return entry.isFile() && testFilePattern.test(entry.name) ? [relative] : [];
+    }));
+    return paths.flat();
+  }
+
+  return (await Promise.all(roots.map(collect))).flat().sort();
+}
+
 describe("contract execution partitions", () => {
-  it("partitions every contract file exactly once between portable and dedicated Win32", async () => {
-    const all = await collectContractTests();
-    const portable = all.filter((file) => file !== dedicatedPath);
-    const dedicated = all.filter((file) => file === dedicatedPath);
+  it("partitions every unit and contract file exactly once with sensitive projects last", async () => {
+    const all = await collectUnitTests();
+    const ordinary = all.filter((file) => file !== processDeadlinePath);
+    const deadline = all.filter((file) => file === processDeadlinePath);
+    const [ordinaryProject, deadlineProject] = getProjects(unitVitestConfig);
 
     expect(all.length).toBeGreaterThan(1);
     expect(new Set(all).size).toBe(all.length);
+    expect(deadline).toEqual([processDeadlinePath]);
+    expect([...ordinary, ...deadline].sort()).toEqual(all);
+    expect(ordinary.filter((file) => file === processDeadlinePath)).toEqual([]);
+    expect(ordinaryProject).toMatchObject({
+      allowOnly: false,
+      exclude: ["tests/fixtures/**", processDeadlinePath],
+      include: unitIncludePatterns,
+      name: "unit",
+      sequence: { groupOrder: 0 },
+    });
+    expect(deadlineProject).toMatchObject({
+      allowOnly: false,
+      exclude: ["tests/fixtures/**"],
+      fileParallelism: false,
+      include: [processDeadlinePath],
+      isolate: true,
+      maxWorkers: 1,
+      name: "unit-process-deadline",
+      pool: "forks",
+      sequence: { groupOrder: 1 },
+    });
+
+    const allContracts = await collectContractTests();
+    const portable = allContracts.filter(
+      (file) => file !== graphServicePath && file !== dedicatedPath,
+    );
+    const graphService = allContracts.filter((file) => file === graphServicePath);
+    const dedicated = allContracts.filter((file) => file === dedicatedPath);
+    const [portableProject, graphServiceProject] = getProjects(portableVitestConfig);
+
+    expect(allContracts.length).toBeGreaterThan(1);
+    expect(new Set(allContracts).size).toBe(allContracts.length);
     expect(portable.length).toBeGreaterThan(0);
+    expect(graphService).toEqual([graphServicePath]);
     expect(dedicated).toEqual([dedicatedPath]);
-    expect([...portable, ...dedicated].sort()).toEqual(all);
-    expect(portable.filter((file) => dedicated.includes(file))).toEqual([]);
+    expect([...portable, ...graphService, ...dedicated].sort()).toEqual(allContracts);
+    expect(portable.filter((file) => file === graphServicePath || file === dedicatedPath)).toEqual([]);
+    expect(graphService.filter((file) => file === dedicatedPath)).toEqual([]);
+    expect(portableProject).toMatchObject({
+      allowOnly: false,
+      exclude: ["tests/fixtures/**", graphServicePath, dedicatedPath],
+      fileParallelism: false,
+      include: ["tests/contract/**/*.test.ts"],
+      name: "contract-portable",
+      sequence: { groupOrder: 0 },
+    });
+    expect(graphServiceProject).toMatchObject({
+      allowOnly: false,
+      exclude: ["tests/fixtures/**", dedicatedPath],
+      fileParallelism: false,
+      include: [graphServicePath],
+      isolate: true,
+      maxWorkers: 1,
+      name: "contract-graph-service-process",
+      pool: "forks",
+      sequence: { groupOrder: 1 },
+    });
   });
 
   it("binds portable and dedicated configs without passWithNoTests or skipped-test escape", async () => {
@@ -55,6 +157,7 @@ describe("contract execution partitions", () => {
     expect(scripts.contract).toBe("vitest run --config vitest.contract.config.ts");
     expect(dedicatedTestCount).toBeGreaterThan(0);
     expect(portableConfig).toContain('include: ["tests/contract/**/*.test.ts"]');
+    expect(portableConfig).toContain(`"${graphServicePath}"`);
     expect(portableConfig).toContain(`"${dedicatedPath}"`);
     expect(portableConfig).toContain("passWithNoTests: false");
     expect(portableConfig).toContain("FailOnSkippedReporter");
