@@ -25,6 +25,7 @@ import {
   type WorkspaceVerificationProof,
 } from "./workspace-scanner.js";
 import {
+  ANALYZER_ROOT_METADATA_PATHS,
   prepareAnalyzerConfigFenceSynchronously,
   verifyPreparedAnalyzerConfigFenceSynchronously,
   verifyAnalyzerConfigSnapshotSynchronously,
@@ -397,6 +398,7 @@ export function createIndexReadSetProvider(
       : await options.captureAnalyzerSemanticContext(scanResult, signal);
     if (analyzerContext !== undefined) {
       await monitor?.setAnalyzerMetadataPaths?.([
+        ...ANALYZER_ROOT_METADATA_PATHS,
         ...analyzerContext.configSnapshot.consultedFiles.map((file) => file.path),
         ...(analyzerContext.configSnapshot.absentFiles ?? []),
         ...(analyzerContext.configSnapshot.absentResolutionFiles ?? []),

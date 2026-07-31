@@ -153,6 +153,53 @@ describe("index read-set provider", () => {
     provider.close?.();
   });
 
+  it("CR9-001 always installs root Analyzer metadata names into the native watcher", async () => {
+    const root = await createRoot();
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("测试前置条件不成立。");}
+    const setAnalyzerMetadataPaths = vi.fn(async () => undefined);
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const provider = createIndexReadSetProvider({
+      captureAnalyzerSemanticContext: async () => ({
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "4".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      createWorkspaceChangeMonitor: () => ({
+        close: () => undefined,
+        readSequence: () => 0n,
+        setAnalyzerMetadataPaths,
+      }),
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      statusEpoch: "epoch-cr9-001",
+      watchWorkspaceChanges: true,
+    });
+
+    await provider.capture(null);
+    expect(setAnalyzerMetadataPaths).toHaveBeenCalledWith(expect.arrayContaining([
+      "jsconfig.json",
+      "package-lock.json",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "tsconfig.json",
+      "yarn.lock",
+    ]), undefined);
+    provider.close?.();
+  });
+
   it("CR6-003 case-folds consulted metadata in the main-thread classifier", async () => {
     const root = await createRoot();
     await mkdir(path.join(root, "Configs"), { recursive: true });

@@ -27,6 +27,10 @@ export const DEFAULT_ANALYZER_WORKER_TIMEOUT_MS = 30_000;
 const MAX_NODE_TIMER_MS = 2_147_483_647;
 const MAX_WORKER_BYTE_CACHE_BYTES = 512 * 1024 * 1024;
 const MAX_WORKER_BYTE_CACHE_ENTRIES = 65_536;
+const MAX_WORKER_INPUT_PATH_BYTES = 1024 * 1024;
+const MAX_WORKER_INPUT_RAW_BYTES = 64 * 1024 * 1024;
+const MAX_WORKER_INPUT_SOURCE_FILES = 5_000;
+const MAX_WORKER_INPUT_TOTAL_FILES = 6_144;
 
 /** TypeScript Analyzer 构造选项。 */
 export interface TypeScriptAnalyzerOptions {
@@ -137,6 +141,11 @@ export class TypeScriptAnalyzer implements AnalyzerPort {
       ));
     }
     if (signal?.aborted === true) {return Promise.reject(createAbortError());}
+    try {
+      assertAnalyzerRequestAdmission(request.input);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const requestId = this.#nextRequestId;
     this.#nextRequestId += 1;
     if (!Number.isSafeInteger(this.#nextRequestId)) {
@@ -315,6 +324,41 @@ export class TypeScriptAnalyzer implements AnalyzerPort {
   }
 }
 
+/** 主线程在 Worker 创建、structured clone 与字节缓存更新前执行同一 admission。 */
+function assertAnalyzerRequestAdmission(
+  input: Pick<
+    AnalyzerConfigurationInputV1,
+    "configurationFiles" | "resolutionFiles" | "sourceFiles"
+  >,
+): void {
+  const allFiles = [
+    ...input.configurationFiles,
+    ...(input.resolutionFiles ?? []),
+    ...input.sourceFiles,
+  ];
+  if (input.sourceFiles.length > MAX_WORKER_INPUT_SOURCE_FILES ||
+    allFiles.length > MAX_WORKER_INPUT_TOTAL_FILES) {
+    throw new AnalyzerFailureError(
+      "ANALYZER_RESOURCE_LIMIT",
+      "TypeScript Analyzer Worker 输入文件数超过 admission 预算。",
+    );
+  }
+  let rawBytes = 0;
+  let pathBytes = 0;
+  for (const file of allFiles) {
+    rawBytes += file.bytes.byteLength;
+    pathBytes += Buffer.byteLength(file.path, "utf8");
+    if (!Number.isSafeInteger(rawBytes) ||
+      rawBytes > MAX_WORKER_INPUT_RAW_BYTES ||
+      pathBytes > MAX_WORKER_INPUT_PATH_BYTES) {
+      throw new AnalyzerFailureError(
+        "ANALYZER_RESOURCE_LIMIT",
+        "TypeScript Analyzer Worker 原始输入超过 admission 字节预算。",
+      );
+    }
+  }
+}
+
 /** 创建默认 TypeScript AnalyzerPort。 */
 export function createTypeScriptAnalyzer(options?: TypeScriptAnalyzerOptions): TypeScriptAnalyzer {
   return new TypeScriptAnalyzer(options);
@@ -435,9 +479,7 @@ function isModuleRelation(
     : isRecord(value.target) && value.target.kind === "external-package" &&
         value.target.versionState === "unresolved"
       ? "medium"
-      : isRecord(value.target) && value.target.kind === "internal-file" && !projectContextComplete
-        ? "medium"
-        : "high";
+      : !projectContextComplete ? "medium" : "high";
   if (value.confidence !== expectedConfidence) {return false;}
   if (value.relationType === "imports") {
     return (value.qualifier as { kind: string }).kind === "imports";

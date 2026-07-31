@@ -228,6 +228,30 @@ describe("Story 1.5 module target priority", () => {
     })).toMatchObject({ confidence: "medium", target: { id: "file-dep" } });
   });
 
+  it("CR9-003 downgrades resolved builtins and external packages for incomplete projects", () => {
+    expect(resolveModuleTarget({
+      indexingManifest: [],
+      projectContextComplete: false,
+      resolutionKind: "value",
+      sourcePath: "src/index.ts",
+      specifier: "node:path",
+      workspaceKey,
+    })).toMatchObject({ confidence: "medium", target: { id: "node:path" } });
+    expect(resolveModuleTarget({
+      indexingManifest: [],
+      projectContextComplete: false,
+      resolvedLogicalPath: "node_modules/example/index.d.ts",
+      resolvedPackage: { name: "example", version: "1.2.3" },
+      resolutionKind: "value",
+      sourcePath: "src/index.ts",
+      specifier: "example",
+      workspaceKey,
+    })).toMatchObject({
+      confidence: "medium",
+      target: { id: "pkg:npm/example@1.2.3" },
+    });
+  });
+
   it("indexes a manifest once and reuses it across relation resolution", () => {
     let pathReads = 0;
     const manifest = Array.from({ length: 200 }, (_, index) => {

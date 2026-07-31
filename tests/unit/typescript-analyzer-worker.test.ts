@@ -309,6 +309,58 @@ describe("Story 1.5 TypeScript Analyzer Worker", () => {
         }],
       },
     });
+    for (const target of [
+      { id: "node:path", kind: "node-builtin", moduleName: "path" },
+      {
+        id: "pkg:npm/example@1.2.3",
+        kind: "external-package",
+        packageName: "example",
+        packageVersion: "1.2.3",
+        versionState: "resolved",
+      },
+    ]) {
+      await expectAnalysisProtocolInvalid({
+        effectiveCompilerOptions: {
+          projectConfigurations: [{
+            configPath: "tsconfig.json",
+            configurationComplete: false,
+            effectiveCompilerOptions: {},
+            sourcePaths: ["src/index.ts"],
+          }],
+        },
+        file: {
+          ...baseFile,
+          relations: [{
+            ...relation,
+            confidence: "high",
+            target,
+          }],
+        },
+      });
+    }
+  });
+
+  it("CR9-005 rejects over-admission requests before starting the Worker", async () => {
+    const workerUrl = new URL(
+      "data:text/javascript," + encodeURIComponent([
+        "import { parentPort } from 'node:worker_threads';",
+        "parentPort.on('message', (message) => parentPort.postMessage({ requestId: message.requestId, ok: true, value: { consultedLogicalPaths: [], effectiveCompilerOptions: {}, projectConfigurations: [], resolutionCandidateLogicalPaths: [] } }));",
+      ].join("\n")),
+    );
+    const analyzer = createTypeScriptAnalyzer({ workerUrl });
+    const sourceFiles = Array.from({ length: 5_001 }, (_, index) => Object.freeze({
+      ...byteFile(`src/admission-${index}.ts`, `export const value${index} = ${index};\n`),
+      fileId: buildGraphEntityId(workspaceKey, "file", `src/admission-${index}.ts`),
+      language: "typescript" as const,
+    }));
+    try {
+      await expect(analyzer.observeConfiguration({
+        configurationFiles: [],
+        sourceFiles,
+      })).rejects.toMatchObject({ analyzerCode: "ANALYZER_RESOURCE_LIMIT" });
+    } finally {
+      await analyzer.close();
+    }
   });
 
   it("validates ok:true payloads according to the request kind", async () => {

@@ -224,6 +224,48 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       .toBe(false);
   });
 
+  it("CR9-001 seals every absent root Analyzer metadata path into the CAS snapshot", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-root-metadata-absence-"));
+    roots.push(indexingRoot);
+    const ignoreState = await createInitialIgnoreState(indexingRoot);
+    if (ignoreState.kind !== "ready") {throw new Error("测试 ignore 前置条件不成立。");}
+    const analyzer: AnalyzerPort = {
+      analyze: async () => ({ consultedLogicalPaths: [], files: [] }),
+      close: () => undefined,
+      observeConfiguration: async () => ({
+        consultedLogicalPaths: [],
+        effectiveCompilerOptions: {},
+        projectConfigurations: [],
+        resolutionCandidateLogicalPaths: [],
+      }),
+    };
+    const context = await createAnalyzerSemanticContextCapture({
+      analyzer,
+      effectiveIgnoreSnapshot: ignoreState.snapshot,
+      indexingRoot,
+      workspaceKey: "4".repeat(64),
+    })({
+      candidateFiles: [],
+      excludedPathCount: 0,
+      manifest: [],
+      manifestDigest: sha256CanonicalJson([]),
+      sourceFiles: [],
+    });
+
+    expect(context.configSnapshot.absentResolutionFiles).toEqual([
+      "jsconfig.json",
+      "package-lock.json",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "tsconfig.json",
+      "yarn.lock",
+    ]);
+    await writeFile(path.join(indexingRoot, "package.json"), "{}\n");
+    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+      .toBe(false);
+  });
+
   it("applies distinct synchronous fence limits to consulted metadata and blocked sources", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "codegraph-analyzer-boundary-"));
     roots.push(root);
@@ -476,6 +518,43 @@ describe("Story 1.5 Analyzer configuration capture", () => {
         sourcePaths: ["packages/shared/b/main.ts"],
       }),
     ]));
+  });
+
+  it("CR9-002 resolves parent and sibling includes from a nested tsconfig base path", () => {
+    const observation = observeTypeScriptConfiguration({
+      configurationEntryPaths: ["configs/app/tsconfig.json"],
+      configurationFiles: [byteFile("configs/app/tsconfig.json", JSON.stringify({
+        include: ["../../src/**/*.ts", "../shared/*.ts"],
+      }))],
+      sourceFiles: [
+        sourceFile("src/index.ts", "export const rootValue = 1;\n"),
+        sourceFile("configs/shared/helper.ts", "export const helper = 1;\n"),
+        sourceFile("configs/app/local.ts", "export const local = 1;\n"),
+      ],
+    });
+
+    expect(observation.projectConfigurations[0]?.sourcePaths).toEqual([
+      "configs/shared/helper.ts",
+      "src/index.ts",
+    ]);
+  });
+
+  it("CR9-007 enumerates a U+FFFF filename without prefix upper-bound loss", () => {
+    const observation = observeTypeScriptConfiguration({
+      configurationEntryPaths: ["src/tsconfig.json"],
+      configurationFiles: [byteFile("src/tsconfig.json", JSON.stringify({
+        include: ["*.ts"],
+      }))],
+      sourceFiles: [
+        sourceFile("src/a.ts", "export const a = 1;\n"),
+        sourceFile("src/\uffff.ts", "export const upperBoundary = 1;\n"),
+      ],
+    });
+
+    expect(observation.projectConfigurations[0]?.sourcePaths).toEqual([
+      "src/a.ts",
+      "src/\uffff.ts",
+    ]);
   });
 
   it("CR6-002 excludes descendants of dotted directory glob patterns", () => {
@@ -862,7 +941,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     ]));
   });
 
-  it("CR8-002 propagates mixed-case node_modules boundaries through package metadata and exports rejection", () => {
+  it("CR8-002 and CR9-006 preserve package boundaries and colon-bearing npm subpaths", () => {
     const config = byteFile("tsconfig.json", JSON.stringify({
       compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" },
       include: ["src/**/*.ts"],
@@ -892,6 +971,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       'import { root } from "case-pkg";',
       'import { feature } from "case-pkg/feature@debug";',
       'import "locked/private";',
+      'import "locked/feature:debug";',
       "void root; void feature;",
     ].join("\n"))];
     const input = {
@@ -938,6 +1018,61 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     expect(result.relations).not.toContainEqual(expect.objectContaining({
       target: expect.objectContaining({ id: "pkg:npm/locked@unresolved" }),
     }));
+  });
+
+  it("CR9-008 treats ENOTDIR resolution candidates as absent without swallowing I/O errors", async () => {
+    const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-resolution-enotdir-"));
+    roots.push(indexingRoot);
+    await mkdir(path.join(indexingRoot, "src"), { recursive: true });
+    await writeFile(path.join(indexingRoot, "src", "parent"), "ordinary file\n");
+    const ignoreState = await createInitialIgnoreState(indexingRoot);
+    if (ignoreState.kind !== "ready") {throw new Error("测试 ignore 前置条件不成立。");}
+    const candidate = "src/parent/package.json";
+    const analyzer: AnalyzerPort = {
+      analyze: async () => ({ consultedLogicalPaths: [], files: [] }),
+      close: () => undefined,
+      observeConfiguration: async () => ({
+        consultedLogicalPaths: [],
+        effectiveCompilerOptions: {},
+        projectConfigurations: [],
+        resolutionCandidateLogicalPaths: [candidate],
+      }),
+    };
+    const scanResult = {
+      candidateFiles: [],
+      excludedPathCount: 0,
+      manifest: [],
+      manifestDigest: sha256CanonicalJson([]),
+      sourceFiles: [],
+    };
+    const context = await createAnalyzerSemanticContextCapture({
+      analyzer,
+      effectiveIgnoreSnapshot: ignoreState.snapshot,
+      indexingRoot,
+      workspaceKey: "5".repeat(64),
+    }, {
+      readMetadataFile: async (_root, logicalPath) => {
+        if (logicalPath === candidate) {
+          throw Object.assign(new Error("not a directory"), { code: "ENOTDIR" });
+        }
+        return null;
+      },
+    })(scanResult);
+    expect(context.configSnapshot.absentResolutionFiles).toContain(candidate);
+
+    await expect(createAnalyzerSemanticContextCapture({
+      analyzer,
+      effectiveIgnoreSnapshot: ignoreState.snapshot,
+      indexingRoot,
+      workspaceKey: "6".repeat(64),
+    }, {
+      readMetadataFile: async (_root, logicalPath) => {
+        if (logicalPath === candidate) {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        }
+        return null;
+      },
+    })(scanResult)).rejects.toMatchObject({ analyzerCode: "ANALYZER_CONFIG_INVALID" });
   });
 
   it("CR6-013 accepts fatal-decoded UTF-16LE and UTF-16BE BOM source snapshots", () => {
@@ -2109,7 +2244,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     expect(stats.sourceProjectMembershipVisits).toBe(0);
   });
 
-  it("stops SourceFile construction at the unique MAX+1 object", () => {
+  it("CR9-005 rejects source-count overflow before constructing any SourceFile", () => {
     resetWorkerAnalysisCacheForTests();
     const sources = Array.from(
       { length: WORKER_ANALYSIS_CACHE_LIMITS.maxSourceFileObjectCount + 1 },
@@ -2121,8 +2256,26 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       sourceFiles: sources,
     })).toThrow(/SourceFile|对象|预算/u);
     expect(readWorkerAnalysisCacheStatsForTests().sourceFileObjectCreationPeak)
-      .toBe(WORKER_ANALYSIS_CACHE_LIMITS.maxSourceFileObjectCount + 1);
+      .toBe(0);
   }, 30_000);
+
+  it("CR9-005 rejects raw-byte overflow before decoding any input", () => {
+    resetWorkerAnalysisCacheForTests();
+    const oversized = Object.freeze({
+      ...sourceFile("src/oversized.ts", ""),
+      bytes: { byteLength: 64 * 1024 * 1024 + 1 } as Uint8Array,
+    });
+
+    let failure: unknown;
+    try {
+      observeTypeScriptConfiguration({ configurationFiles: [], sourceFiles: [oversized] });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ workerCode: "ANALYZER_RESOURCE_LIMIT" });
+    expect(readWorkerAnalysisCacheStatsForTests().directoryIndexBuildFileVisits).toBe(0);
+    expect(readWorkerAnalysisCacheStatsForTests().sourceFileObjectCreationPeak).toBe(0);
+  });
 
   it("stops a growing metadata read after exactly MAX+1 sentinel bytes", async () => {
     const requested: number[] = [];

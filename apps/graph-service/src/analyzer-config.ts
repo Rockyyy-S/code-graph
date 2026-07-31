@@ -45,6 +45,16 @@ export const MAX_ANALYZER_RESOLUTION_CANDIDATES = 4_096;
 
 /** 主进程在插入候选时限制规范路径 UTF-8 总字节数。 */
 export const MAX_ANALYZER_RESOLUTION_CANDIDATE_PATH_BYTES = 512 * 1024;
+/** 根级 Analyzer 元数据无论存在或缺失都必须进入同一配置 read-set。 */
+export const ANALYZER_ROOT_METADATA_PATHS = Object.freeze([
+  "jsconfig.json",
+  "package-lock.json",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "tsconfig.json",
+  "yarn.lock",
+] as const);
 
 /** 实际回送 Worker 的解析元数据文件数上限。 */
 export const MAX_ANALYZER_RESOLUTION_FILES = 1_024;
@@ -288,6 +298,10 @@ export function createAnalyzerSemanticContextCapture(options: {
       signal,
       readMetadataFile,
     );
+    const configuredRootPaths = new Set(configurationFiles.map((file) => file.path));
+    const absentRootMetadataPaths = ANALYZER_ROOT_METADATA_PATHS.filter(
+      (logicalPath) => !configuredRootPaths.has(logicalPath),
+    );
     const configurationEntryPaths = chooseAuthoritativeConfigurationEntries(configurationFiles);
     const caseSensitiveFileNames = dependencies.caseSensitiveFileNames ??
       isFileSystemCaseSensitive(options.indexingRoot);
@@ -384,7 +398,13 @@ export function createAnalyzerSemanticContextCapture(options: {
           }
           continue;
         }
-        const file = await readMetadataFile(options.indexingRoot, logicalPath, signal);
+        let file: AnalyzerByteFileV1 | null;
+        try {
+          file = await readMetadataFile(options.indexingRoot, logicalPath, signal);
+        } catch (error) {
+          if (!isMissingPathError(error)) {throw error;}
+          file = null;
+        }
         if (file === null) {
           absentResolutionPaths.set(logicalPathKey, logicalPath);
           continue;
@@ -445,9 +465,12 @@ export function createAnalyzerSemanticContextCapture(options: {
       analyzerKind: "typescript",
       analyzerVersion: "6.0.3",
       absentFiles: requiredMissingFiles,
-      absentResolutionFiles: [...absentResolutionPaths]
-        .filter(([logicalPathKey]) => !requiredMissingSet.has(logicalPathKey))
-        .map(([, logicalPath]) => logicalPath),
+      absentResolutionFiles: [
+        ...absentRootMetadataPaths,
+        ...[...absentResolutionPaths]
+          .filter(([logicalPathKey]) => !requiredMissingSet.has(logicalPathKey))
+          .map(([, logicalPath]) => logicalPath),
+      ],
       blockedResolutionFiles: [...blockedResolutionByPath.values()],
       consultedFiles,
       effectiveCompilerOptions: observation.effectiveCompilerOptions,
@@ -497,15 +520,7 @@ export async function collectAnalyzerMetadataFiles(
   readMetadataFile: NonNullable<AnalyzerConfigCaptureDependencies["readMetadataFile"]> =
     readTrustedMetadataFile,
 ): Promise<readonly AnalyzerByteFileV1[]> {
-  const queue = [
-    "jsconfig.json",
-    "package-lock.json",
-    "package.json",
-    "pnpm-lock.yaml",
-    "pnpm-workspace.yaml",
-    "tsconfig.json",
-    "yarn.lock",
-  ];
+  const queue = [...ANALYZER_ROOT_METADATA_PATHS];
   const seen = new Set<string>();
   const files: AnalyzerByteFileV1[] = [];
   let totalBytes = 0;
@@ -848,10 +863,11 @@ function sameFileIdentity(
     left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
-/** fs 缺失错误只表示候选元数据不存在。 */
+/** ENOENT 与祖先普通文件产生的 ENOTDIR 都表示该逻辑候选当前不存在。 */
 function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error &&
-    (error as { code?: unknown }).code === "ENOENT";
+    ((error as { code?: unknown }).code === "ENOENT" ||
+      (error as { code?: unknown }).code === "ENOTDIR");
 }
 
 /** 在每个异步边界传播 Job 取消。 */

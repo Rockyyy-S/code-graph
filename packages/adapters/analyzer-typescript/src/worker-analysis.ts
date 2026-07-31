@@ -16,11 +16,21 @@ import {
   type AnalysisDiagnosticV1,
 } from "@codegraph/domain";
 import { extractModuleSyntaxFacts } from "./module-syntax.js";
-import { resolveModuleTarget } from "./module-target-resolver.js";
+import {
+  packageNameFromNpmSpecifier,
+  resolveModuleTarget,
+} from "./module-target-resolver.js";
 
 const VIRTUAL_ROOT = "/workspace";
 export const MAX_WORKER_RESOLUTION_CANDIDATES = 4_096;
 export const MAX_WORKER_RESOLUTION_CANDIDATE_PATH_BYTES = 512 * 1024;
+/** 单请求原始输入在解码与 Program 构建前执行的确定性 admission 上限。 */
+export const WORKER_INPUT_LIMITS = Object.freeze({
+  maxPathBytesPerRequest: 1024 * 1024,
+  maxRawBytesPerRequest: 64 * 1024 * 1024,
+  maxSourceFilesPerRequest: 5_000,
+  maxTotalFilesPerRequest: 6_144,
+});
 export const WORKER_ANALYSIS_CACHE_LIMITS = Object.freeze({
   maxDirectoryEntryCount: 16_384,
   maxProgramCount: 51,
@@ -167,6 +177,7 @@ export function resetWorkerAnalysisCacheForTests(): void {
 export function observeTypeScriptConfiguration(
   input: AnalyzerConfigurationInputV1,
 ): AnalyzerConfigurationObservationV1 {
+  assertWorkerInputAdmission(input);
   const allFiles = [
     ...input.configurationFiles,
     ...(input.resolutionFiles ?? []),
@@ -299,6 +310,7 @@ function discoverResolutionCandidatePaths(
  * Worker 不读取任意工作区物理路径，也不执行 plugin、transformer 或 package scripts。
  */
 export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutputV1 {
+  assertWorkerInputAdmission(input);
   if ((input.configSnapshot.absentFiles?.length ?? 0) > 0) {
     throw new TypeError("Analyzer 配置闭包仍存在缺失文件，拒绝生成模块事实。");
   }
@@ -954,10 +966,13 @@ class VirtualDirectoryIndex {
     const normalized = normalizeVirtualPath(directoryName).replace(/\/$/u, "") || "/";
     const prefix = `${this.#lookupKey(normalized).replace(/\/$/u, "")}/`;
     const start = lowerBound(this.#fileKeys, prefix);
-    const end = lowerBound(this.#fileKeys, `${prefix}\uffff`);
-    return this.#fileKeys.slice(start, end)
-      .map((key) => this.#canonicalFiles.get(key)!)
-      .sort(compareText);
+    const descendants: string[] = [];
+    for (let index = start; index < this.#fileKeys.length; index += 1) {
+      const key = this.#fileKeys[index]!;
+      if (!key.startsWith(prefix)) {break;}
+      descendants.push(this.#canonicalFiles.get(key)!);
+    }
+    return descendants.sort(compareText);
   }
 
   /** 所有虚拟目录 key 与 VirtualFileMap 使用完全相同的 host 大小写语义。 */
@@ -1468,24 +1483,38 @@ function readVirtualDirectory(
     normalizeVirtualPattern(normalizedRoot, pattern));
   const excludePatterns = (excludes ?? []).map((pattern) =>
     normalizeVirtualPattern(normalizedRoot, pattern));
-  return directoryIndex.filesWithin(normalizedRoot).filter((fileName) => {
+  const traversalRoots = includePatterns.length === 0
+    ? [normalizedRoot]
+    : includePatterns.map((pattern) => virtualPatternTraversalRoot(directoryIndex, pattern));
+  const candidates = new Map<string, string>();
+  for (const traversalRoot of new Set(traversalRoots)) {
+    for (const fileName of directoryIndex.filesWithin(traversalRoot)) {
+      candidates.set(
+        normalizeHostPathIdentity(fileName, directoryIndex.caseSensitiveFileNames),
+        fileName,
+      );
+    }
+  }
+  return [...candidates.values()].filter((fileName) => {
     cacheMetrics.configReadDirectoryFileVisits += 1;
     const normalizedFile = normalizeVirtualPath(fileName);
-    if (!isWithinDirectory(
-      normalizedFile,
-      normalizedRoot,
-      directoryIndex.caseSensitiveFileNames,
-    )) {return false;}
     if (extensions !== undefined && !extensions.some((extension) =>
       caseAwareText(normalizedFile, directoryIndex.caseSensitiveFileNames)
         .endsWith(caseAwareText(extension, directoryIndex.caseSensitiveFileNames)))) {
       return false;
     }
     if (depth !== undefined) {
-      const rootSegmentCount = normalizedRoot.split("/").filter(Boolean).length;
-      const fileSegmentCount = normalizedFile.split("/").filter(Boolean).length;
-      const directoryDepth = Math.max(0, fileSegmentCount - rootSegmentCount - 1);
-      if (directoryDepth > depth) {return false;}
+      const withinDepth = traversalRoots.some((traversalRoot) => {
+        if (!isWithinDirectory(
+          normalizedFile,
+          traversalRoot,
+          directoryIndex.caseSensitiveFileNames,
+        )) {return false;}
+        const rootSegmentCount = traversalRoot.split("/").filter(Boolean).length;
+        const fileSegmentCount = normalizedFile.split("/").filter(Boolean).length;
+        return Math.max(0, fileSegmentCount - rootSegmentCount - 1) <= depth;
+      });
+      if (!withinDepth) {return false;}
     }
     if (excludePatterns.some((pattern) => matchesVirtualPattern(
       normalizedFile,
@@ -1503,6 +1532,24 @@ function readVirtualDirectory(
         directoryIndex.caseSensitiveFileNames,
       ));
   }).sort(compareText);
+}
+
+/** 从 include glob 的固定前缀提取最窄安全枚举根，允许父级与兄弟目录。 */
+function virtualPatternTraversalRoot(
+  directoryIndex: VirtualDirectoryIndex,
+  pattern: string,
+): string {
+  const wildcardIndex = pattern.search(/[?*]/u);
+  if (wildcardIndex < 0) {
+    return directoryIndex.directoryExists(pattern)
+      ? pattern
+      : path.posix.dirname(pattern);
+  }
+  const fixedPrefix = pattern.slice(0, wildcardIndex);
+  if (fixedPrefix.endsWith("/")) {
+    return fixedPrefix.replace(/\/+$/u, "") || "/";
+  }
+  return path.posix.dirname(fixedPrefix);
 }
 
 /** 相对 glob 以当前配置目录为基准，绝对虚拟 glob 保持原位。 */
@@ -1596,15 +1643,9 @@ function findExternalPackageMetadataBoundary(
   containingFile: string,
 ): string | undefined {
   cacheMetrics.externalPackageFallbackLookups += 1;
-  if (specifier.length === 0 || specifier.startsWith(".") || specifier.startsWith("/") ||
-    specifier.startsWith("#") || specifier.includes(":")) {
-    return undefined;
-  }
-  const segments = specifier.split("/");
-  const packageSegments = specifier.startsWith("@") ? segments.slice(0, 2) : segments.slice(0, 1);
-  if (packageSegments.length === 0 || packageSegments.some((segment) => segment.length === 0)) {
-    return undefined;
-  }
+  const packageName = packageNameFromNpmSpecifier(specifier);
+  if (packageName === null) {return undefined;}
+  const packageSegments = packageName.split("/");
   const packageTail = ["node_modules", ...packageSegments].join("/");
   let containingDirectory = path.posix.dirname(normalizeRelativeGraphPath(containingFile));
   while (true) {
@@ -1622,6 +1663,51 @@ function findExternalPackageMetadataBoundary(
     if (manifestRoot !== undefined) {return `${manifestRoot}/package.json`;}
     if (containingDirectory === ".") {return undefined;}
     containingDirectory = path.posix.dirname(containingDirectory);
+  }
+}
+
+/** 在解码、目录索引与 AST 构建前按数量、原始字节和路径字节拒绝超限请求。 */
+function assertWorkerInputAdmission(
+  input: Pick<
+    AnalyzerConfigurationInputV1,
+    "configurationFiles" | "resolutionFiles" | "sourceFiles"
+  >,
+): void {
+  const allFiles = [
+    ...input.configurationFiles,
+    ...(input.resolutionFiles ?? []),
+    ...input.sourceFiles,
+  ];
+  if (input.sourceFiles.length > WORKER_INPUT_LIMITS.maxSourceFilesPerRequest ||
+    allFiles.length > WORKER_INPUT_LIMITS.maxTotalFilesPerRequest) {
+    throw new WorkerAnalysisError(
+      "ANALYZER_RESOURCE_LIMIT",
+      "TypeScript Analyzer Worker 输入文件数超过 admission 预算。",
+    );
+  }
+  let rawBytes = 0;
+  let pathBytes = 0;
+  for (const file of allFiles) {
+    const byteLength = file.bytes?.byteLength;
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new WorkerAnalysisError(
+        "ANALYZER_PROTOCOL_INVALID",
+        "TypeScript Analyzer Worker 输入字节长度不合法。",
+      );
+    }
+    rawBytes += byteLength;
+    pathBytes += utf8BytesBounded(
+      file.path,
+      Math.max(0, WORKER_INPUT_LIMITS.maxPathBytesPerRequest - pathBytes),
+    );
+    if (!Number.isSafeInteger(rawBytes) ||
+      rawBytes > WORKER_INPUT_LIMITS.maxRawBytesPerRequest ||
+      pathBytes > WORKER_INPUT_LIMITS.maxPathBytesPerRequest) {
+      throw new WorkerAnalysisError(
+        "ANALYZER_RESOURCE_LIMIT",
+        "TypeScript Analyzer Worker 原始输入超过 admission 字节预算。",
+      );
+    }
   }
 }
 

@@ -45,7 +45,7 @@ export interface ResolvedModuleTargetV1 {
 export function resolveModuleTarget(options: ResolveModuleTargetOptions): ResolvedModuleTargetV1 {
   const resolvedConfidence: ModuleConfidenceV1 = options.resolutionKind === "dynamic"
     ? "low"
-    : "high";
+    : options.projectContextComplete === false ? "medium" : "high";
   if (isBuiltin(options.specifier)) {
     return Object.freeze({
       confidence: resolvedConfidence,
@@ -179,7 +179,7 @@ function isRelativeSpecifier(specifier: string): boolean {
 }
 
 /** 封闭校验 npm package/subpath，并只返回 package name 作为 purl 身份。 */
-function packageNameFromNpmSpecifier(specifier: string): string | null {
+export function packageNameFromNpmSpecifier(specifier: string): string | null {
   if (
     specifier.length === 0 || specifier.startsWith("#") || specifier.startsWith("node:") ||
     specifier.includes("\\") || specifier.includes("?") || specifier.includes("#") ||
