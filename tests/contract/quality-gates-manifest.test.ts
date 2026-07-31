@@ -68,7 +68,7 @@ const expectedGates = [
     "qa",
   ],
   /**
-   * 第 24 个 gate 精确覆盖六条平台 owned path；triggerPaths 只描述影响面，
+   * 第 24 个 gate 精确覆盖 producer 与 Story consumer 的二十条 owned path；triggerPaths 只描述影响面，
    * 本地 architecture-required 仍必须始终执行该 blocking gate。
    */
   [
@@ -76,12 +76,26 @@ const expectedGates = [
     ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
     "qa",
     [
+      "apps/graph-service/src/analyzer-config.ts",
       "apps/graph-service/src/host-path-identity.ts",
+      "apps/graph-service/src/index-job-runtime.ts",
+      "apps/graph-service/src/index-read-set.ts",
+      "apps/graph-service/src/index.ts",
+      "apps/graph-service/src/workspace-scanner.ts",
       "ci/quality-gates.v1.yaml",
+      "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
+      "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
+      "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+      "packages/application/src/ports/analyzer-port.ts",
       "scripts/ci/verify-host-path-identity-v1.mjs",
       "tests/contract/host-path-identity-win32.test.ts",
       "tests/contract/quality-gates-manifest.test.ts",
+      "tests/unit/analyzer-config-capture.test.ts",
       "tests/unit/host-path-identity.test.ts",
+      "tests/unit/index-job-runtime.test.ts",
+      "tests/unit/index-read-set.test.ts",
+      "tests/unit/typescript-analyzer-worker.test.ts",
+      "tests/unit/typescript-module-resolution.test.ts",
     ],
   ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
@@ -133,6 +147,20 @@ afterEach(async () => {
 
 describe("quality-gates.v1 registry", () => {
   it("locks the Story 1.5 verifier unit and process regression manifest", () => {
+    const originalUnitTests = [
+      "tests/unit/analyzer-config-capture.test.ts",
+      "tests/unit/analyzer-config-snapshot.test.ts",
+      "tests/unit/composite-graph-patch.test.ts",
+      "tests/unit/index-job-runtime.test.ts",
+      "tests/unit/index-read-set.test.ts",
+      "tests/unit/module-dependency-domain.test.ts",
+      "tests/unit/module-fact-batch.test.ts",
+      "tests/unit/sqlite-graph-store.test.ts",
+      "tests/unit/sqlite-module-dependencies.test.ts",
+      "tests/unit/typescript-analyzer-worker.test.ts",
+      "tests/unit/typescript-module-resolution.test.ts",
+      "tests/unit/typescript-module-syntax.test.ts",
+    ] as const;
     expect(TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST).toEqual({
       buildFilters: [
         "@codegraph/domain",
@@ -145,22 +173,33 @@ describe("quality-gates.v1 registry", () => {
         "@codegraph/graph-service",
       ],
       contractTests: ["tests/contract/graph-service-process.test.ts"],
-      unitTests: [
-        "tests/unit/analyzer-config-capture.test.ts",
-        "tests/unit/analyzer-config-snapshot.test.ts",
-        "tests/unit/composite-graph-patch.test.ts",
-        "tests/unit/index-job-runtime.test.ts",
-        "tests/unit/index-read-set.test.ts",
-        "tests/unit/module-dependency-domain.test.ts",
-        "tests/unit/module-fact-batch.test.ts",
-        "tests/unit/sqlite-graph-store.test.ts",
-        "tests/unit/sqlite-module-dependencies.test.ts",
-        "tests/unit/typescript-analyzer-worker.test.ts",
-        "tests/unit/typescript-module-resolution.test.ts",
-        "tests/unit/typescript-module-syntax.test.ts",
+      unitShards: [
+        {
+          expectedTestCount: 257,
+          shardId: "default-unit",
+          tests: originalUnitTests.filter(
+            (testPath) => testPath !== "tests/unit/sqlite-module-dependencies.test.ts",
+          ),
+        },
+        {
+          expectedTestCount: 24,
+          shardId: "sqlite-module-dependencies",
+          tests: ["tests/unit/sqlite-module-dependencies.test.ts"],
+        },
       ],
       version: 1,
     });
+
+    const unitShards = TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards;
+    const unitTests = unitShards.flatMap(({ tests }) => tests);
+    expect(unitShards.map(({ shardId }) => shardId)).toEqual([
+      "default-unit",
+      "sqlite-module-dependencies",
+    ]);
+    expect(new Set(unitTests).size).toBe(unitTests.length);
+    expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
+    expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
+      .toBe(281);
   });
 
   it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {

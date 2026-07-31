@@ -485,7 +485,7 @@ describe("host path identity broker", () => {
     expect(result).toMatchObject({ classification, ok: false });
   });
 
-  it("requires exactly one dedicated file with four passed business tests", () => {
+  it("requires exactly one dedicated file with five passed business tests", () => {
     const result = classifyDedicatedVitestResult({
       output: [],
       pid: 1,
@@ -495,11 +495,11 @@ describe("host path identity broker", () => {
       stdout: JSON.stringify({
         numFailedTestSuites: 0,
         numFailedTests: 0,
-        numPassedTests: 4,
+        numPassedTests: 5,
         numPendingTests: 0,
         numTodoTests: 0,
         numTotalTestSuites: 1,
-        numTotalTests: 4,
+        numTotalTests: 5,
         success: true,
         testResults: [{
           assertionResults: [],
@@ -515,10 +515,10 @@ describe("host path identity broker", () => {
       ok: true,
       suite: {
         numFailedTests: 0,
-        numPassedTests: 4,
+        numPassedTests: 5,
         numPendingTests: 0,
         numTodoTests: 0,
-        numTotalTests: 4,
+        numTotalTests: 5,
       },
     });
   });

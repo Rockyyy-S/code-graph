@@ -20,6 +20,7 @@ import {
   normalizeRelativeGraphPath,
   type AnalyzerByteFileV1,
   type AnalyzerConfigSnapshotV1,
+  type AnalyzerHostPathIdentitySidecarV1,
   type AnalyzerPort,
   type AnalyzerSourceFileV1,
 } from "@codegraph/application";
@@ -30,6 +31,10 @@ import {
   MAX_SOURCE_FILE_BYTES,
   type WorkspaceScanResult,
 } from "./workspace-scanner.js";
+import type {
+  HostPathCandidateResolutionV1,
+  HostPathIdentityCandidateV1,
+} from "./host-path-identity.js";
 
 /** 单个受控 Analyzer 元数据文件的最大字节数。 */
 export const MAX_ANALYZER_METADATA_FILE_BYTES = 2 * 1024 * 1024;
@@ -107,6 +112,8 @@ export interface PreparedAnalyzerContextV1 {
   configSnapshot: AnalyzerConfigSnapshotV1;
   configurationEntryPaths: readonly string[];
   configurationFiles: readonly AnalyzerByteFileV1[];
+  /** 请求级 proof sidecar 只随 capture 进入 Worker，不进入 read-set 或任何持久化摘要。 */
+  hostPathIdentitySidecar?: AnalyzerHostPathIdentitySidecarV1;
   inputDigest: string;
   resolutionFiles: readonly AnalyzerByteFileV1[];
   sourceFiles: readonly AnalyzerSourceFileV1[];
@@ -285,6 +292,7 @@ export function verifyPreparedAnalyzerConfigFenceSynchronously(
 export function createAnalyzerSemanticContextCapture(options: {
   analyzer: AnalyzerPort;
   effectiveIgnoreSnapshot: EffectiveIgnoreSnapshotV1;
+  hostPathIdentityBroker?: AnalyzerHostPathIdentityBrokerPort;
   indexingRoot: string;
   workspaceKey: string;
 }, dependencies: AnalyzerConfigCaptureDependencies = {}): CaptureAnalyzerSemanticContext {
@@ -305,8 +313,6 @@ export function createAnalyzerSemanticContextCapture(options: {
     const configurationEntryPaths = chooseAuthoritativeConfigurationEntries(configurationFiles);
     const caseSensitiveFileNames = dependencies.caseSensitiveFileNames ??
       isFileSystemCaseSensitive(options.indexingRoot);
-    const hostPathKey = (logicalPath: string) =>
-      normalizeHostPathIdentity(normalizeRelativeGraphPath(logicalPath), caseSensitiveFileNames);
     const sourceSnapshots = scanResult.sourceFiles ?? [];
     if (sourceSnapshots.length !== scanResult.manifest.length) {
       throw new Error("Analyzer 缺少与 manifest 同次可信读取绑定的源码字节快照。");
@@ -318,17 +324,70 @@ export function createAnalyzerSemanticContextCapture(options: {
       language: languageFromPath(file.path),
       path: file.path,
     })));
+    const presentHostCandidates = new Map<string, AnalyzerHostPathCandidateState>();
+    const scannerCandidates = new Map(
+      (scanResult.sourceHostPathCandidates ?? []).map((candidate) => [
+        candidate.logicalPath,
+        candidate,
+      ]),
+    );
+    for (const file of sourceFiles) {
+      const scannerCandidate = scannerCandidates.get(file.path);
+      if (!caseSensitiveFileNames && scannerCandidate === undefined) {
+        throw new Error("Analyzer 缺少 scanner 同次读取产生的宿主路径断言。");
+      }
+      presentHostCandidates.set(file.path, {
+        absolutePath: scannerCandidate?.absolutePath ??
+          path.join(options.indexingRoot, ...file.path.split("/")),
+        logicalPath: file.path,
+        role: "source",
+      });
+    }
+    for (const file of configurationFiles) {
+      presentHostCandidates.set(file.path, {
+        absolutePath: path.join(options.indexingRoot, ...file.path.split("/")),
+        logicalPath: file.path,
+        role: "configuration",
+      });
+    }
     const resolutionByPath = new Map<string, AnalyzerByteFileV1>();
     const blockedResolutionByPath = new Map<string, { contentHash: string; path: string }>();
     const absentResolutionPaths = new Map<string, string>();
     const attemptedCandidates = new Set<string>();
     let attemptedCandidatePathBytes = 0;
-    const manifestPaths = new Set(sourceFiles.map((file) => hostPathKey(file.path)));
-    const configurationPaths = new Set(configurationFiles.map((file) => hostPathKey(file.path)));
+    const manifestPaths = new Set(sourceFiles.map((file) => file.path));
+    const configurationPaths = new Set(configurationFiles.map((file) => file.path));
     let totalBytes = configurationFiles.reduce((sum, file) => sum + file.bytes.byteLength, 0);
     let observation: Awaited<ReturnType<AnalyzerPort["observeConfiguration"]>> | undefined;
     let graphDepth = 0;
+    let hostPathIdentitySidecar: AnalyzerHostPathIdentitySidecarV1 | undefined;
     while (true) {
+      hostPathIdentitySidecar = await captureAnalyzerHostPathIdentitySidecar(
+        caseSensitiveFileNames,
+        options.hostPathIdentityBroker,
+        presentHostCandidates,
+      );
+      if (hostPathIdentitySidecar !== undefined) {
+        const canonicalByPath = new Map(hostPathIdentitySidecar.entries.map((entry) => [
+          entry.logicalPath,
+          entry.canonicalLogicalPath,
+        ]));
+        for (const [logicalPath, file] of [...resolutionByPath]) {
+          if (canonicalByPath.get(logicalPath) !== logicalPath) {
+            resolutionByPath.delete(logicalPath);
+            totalBytes -= file.bytes.byteLength;
+            const candidate = presentHostCandidates.get(logicalPath);
+            if (candidate !== undefined) {candidate.role = "alias";}
+          }
+        }
+        for (const logicalPath of [...blockedResolutionByPath.keys()]) {
+          if (canonicalByPath.get(logicalPath) !== logicalPath) {
+            blockedResolutionByPath.delete(logicalPath);
+            const candidate = presentHostCandidates.get(logicalPath);
+            if (candidate !== undefined) {candidate.role = "alias";}
+          }
+        }
+      }
       const resolutionFiles = [...resolutionByPath.values()]
         .sort((left, right) => compareText(left.path, right.path));
       observation = await options.analyzer.observeConfiguration({
@@ -338,16 +397,16 @@ export function createAnalyzerSemanticContextCapture(options: {
         caseSensitiveFileNames,
         configurationEntryPaths,
         configurationFiles,
+        ...(hostPathIdentitySidecar === undefined ? {} : { hostPathIdentitySidecar }),
         resolutionFiles,
         sourceFiles,
       }, signal);
       let addedFiles = 0;
       for (const candidate of observation.resolutionCandidateLogicalPaths) {
         const logicalPath = normalizeRelativeGraphPath(candidate);
-        const logicalPathKey = hostPathKey(logicalPath);
         if (
-          attemptedCandidates.has(logicalPathKey) || manifestPaths.has(logicalPathKey) ||
-          configurationPaths.has(logicalPathKey)
+          attemptedCandidates.has(logicalPath) || manifestPaths.has(logicalPath) ||
+          configurationPaths.has(logicalPath)
         ) {continue;}
         if (attemptedCandidates.size >= MAX_ANALYZER_RESOLUTION_CANDIDATES) {
           throw new AnalyzerFailureError(
@@ -363,7 +422,7 @@ export function createAnalyzerSemanticContextCapture(options: {
             "Analyzer 模块解析候选路径字节数超过安全预算。",
           );
         }
-        attemptedCandidates.add(logicalPathKey);
+        attemptedCandidates.add(logicalPath);
         attemptedCandidatePathBytes += candidateBytes;
         /** root 内受支持源码必须来自 scanner manifest，不能通过 metadata broker 旁路进入。 */
         if (isSupportedSourceFile(logicalPath) &&
@@ -378,13 +437,18 @@ export function createAnalyzerSemanticContextCapture(options: {
             inspectBlockedResolutionFile,
           );
           if (blocked === null) {
-            absentResolutionPaths.set(logicalPathKey, logicalPath);
+            absentResolutionPaths.set(logicalPath, logicalPath);
           } else {
-            absentResolutionPaths.delete(logicalPathKey);
+            absentResolutionPaths.delete(logicalPath);
             totalBytes += blocked.byteLength;
-            blockedResolutionByPath.set(logicalPathKey, {
+            blockedResolutionByPath.set(logicalPath, {
               contentHash: blocked.contentHash,
               path: blocked.path,
+            });
+            presentHostCandidates.set(logicalPath, {
+              absolutePath: path.join(options.indexingRoot, ...logicalPath.split("/")),
+              logicalPath,
+              role: "blocked",
             });
             analyzerCaptureMetrics.blockedFilePeakCount = Math.max(
               analyzerCaptureMetrics.blockedFilePeakCount,
@@ -406,10 +470,10 @@ export function createAnalyzerSemanticContextCapture(options: {
           file = null;
         }
         if (file === null) {
-          absentResolutionPaths.set(logicalPathKey, logicalPath);
+          absentResolutionPaths.set(logicalPath, logicalPath);
           continue;
         }
-        absentResolutionPaths.delete(logicalPathKey);
+        absentResolutionPaths.delete(logicalPath);
         totalBytes += file.bytes.byteLength;
         if (totalBytes > MAX_ANALYZER_METADATA_TOTAL_BYTES) {
           throw new AnalyzerFailureError(
@@ -417,7 +481,12 @@ export function createAnalyzerSemanticContextCapture(options: {
             "Analyzer 配置与解析元数据总字节数超过安全预算。",
           );
         }
-        resolutionByPath.set(hostPathKey(file.path), file);
+        resolutionByPath.set(file.path, file);
+        presentHostCandidates.set(file.path, {
+          absolutePath: path.join(options.indexingRoot, ...file.path.split("/")),
+          logicalPath: file.path,
+          role: "resolution",
+        });
         addedFiles += 1;
         if (resolutionByPath.size + blockedResolutionByPath.size >
           MAX_ANALYZER_RESOLUTION_FILES) {
@@ -447,10 +516,13 @@ export function createAnalyzerSemanticContextCapture(options: {
     const resolutionFiles = Object.freeze([...resolutionByPath.values()]
       .sort((left, right) => compareText(left.path, right.path)));
     const configuredByPath = new Map(
-      [...configurationFiles, ...resolutionFiles].map((file) => [hostPathKey(file.path), file]),
+      [...configurationFiles, ...resolutionFiles].map((file) => [file.path, file]),
     );
     for (const consultedPath of observation.consultedLogicalPaths) {
-      if (!configuredByPath.has(hostPathKey(consultedPath))) {
+      const canonicalPath = hostPathIdentitySidecar?.entries.find(
+        (entry) => entry.logicalPath === consultedPath,
+      )?.canonicalLogicalPath ?? consultedPath;
+      if (!configuredByPath.has(canonicalPath)) {
         throw new Error("Worker 报告了尚未进入两阶段封口的配置路径。");
       }
     }
@@ -460,7 +532,7 @@ export function createAnalyzerSemanticContextCapture(options: {
       path: file.path,
     }));
     const requiredMissingFiles = observation.requiredMissingLogicalPaths ?? [];
-    const requiredMissingSet = new Set(requiredMissingFiles.map(hostPathKey));
+    const requiredMissingSet = new Set(requiredMissingFiles);
     const created = createAnalyzerConfigSnapshot({
       analyzerKind: "typescript",
       analyzerVersion: "6.0.3",
@@ -468,7 +540,7 @@ export function createAnalyzerSemanticContextCapture(options: {
       absentResolutionFiles: [
         ...absentRootMetadataPaths,
         ...[...absentResolutionPaths]
-          .filter(([logicalPathKey]) => !requiredMissingSet.has(logicalPathKey))
+          .filter(([logicalPath]) => !requiredMissingSet.has(logicalPath))
           .map(([, logicalPath]) => logicalPath),
       ],
       blockedResolutionFiles: [...blockedResolutionByPath.values()],
@@ -491,6 +563,7 @@ export function createAnalyzerSemanticContextCapture(options: {
       configSnapshot: created.snapshot,
       configurationEntryPaths,
       configurationFiles,
+      ...(hostPathIdentitySidecar === undefined ? {} : { hostPathIdentitySidecar }),
       inputDigest,
       resolutionFiles,
       sourceFiles,
@@ -507,6 +580,107 @@ export function createAnalyzerSemanticContextCapture(options: {
       );
     }
   };
+}
+
+/**
+ * 把 producer 的完整句柄批次投影为 Worker 可消费的瞬态 sidecar。
+ *
+ * 只有同一 `snapshotIdentity` 内的 opaque identity 可以比较；proof 缺失、整批失败、条目缺失或
+ * 一个对象对应多个 manifest source 时全部 fail-closed。sidecar 不参与任何 canonical digest。
+ */
+async function captureAnalyzerHostPathIdentitySidecar(
+  caseSensitiveFileNames: boolean,
+  broker: AnalyzerHostPathIdentityBrokerPort | undefined,
+  candidatesByPath: ReadonlyMap<string, AnalyzerHostPathCandidateState>,
+): Promise<AnalyzerHostPathIdentitySidecarV1 | undefined> {
+  if (caseSensitiveFileNames) {return undefined;}
+  if (broker === undefined) {
+    throw new AnalyzerFailureError(
+      "ANALYZER_CONFIG_INVALID",
+      "大小写不敏感宿主缺少 HostPathIdentityBroker 请求证明。",
+    );
+  }
+  const candidates = [...candidatesByPath.values()]
+    .map(({ absolutePath, logicalPath }) => ({ absolutePath, logicalPath }))
+    .sort((left, right) => compareText(left.logicalPath, right.logicalPath));
+  const proof = await broker.resolveCandidates(candidates);
+  if (proof.status !== "complete" || proof.snapshotIdentity === null ||
+    proof.entries.length !== candidatesByPath.size) {
+    throw new AnalyzerFailureError(
+      proof.status === "rejected" && /LIMIT_EXCEEDED$/u.test(proof.code)
+        ? "ANALYZER_RESOURCE_LIMIT"
+        : "ANALYZER_CONFIG_INVALID",
+      "HostPathIdentityBroker 未能为 Analyzer 现存路径建立完整同批证明。",
+    );
+  }
+  const identityByPath = new Map<string, string>();
+  for (const entry of proof.entries) {
+    const candidate = candidatesByPath.get(entry.logicalPath);
+    const observation = entry.observation;
+    if (candidate === undefined || observation.status !== "present" ||
+      observation.identityLifetime !== "snapshot" ||
+      observation.snapshotIdentity !== proof.snapshotIdentity ||
+      identityByPath.has(entry.logicalPath)) {
+      throw new AnalyzerFailureError(
+        "ANALYZER_CONFIG_INVALID",
+        "HostPathIdentityBroker proof 条目缺失、变化或不属于同一请求快照。",
+      );
+    }
+    identityByPath.set(entry.logicalPath, observation.identity);
+  }
+  if (identityByPath.size !== candidatesByPath.size) {
+    throw new AnalyzerFailureError(
+      "ANALYZER_CONFIG_INVALID",
+      "HostPathIdentityBroker proof 未覆盖全部 Analyzer 现存路径。",
+    );
+  }
+
+  const pathsByIdentity = new Map<string, AnalyzerHostPathCandidateState[]>();
+  for (const candidate of candidatesByPath.values()) {
+    const identity = identityByPath.get(candidate.logicalPath)!;
+    const group = pathsByIdentity.get(identity) ?? [];
+    group.push(candidate);
+    pathsByIdentity.set(identity, group);
+  }
+  const canonicalByIdentity = new Map<string, string>();
+  const roleRank: Readonly<Record<AnalyzerHostPathCandidateRole, number>> = {
+    source: 0,
+    configuration: 1,
+    resolution: 2,
+    blocked: 3,
+    alias: 4,
+  };
+  for (const [identity, group] of pathsByIdentity) {
+    const sourcePaths = group.filter((candidate) => candidate.role === "source");
+    if (sourcePaths.length > 1) {
+      throw new AnalyzerFailureError(
+        "ANALYZER_CONFIG_INVALID",
+        "同一宿主对象不能作为多个 manifest source 进入单次 Analyzer 请求。",
+      );
+    }
+    const canonical = [...group].sort((left, right) =>
+      roleRank[left.role] - roleRank[right.role] ||
+      compareText(left.logicalPath, right.logicalPath))[0];
+    if (canonical === undefined) {
+      throw new AnalyzerFailureError(
+        "ANALYZER_CONFIG_INVALID",
+        "HostPathIdentityBroker proof 包含空对象分组。",
+      );
+    }
+    canonicalByIdentity.set(identity, canonical.logicalPath);
+  }
+  return Object.freeze({
+    entries: Object.freeze([...identityByPath]
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([logicalPath, identity]) => Object.freeze({
+        canonicalLogicalPath: canonicalByIdentity.get(identity)!,
+        identity,
+        logicalPath,
+      }))),
+    proofDigest: proof.proofDigest,
+    snapshotIdentity: proof.snapshotIdentity,
+    version: 1,
+  });
 }
 
 /**
@@ -868,6 +1042,24 @@ function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error &&
     ((error as { code?: unknown }).code === "ENOENT" ||
       (error as { code?: unknown }).code === "ENOTDIR");
+}
+
+/** graph-service 组合根注入的既有宿主对象身份 broker 最小端口。 */
+export interface AnalyzerHostPathIdentityBrokerPort {
+  resolveCandidates(
+    candidates: readonly HostPathIdentityCandidateV1[],
+  ): Promise<HostPathCandidateResolutionV1>;
+}
+
+type AnalyzerHostPathCandidateRole =
+  | "alias"
+  | "blocked"
+  | "configuration"
+  | "resolution"
+  | "source";
+
+interface AnalyzerHostPathCandidateState extends HostPathIdentityCandidateV1 {
+  role: AnalyzerHostPathCandidateRole;
 }
 
 /** 在每个异步边界传播 Job 取消。 */

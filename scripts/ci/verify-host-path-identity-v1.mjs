@@ -18,12 +18,26 @@ const dedicatedContractConfigPath = "vitest.contract.win32.config.ts";
 const manifestTestPath = "tests/contract/quality-gates-manifest.test.ts";
 const verifierPath = "scripts/ci/verify-host-path-identity-v1.mjs";
 const triggerPaths = [
+  "apps/graph-service/src/analyzer-config.ts",
   sourcePath,
+  "apps/graph-service/src/index-job-runtime.ts",
+  "apps/graph-service/src/index-read-set.ts",
+  "apps/graph-service/src/index.ts",
+  "apps/graph-service/src/workspace-scanner.ts",
   "ci/quality-gates.v1.yaml",
+  "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
+  "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
+  "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+  "packages/application/src/ports/analyzer-port.ts",
   verifierPath,
   contractTestPath,
   manifestTestPath,
+  "tests/unit/analyzer-config-capture.test.ts",
   unitTestPath,
+  "tests/unit/index-job-runtime.test.ts",
+  "tests/unit/index-read-set.test.ts",
+  "tests/unit/typescript-analyzer-worker.test.ts",
+  "tests/unit/typescript-module-resolution.test.ts",
 ];
 const allowedProductionImports = new Set([
   "node:child_process",
@@ -785,7 +799,7 @@ function validateMutationOracle(source) {
   }
 }
 
-/** Gate 必须阻断、固定执行本 verifier，并覆盖全部六条平台 owned path。 */
+/** Gate 必须阻断、固定执行本 verifier，并覆盖 producer 与 Story consumer 的二十条 owned path。 */
 async function validateGateRegistration() {
   const loaded = await loadQualityGateRegistry(repositoryRoot);
   const matching = loaded.registry.gates.filter(
@@ -933,8 +947,8 @@ export function classifyDedicatedVitestResult(result, exactPath) {
     suites.length !== 1 ||
     !normalizedResultPath?.endsWith(`/${exactPath}`) ||
     report.numTotalTestSuites <= 0 ||
-    report.numTotalTests !== 4 ||
-    report.numPassedTests !== 4 ||
+    report.numTotalTests !== 5 ||
+    report.numPassedTests !== 5 ||
     report.numFailedTests !== 0 ||
     report.numPendingTests !== 0 ||
     report.numTodoTests !== 0

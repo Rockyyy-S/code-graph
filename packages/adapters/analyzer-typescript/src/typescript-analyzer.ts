@@ -357,6 +357,35 @@ function assertAnalyzerRequestAdmission(
       );
     }
   }
+  const sidecar = (input as AnalyzerConfigurationInputV1).hostPathIdentitySidecar;
+  if ((input as AnalyzerConfigurationInputV1).caseSensitiveFileNames === false &&
+    sidecar === undefined) {
+    throw new AnalyzerFailureError(
+      "ANALYZER_CONFIG_INVALID",
+      "大小写不敏感 Analyzer 请求缺少 HostPathIdentityBroker proof sidecar。",
+    );
+  }
+  if (sidecar !== undefined) {
+    if (sidecar.version !== 1 || !Array.isArray(sidecar.entries) ||
+      sidecar.entries.length > 4_096 || typeof sidecar.proofDigest !== "string" ||
+      typeof sidecar.snapshotIdentity !== "string") {
+      throw new AnalyzerFailureError(
+        "ANALYZER_PROTOCOL_INVALID",
+        "Analyzer host path identity sidecar 超限或形状不合法。",
+      );
+    }
+    for (const entry of sidecar.entries) {
+      pathBytes += Buffer.byteLength(entry.logicalPath, "utf8") +
+        Buffer.byteLength(entry.canonicalLogicalPath, "utf8") +
+        Buffer.byteLength(entry.identity, "utf8");
+      if (pathBytes > MAX_WORKER_INPUT_PATH_BYTES) {
+        throw new AnalyzerFailureError(
+          "ANALYZER_RESOURCE_LIMIT",
+          "Analyzer host path identity sidecar 路径字节超过 admission 预算。",
+        );
+      }
+    }
+  }
 }
 
 /** 创建默认 TypeScript AnalyzerPort。 */

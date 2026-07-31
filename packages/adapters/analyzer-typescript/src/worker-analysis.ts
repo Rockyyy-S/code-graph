@@ -8,6 +8,7 @@ import {
   type AnalyzerByteFileV1,
   type AnalyzerConfigurationInputV1,
   type AnalyzerConfigurationObservationV1,
+  type AnalyzerHostPathIdentitySidecarV1,
   type AnalyzerSourceFileV1,
   type ModuleRelationSeedV1,
 } from "@codegraph/application";
@@ -190,6 +191,7 @@ export function observeTypeScriptConfiguration(
     allFiles,
     blockedResolutionPaths,
     input.caseSensitiveFileNames ?? true,
+    input.hostPathIdentitySidecar,
   );
   const blockedResolutionPathKeys = new Set([...blockedResolutionPaths].map((logicalPath) =>
     files.lookupKey(toVirtualPath(logicalPath))));
@@ -323,6 +325,7 @@ export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutput
     allFiles,
     blockedResolutionPathSet,
     input.caseSensitiveFileNames ?? true,
+    input.hostPathIdentitySidecar,
   );
   const blockedResolutionPathKeys = new Set([...blockedResolutionPathSet].map((logicalPath) =>
     files.lookupKey(toVirtualPath(logicalPath))));
@@ -434,6 +437,7 @@ export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutput
             files.caseSensitiveFileNames,
           );
         const target = resolveModuleTarget({
+          /** proof 已收敛对象身份；此处布尔值只保留 ASCII node_modules/manifest 文本语义。 */
           caseSensitiveFileNames: files.caseSensitiveFileNames,
           indexingManifest,
           normalizedRange: relation.normalizedRange,
@@ -1021,7 +1025,10 @@ function prepareIncrementalProjectState(
         .map((fileName) => `${fileName}\0blocked`)
         .sort(compareText),
     ));
-  const existing = incrementalProjectCache.get(key);
+  /** snapshot-bound host mapping 不得跨请求留在 Program/module-resolution cache 中。 */
+  const existing = files.hasRequestScopedHostIdentity
+    ? undefined
+    : incrementalProjectCache.get(key);
   const directoryIndex = existing?.filePathSignature === filePathSignature
     ? existing.directoryIndex
     : new VirtualDirectoryIndex(files);
@@ -1319,20 +1326,88 @@ function enforceIncrementalCacheBudgets(): void {
   }
 }
 
-/** 虚拟文件表按真实 host 语义查找，但枚举、realpath 与解析结果始终返回 manifest casing。 */
+/**
+ * Worker 只消费 graph-service 已验证的请求级 sidecar，不自行推导宿主对象身份。
+ * 未被 proof 覆盖的现存文件、冲突 canonical 映射或 snapshot 元数据缺失都立即失败。
+ */
+class RequestHostPathIdentityIndex {
+  readonly #canonicalByLogicalPath = new Map<string, string>();
+  readonly #identityByLogicalPath = new Map<string, string>();
+
+  public constructor(
+    sidecar: AnalyzerHostPathIdentitySidecarV1,
+    requiredLogicalPaths: ReadonlySet<string>,
+  ) {
+    if (typeof sidecar !== "object" || sidecar === null || sidecar.version !== 1 ||
+      typeof sidecar.proofDigest !== "string" || sidecar.proofDigest.length === 0 ||
+      typeof sidecar.snapshotIdentity !== "string" || sidecar.snapshotIdentity.length === 0 ||
+      !Array.isArray(sidecar.entries)) {
+      throw new TypeError("Analyzer host path identity sidecar 元数据不合法。");
+    }
+    const canonicalByIdentity = new Map<string, string>();
+    for (const entry of sidecar.entries) {
+      if (typeof entry !== "object" || entry === null ||
+        typeof entry.logicalPath !== "string" ||
+        typeof entry.canonicalLogicalPath !== "string") {
+        throw new TypeError("Analyzer host path identity sidecar 条目形状不合法。");
+      }
+      const logicalPath = normalizeRelativeGraphPath(entry.logicalPath);
+      const canonicalLogicalPath = normalizeRelativeGraphPath(entry.canonicalLogicalPath);
+      if (logicalPath !== entry.logicalPath || canonicalLogicalPath !== entry.canonicalLogicalPath ||
+        typeof entry.identity !== "string" || entry.identity.length === 0 ||
+        entry.identity.includes("\0") || this.#identityByLogicalPath.has(logicalPath)) {
+        throw new TypeError("Analyzer host path identity sidecar 条目不合法或重复。");
+      }
+      const existingCanonical = canonicalByIdentity.get(entry.identity);
+      if (existingCanonical !== undefined && existingCanonical !== canonicalLogicalPath) {
+        throw new TypeError("Analyzer host path identity sidecar 对同一对象给出了冲突 canonical path。");
+      }
+      canonicalByIdentity.set(entry.identity, canonicalLogicalPath);
+      this.#identityByLogicalPath.set(logicalPath, entry.identity);
+      this.#canonicalByLogicalPath.set(logicalPath, canonicalLogicalPath);
+    }
+    for (const logicalPath of requiredLogicalPaths) {
+      if (!this.#identityByLogicalPath.has(logicalPath)) {
+        throw new TypeError("Analyzer 现存路径缺少同批 HostPathIdentityBroker proof。");
+      }
+    }
+    for (const canonicalLogicalPath of this.#canonicalByLogicalPath.values()) {
+      if (!requiredLogicalPaths.has(canonicalLogicalPath)) {
+        throw new TypeError("Analyzer host proof canonical path 未绑定受控文件或 blocked fence。");
+      }
+    }
+  }
+
+  public canonicalLogicalPath(logicalPath: string): string | undefined {
+    return this.#canonicalByLogicalPath.get(logicalPath);
+  }
+
+  public identity(logicalPath: string): string | undefined {
+    return this.#identityByLogicalPath.get(logicalPath);
+  }
+}
+
+/** 虚拟文件表按 opaque host proof 查找，但枚举、realpath 与解析结果始终返回 manifest casing。 */
 class VirtualFileMap implements ReadonlyMap<string, string> {
   readonly #canonicalByKey = new Map<string, string>();
   readonly #files = new Map<string, string>();
+  readonly #hostIdentityIndex: RequestHostPathIdentityIndex | null;
   public readonly caseSensitiveFileNames: boolean;
+  public readonly hasRequestScopedHostIdentity: boolean;
 
-  public constructor(caseSensitiveFileNames: boolean) {
+  public constructor(
+    caseSensitiveFileNames: boolean,
+    hostIdentityIndex: RequestHostPathIdentityIndex | null,
+  ) {
     this.caseSensitiveFileNames = caseSensitiveFileNames;
+    this.#hostIdentityIndex = hostIdentityIndex;
+    this.hasRequestScopedHostIdentity = hostIdentityIndex !== null;
   }
 
   public get size(): number {return this.#files.size;}
 
   public add(fileName: string, text: string): void {
-    const canonicalPath = normalizeVirtualPath(fileName);
+    const canonicalPath = this.canonicalPath(fileName);
     const lookupKey = this.#lookupKey(canonicalPath);
     const existingPath = this.#canonicalByKey.get(lookupKey);
     if (existingPath !== undefined && existingPath !== canonicalPath) {
@@ -1348,6 +1423,11 @@ class VirtualFileMap implements ReadonlyMap<string, string> {
 
   public canonicalPath(fileName: string): string {
     const normalized = normalizeVirtualPath(fileName);
+    const logicalPath = toLogicalPath(normalized);
+    if (logicalPath !== null) {
+      const canonicalLogicalPath = this.#hostIdentityIndex?.canonicalLogicalPath(logicalPath);
+      if (canonicalLogicalPath !== undefined) {return toVirtualPath(canonicalLogicalPath);}
+    }
     return this.#canonicalByKey.get(this.#lookupKey(normalized)) ?? normalized;
   }
 
@@ -1368,7 +1448,12 @@ class VirtualFileMap implements ReadonlyMap<string, string> {
   }
 
   #lookupKey(fileName: string): string {
-    return normalizeHostPathIdentity(fileName, this.caseSensitiveFileNames);
+    const normalized = normalizeVirtualPath(fileName);
+    if (this.caseSensitiveFileNames) {return normalized;}
+    const logicalPath = toLogicalPath(normalized);
+    const identity = logicalPath === null ? undefined : this.#hostIdentityIndex?.identity(logicalPath);
+    /** 未知/缺失路径保留精确 logical path，不得伪造或近似对象 identity。 */
+    return identity === undefined ? normalized : `\0host-object:${identity}`;
   }
 }
 
@@ -1380,8 +1465,18 @@ function createVirtualFileMap(
   files: readonly AnalyzerByteFileV1[],
   blockedResolutionPaths: ReadonlySet<string> = new Set(),
   caseSensitiveFileNames = true,
+  hostPathIdentitySidecar?: AnalyzerHostPathIdentitySidecarV1,
 ): VirtualFileMap {
-  const result = new VirtualFileMap(caseSensitiveFileNames);
+  const requiredLogicalPaths = new Set([
+    ...files.map((file) => normalizeRelativeGraphPath(file.path)),
+    ...[...blockedResolutionPaths].map((entry) => normalizeRelativeGraphPath(entry)),
+  ]);
+  const hostIdentityIndex = caseSensitiveFileNames
+    ? null
+    : hostPathIdentitySidecar === undefined
+      ? (() => {throw new TypeError("大小写不敏感 Analyzer 请求缺少 host proof sidecar。");})()
+      : new RequestHostPathIdentityIndex(hostPathIdentitySidecar, requiredLogicalPaths);
+  const result = new VirtualFileMap(caseSensitiveFileNames, hostIdentityIndex);
   for (const file of files) {
     const virtualPath = toVirtualPath(file.path);
     const text = decodeUtf8(file.bytes, file.path);
@@ -1670,7 +1765,11 @@ function findExternalPackageMetadataBoundary(
 function assertWorkerInputAdmission(
   input: Pick<
     AnalyzerConfigurationInputV1,
-    "configurationFiles" | "resolutionFiles" | "sourceFiles"
+    | "caseSensitiveFileNames"
+    | "configurationFiles"
+    | "hostPathIdentitySidecar"
+    | "resolutionFiles"
+    | "sourceFiles"
   >,
 ): void {
   const allFiles = [
@@ -1707,6 +1806,33 @@ function assertWorkerInputAdmission(
         "ANALYZER_RESOURCE_LIMIT",
         "TypeScript Analyzer Worker 原始输入超过 admission 字节预算。",
       );
+    }
+  }
+  const sidecar = input.hostPathIdentitySidecar;
+  if (input.caseSensitiveFileNames === false && sidecar === undefined) {
+    throw new WorkerAnalysisError(
+      "ANALYZER_CONFIG_INVALID",
+      "大小写不敏感 Analyzer 请求缺少 host proof sidecar。",
+    );
+  }
+  if (sidecar !== undefined) {
+    if (!Array.isArray(sidecar.entries) || sidecar.entries.length > 4_096) {
+      throw new WorkerAnalysisError(
+        "ANALYZER_RESOURCE_LIMIT",
+        "Analyzer host proof sidecar 条目数超过安全预算。",
+      );
+    }
+    for (const entry of sidecar.entries) {
+      pathBytes += utf8BytesBounded(
+        `${entry.logicalPath}\0${entry.canonicalLogicalPath}\0${entry.identity}`,
+        Math.max(0, WORKER_INPUT_LIMITS.maxPathBytesPerRequest - pathBytes),
+      );
+      if (pathBytes > WORKER_INPUT_LIMITS.maxPathBytesPerRequest) {
+        throw new WorkerAnalysisError(
+          "ANALYZER_RESOURCE_LIMIT",
+          "Analyzer host proof sidecar 路径字节超过安全预算。",
+        );
+      }
     }
   }
 }

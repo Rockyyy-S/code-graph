@@ -45,7 +45,10 @@ export class WorkspaceIgnoreConfigChangedError extends Error {
   }
 }
 
-/** 一次 read-set 捕获同时交付 scanner 事实，避免 application 重新读取文件系统。 */
+/**
+ * 一次 read-set 捕获同时交付 scanner 事实与瞬态 Analyzer host proof。
+ * sidecar 仅存在于 analyzerContext，不得复制进持久化 `HierarchyReadSetV1`。
+ */
 export interface IndexReadSetCapture {
   analyzerContext?: PreparedAnalyzerContextV1;
   readSet: HierarchyReadSetV1;
@@ -626,7 +629,7 @@ export function createIndexReadSetProvider(
         monitorSequence === null,
       );
       assertNoUserIgnoreConfigSync(options.indexingRoot);
-      const isCurrent = verified &&
+      const isCurrent = verified && hasCompleteAnalyzerHostPathSidecar(capture) &&
         isAnalyzerConfigCurrent(options.indexingRoot, capture.readSet) &&
         !renameVerificationScheduled &&
         isCheapFenceCurrent(
@@ -658,6 +661,17 @@ export function createIndexReadSetProvider(
       workspaceChangeHandler = handler;
     },
   };
+}
+
+/** 大小写不敏感 capture 缺少同批 host proof 时不得进入 CAS；大小写敏感宿主使用精确路径。 */
+function hasCompleteAnalyzerHostPathSidecar(capture: IndexReadSetCapture): boolean {
+  const context = capture.analyzerContext;
+  if (context === undefined || context.caseSensitiveFileNames !== false) {return true;}
+  const sidecar = context.hostPathIdentitySidecar;
+  return sidecar !== undefined && sidecar.version === 1 && sidecar.snapshotIdentity.length > 0 &&
+    sidecar.proofDigest.length > 0 && sidecar.entries.every((entry) =>
+      entry.identity.length > 0 && entry.logicalPath.length > 0 &&
+      entry.canonicalLogicalPath.length > 0);
 }
 
 /** 以 CAS 饱和推进共享序列；达到有符号 64 位上限时 fail-closed，禁止回绕。 */

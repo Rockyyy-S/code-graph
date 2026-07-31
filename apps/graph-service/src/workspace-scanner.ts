@@ -292,6 +292,14 @@ export interface WorkspaceScanResult {
   excludedPathCount: number;
   manifest: readonly ManifestEntryV1[];
   manifestDigest: string;
+  /**
+   * 仅供同一请求的 HostPathIdentityBroker 使用的瞬态 source 断言。
+   * 绝对路径不得进入 application read-set、digest、GraphPatch 或持久化事实。
+   */
+  sourceHostPathCandidates?: readonly {
+    absolutePath: string;
+    logicalPath: string;
+  }[];
   sourceFiles?: readonly WorkspaceSourceSnapshotV1[];
   verificationProof?: WorkspaceVerificationProof;
 }
@@ -594,6 +602,10 @@ export async function scanWorkspace(options: ScanWorkspaceOptions): Promise<Work
       excludedPathCount,
       manifest: Object.freeze(manifest),
       manifestDigest,
+      sourceHostPathCandidates: Object.freeze(candidates.map((candidate) => Object.freeze({
+        absolutePath: candidate.absolutePath,
+        logicalPath: candidate.path,
+      }))),
       sourceFiles: Object.freeze(sourceFiles),
       ...(verificationProofAvailable ? {
         verificationProof: Object.freeze({

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AnalyzerByteFileV1,
+  AnalyzerHostPathIdentitySidecarV1,
   AnalyzerPort,
 } from "../../packages/application/src/index.js";
 import {
@@ -19,7 +20,7 @@ import {
   MAX_ANALYZER_METADATA_TOTAL_BYTES,
   MAX_ANALYZER_RESOLUTION_FILES,
   MAX_ANALYZER_RESOLUTION_CANDIDATES,
-  createAnalyzerSemanticContextCapture,
+  createAnalyzerSemanticContextCapture as createAnalyzerSemanticContextCaptureProduction,
   hashAnalyzerSourceStreamBounded,
   readAnalyzerBytesBounded,
   readAnalyzerCaptureMetricsForTests,
@@ -46,6 +47,103 @@ import {
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
 
 const roots: string[] = [];
+let testHostSnapshot = 0;
+
+/** 测试 broker 只模拟同批 opaque 等价类；Unicode 不执行 lowercase，避免重现生产缺陷。 */
+const testHostPathIdentityBroker = {
+  resolveCandidates: async (candidates: readonly { absolutePath: string; logicalPath: string }[]) => {
+    testHostSnapshot += 1;
+    const snapshotIdentity = `test-host-snapshot:${testHostSnapshot}`;
+    const unique = [...new Map(candidates.map((candidate) => [
+      candidate.logicalPath,
+      candidate,
+    ])).values()].sort((left, right) => left.logicalPath.localeCompare(right.logicalPath));
+    const entries = unique.map(({ logicalPath }) => {
+      const identity = `test-host-object:${logicalPath.replace(/[A-Z]/gu, (value) =>
+        value.toLowerCase())}`;
+      return {
+        logicalPath,
+        observation: {
+          evidenceDigest: `evidence:${identity}`,
+          identity,
+          identityLifetime: "snapshot" as const,
+          logicalMappingDigest: `mapping:${logicalPath}`,
+          rootIdentity: `root:${snapshotIdentity}`,
+          snapshotIdentity,
+          status: "present" as const,
+          version: 1 as const,
+          volumeIdentity: "test-volume",
+        },
+      };
+    });
+    const groups = new Map<string, string[]>();
+    for (const entry of entries) {
+      const paths = groups.get(entry.observation.identity) ?? [];
+      paths.push(entry.logicalPath);
+      groups.set(entry.observation.identity, paths);
+    }
+    return {
+      aliasGroups: [...groups].map(([identity, logicalPaths]) => ({ identity, logicalPaths })),
+      entries,
+      generation: testHostSnapshot,
+      proofDigest: `proof:${snapshotIdentity}`,
+      readSetDigest: `read-set:${snapshotIdentity}`,
+      snapshotIdentity,
+      status: "complete" as const,
+      version: 1 as const,
+    };
+  },
+};
+
+/** 直接调用 capture 的单测补齐组合根 broker 与 scanner 瞬态候选，不改变被测 digest。 */
+function createAnalyzerSemanticContextCapture(
+  options: Parameters<typeof createAnalyzerSemanticContextCaptureProduction>[0],
+  dependencies?: Parameters<typeof createAnalyzerSemanticContextCaptureProduction>[1],
+) {
+  const capture = createAnalyzerSemanticContextCaptureProduction({
+    ...options,
+    hostPathIdentityBroker: options.hostPathIdentityBroker ?? testHostPathIdentityBroker,
+  }, dependencies);
+  return (scanResult: Parameters<typeof capture>[0], signal?: AbortSignal) => capture({
+    ...scanResult,
+    sourceHostPathCandidates: scanResult.sourceHostPathCandidates ??
+      (scanResult.sourceFiles ?? []).map((file) => ({
+        absolutePath: path.join(options.indexingRoot, ...file.path.split("/")),
+        logicalPath: file.path,
+      })),
+  }, signal);
+}
+
+/** 为纯 Worker 单测显式构造请求级 proof；alias 必须逐条声明。 */
+function createTestHostPathIdentitySidecar(
+  files: readonly { path: string }[],
+  aliases: Readonly<Record<string, string>> = {},
+): AnalyzerHostPathIdentitySidecarV1 {
+  testHostSnapshot += 1;
+  const snapshotIdentity = `worker-test-snapshot:${testHostSnapshot}`;
+  const canonicalPaths = new Set(files.map((file) => file.path));
+  const identityByCanonical = new Map([...canonicalPaths].map((logicalPath, index) => [
+    logicalPath,
+    `worker-test-object:${index}:${logicalPath}`,
+  ]));
+  return Object.freeze({
+    entries: Object.freeze([
+      ...[...canonicalPaths].map((logicalPath) => Object.freeze({
+        canonicalLogicalPath: logicalPath,
+        identity: identityByCanonical.get(logicalPath)!,
+        logicalPath,
+      })),
+      ...Object.entries(aliases).map(([logicalPath, canonicalLogicalPath]) => Object.freeze({
+        canonicalLogicalPath,
+        identity: identityByCanonical.get(canonicalLogicalPath)!,
+        logicalPath,
+      })),
+    ]),
+    proofDigest: `worker-test-proof:${testHostSnapshot}`,
+    snapshotIdentity,
+    version: 1,
+  });
+}
 
 /** 构造配置观察使用的不可变逻辑文件。 */
 function byteFile(relativePath: string, source: string) {
@@ -771,6 +869,10 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       caseSensitiveFileNames: false,
       configurationEntryPaths: ["tsconfig.json"],
       configurationFiles: [config],
+      hostPathIdentitySidecar: createTestHostPathIdentitySidecar(
+        [config, ...sourceFiles],
+        { "src/Dep.ts": "src/dep.ts" },
+      ),
       sourceFiles,
     };
     const observation = observeTypeScriptConfiguration(input);
@@ -830,6 +932,14 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       caseSensitiveFileNames: false,
       configurationEntryPaths: ["TSCONFIG.JSON"],
       configurationFiles,
+      hostPathIdentitySidecar: createTestHostPathIdentitySidecar(
+        [...configurationFiles, ...resolutionFiles, ...sourceFiles],
+        {
+          "PACKAGES/APP/tsconfig.json": "packages/app/tsconfig.json",
+          "TSCONFIG.JSON": "tsconfig.json",
+          "packages/app/src/LIB/DEP.ts": "packages/app/src/lib/dep.TS",
+        },
+      ),
       resolutionFiles,
       sourceFiles,
     };
@@ -899,6 +1009,13 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       caseSensitiveFileNames: false,
       configurationEntryPaths: ["TSCONFIG.JSON"],
       configurationFiles: [config],
+      hostPathIdentitySidecar: createTestHostPathIdentitySidecar(
+        [config, ...sourceFiles],
+        {
+          "TSCONFIG.JSON": "tsconfig.json",
+          "src/σ.ts": "src/Σ.ts",
+        },
+      ),
       sourceFiles,
     };
     const observation = observeTypeScriptConfiguration(input);
@@ -941,6 +1058,69 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     ]));
   });
 
+  it("CR10-001 consumes opaque proof so ẞ.ts and ß.ts remain distinct while ASCII aliases converge", () => {
+    const config = byteFile("tsconfig.json", JSON.stringify({
+      compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" },
+      include: ["src/**/*.ts"],
+    }));
+    const sourceFiles = [
+      sourceFile("src/index.ts", [
+        'import { capital } from "./ẞ.js";',
+        'import { lower } from "./ß.js";',
+        'import { alias } from "./alias.js";',
+        "void capital; void lower; void alias;",
+      ].join("\n")),
+      sourceFile("src/ẞ.ts", "export const capital = 1;\n"),
+      sourceFile("src/ß.ts", "export const lower = 2;\n"),
+      sourceFile("src/Alias.ts", "export const alias = 3;\n"),
+    ];
+    const sidecar = createTestHostPathIdentitySidecar(
+      [config, ...sourceFiles],
+      { "src/alias.ts": "src/Alias.ts" },
+    );
+    const input = {
+      caseSensitiveFileNames: false,
+      configurationEntryPaths: ["tsconfig.json"],
+      configurationFiles: [config],
+      hostPathIdentitySidecar: sidecar,
+      sourceFiles,
+    };
+    const observation = observeTypeScriptConfiguration(input);
+    const created = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{ contentHash: config.contentHash, path: config.path }],
+      effectiveCompilerOptions: observation.effectiveCompilerOptions,
+      effectiveIgnore: { effectiveDigest: "a".repeat(64), version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const inputDigest = createAnalyzerInputDigest({
+      analyzerKind: "typescript",
+      configDigest: created.configDigest,
+      inputs: sourceFiles,
+    }, { digest: sha256CanonicalJson });
+    const output = analyzeTypeScriptModules({
+      ...input,
+      configDigest: created.configDigest,
+      configSnapshot: created.snapshot,
+      detectedAt: "2026-07-31T00:00:00.000Z",
+      inputDigest,
+      resolutionFiles: [],
+      workspaceKey: "a".repeat(64),
+    });
+    const targets = output.files.find((file) => file.path === "src/index.ts")?.relations
+      .flatMap((relation) => relation.target.kind === "internal-file"
+        ? [relation.target.resolvedPath]
+        : []);
+
+    expect(targets).toEqual(expect.arrayContaining(["src/ẞ.ts", "src/ß.ts", "src/Alias.ts"]));
+    expect(created.configDigest).not.toContain(sidecar.snapshotIdentity);
+    expect(inputDigest).not.toContain(sidecar.proofDigest);
+    const { hostPathIdentitySidecar: _sidecar, ...withoutSidecar } = input;
+    void _sidecar;
+    expect(() => observeTypeScriptConfiguration(withoutSidecar)).toThrow(/proof sidecar/u);
+  });
+
   it("CR8-002 and CR9-006 preserve package boundaries and colon-bearing npm subpaths", () => {
     const config = byteFile("tsconfig.json", JSON.stringify({
       compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" },
@@ -978,6 +1158,17 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       caseSensitiveFileNames: false,
       configurationEntryPaths: ["tsconfig.json"],
       configurationFiles: [config],
+      hostPathIdentitySidecar: createTestHostPathIdentitySidecar(
+        [config, ...resolutionFiles, ...sources],
+        {
+          "node_modules/case-pkg/feature@debug.d.ts":
+            "NODE_MODULES/case-pkg/feature@debug.d.ts",
+          "node_modules/case-pkg/index.d.ts": "NODE_MODULES/case-pkg/index.d.ts",
+          "node_modules/case-pkg/package.json": "NODE_MODULES/case-pkg/package.json",
+          "node_modules/locked/index.d.ts": "Node_Modules/locked/index.d.ts",
+          "node_modules/locked/package.json": "Node_Modules/locked/package.json",
+        },
+      ),
       resolutionFiles,
       sourceFiles: sources,
     };
@@ -1510,7 +1701,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       close: () => undefined,
       observeConfiguration: async (input) => ({
         consultedLogicalPaths: input.resolutionFiles?.length === 1
-          ? ["node_modules/pkg/index.d.ts"]
+          ? [input.resolutionFiles[0]!.path]
           : [],
         effectiveCompilerOptions: {},
         projectConfigurations: [],

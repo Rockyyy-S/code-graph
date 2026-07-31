@@ -23,8 +23,9 @@ import {
 import { createAnalyzerSemanticContextCapture } from "../../apps/graph-service/src/analyzer-config.js";
 import { createInitialIgnoreState } from "../../apps/graph-service/src/ignore-bootstrap.js";
 import {
-  createIndexJobRuntime,
-  createVerifiedIndexJobRuntime,
+  createIndexJobRuntime as createIndexJobRuntimeProduction,
+  createVerifiedIndexJobRuntime as createVerifiedIndexJobRuntimeProduction,
+  type CreateIndexJobRuntimeOptions,
   GraphServiceRequestError,
   MAX_PENDING_EXPLICIT_JOBS,
   MAX_STARTUP_READ_SET_STABILITY_ATTEMPTS,
@@ -39,6 +40,60 @@ import {
 import { createTypeScriptAnalyzer } from "../../packages/adapters/analyzer-typescript/src/index.js";
 
 const roots: string[] = [];
+let runtimeHostSnapshot = 0;
+
+/** runtime 单测注入确定性 opaque proof，避免把平台 producer 进程成本混入 Job 语义测试。 */
+const runtimeHostPathIdentityBroker = {
+  resolveCandidates: async (candidates: readonly { absolutePath: string; logicalPath: string }[]) => {
+    runtimeHostSnapshot += 1;
+    const snapshotIdentity = `runtime-test-snapshot:${runtimeHostSnapshot}`;
+    const entries = [...new Map(candidates.map((candidate) => [
+      candidate.logicalPath,
+      candidate,
+    ])).values()].map(({ logicalPath }) => {
+      const identity = `runtime-test-object:${logicalPath.replace(/[A-Z]/gu, (value) =>
+        value.toLowerCase())}`;
+      return {
+        logicalPath,
+        observation: {
+          evidenceDigest: `evidence:${identity}`,
+          identity,
+          identityLifetime: "snapshot" as const,
+          logicalMappingDigest: `mapping:${logicalPath}`,
+          rootIdentity: `root:${snapshotIdentity}`,
+          snapshotIdentity,
+          status: "present" as const,
+          version: 1 as const,
+          volumeIdentity: "runtime-test-volume",
+        },
+      };
+    });
+    return {
+      aliasGroups: [],
+      entries,
+      generation: runtimeHostSnapshot,
+      proofDigest: `proof:${snapshotIdentity}`,
+      readSetDigest: `read-set:${snapshotIdentity}`,
+      snapshotIdentity,
+      status: "complete" as const,
+      version: 1 as const,
+    };
+  },
+};
+
+function createIndexJobRuntime(options: CreateIndexJobRuntimeOptions) {
+  return createIndexJobRuntimeProduction({
+    ...options,
+    hostPathIdentityBroker: options.hostPathIdentityBroker ?? runtimeHostPathIdentityBroker,
+  });
+}
+
+function createVerifiedIndexJobRuntime(options: CreateIndexJobRuntimeOptions) {
+  return createVerifiedIndexJobRuntimeProduction({
+    ...options,
+    hostPathIdentityBroker: options.hostPathIdentityBroker ?? runtimeHostPathIdentityBroker,
+  });
+}
 
 /** 生产组合根注入同一 JCS/SHA-256 实现；测试包装器避免每个夹具重复声明。 */
 function openSqliteGraphStore(
@@ -302,6 +357,7 @@ describe("index job runtime", () => {
       captureAnalyzerSemanticContext: createAnalyzerSemanticContextCapture({
         analyzer,
         effectiveIgnoreSnapshot: ignoreState.snapshot,
+        hostPathIdentityBroker: runtimeHostPathIdentityBroker,
         indexingRoot: fixture.indexingRoot,
         workspaceKey: fixture.workspaceKey,
       }),

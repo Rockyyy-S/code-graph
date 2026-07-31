@@ -44,6 +44,7 @@ import {
 } from "./workspace-scanner.js";
 import {
   createAnalyzerSemanticContextCapture,
+  type AnalyzerHostPathIdentityBrokerPort,
   type CaptureAnalyzerSemanticContext,
 } from "./analyzer-config.js";
 
@@ -74,6 +75,8 @@ export interface CreateIndexJobRuntimeOptions {
   closeTimeoutMs?: number;
   createJobId?: () => string;
   digestPort?: CanonicalDigestPort;
+  /** 唯一组合根创建并按 service instance 注入的宿主对象身份 broker。 */
+  hostPathIdentityBroker?: AnalyzerHostPathIdentityBrokerPort;
   ignoreState: InitialIgnoreState;
   indexingRoot: string;
   now?: () => string;
@@ -319,7 +322,11 @@ export function createIndexJobRuntime(
             });
         throwIfCancelled(signal);
 
-        if (!await readSetProvider.isCurrent(capture.readSet, signal)) {
+        const captureCurrent = capture.analyzerContext?.hostPathIdentitySidecar === undefined ||
+          readSetProvider.isCaptureCurrent === undefined
+          ? await readSetProvider.isCurrent(capture.readSet, signal)
+          : await readSetProvider.isCaptureCurrent(capture, signal);
+        if (!captureCurrent) {
           publishStale();
           staleRequeueAttempts = nextStaleAttempt(staleRequeueAttempts);
           continue;
@@ -538,6 +545,9 @@ async function analyzeModuleBatches(
     configSnapshot: context.configSnapshot,
     configurationEntryPaths: context.configurationEntryPaths,
     configurationFiles: context.configurationFiles,
+    ...(context.hostPathIdentitySidecar === undefined
+      ? {}
+      : { hostPathIdentitySidecar: context.hostPathIdentitySidecar }),
     detectedAt,
     inputDigest: context.inputDigest,
     resolutionFiles: context.resolutionFiles,
@@ -634,6 +644,9 @@ function createDefaultReadSetProvider(options: CreateIndexJobRuntimeOptions): In
             captureAnalyzerSemanticContext: createAnalyzerSemanticContextCapture({
               analyzer: options.analyzer,
               effectiveIgnoreSnapshot: options.ignoreState.snapshot,
+              ...(options.hostPathIdentityBroker === undefined
+                ? {}
+                : { hostPathIdentityBroker: options.hostPathIdentityBroker }),
               indexingRoot: options.indexingRoot,
               workspaceKey: options.workspaceKey,
             }),

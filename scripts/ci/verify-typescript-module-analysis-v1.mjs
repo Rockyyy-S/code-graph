@@ -20,19 +20,32 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
   contractTests: Object.freeze([
     "tests/contract/graph-service-process.test.ts",
   ]),
-  unitTests: Object.freeze([
-    "tests/unit/analyzer-config-capture.test.ts",
-    "tests/unit/analyzer-config-snapshot.test.ts",
-    "tests/unit/composite-graph-patch.test.ts",
-    "tests/unit/index-job-runtime.test.ts",
-    "tests/unit/index-read-set.test.ts",
-    "tests/unit/module-dependency-domain.test.ts",
-    "tests/unit/module-fact-batch.test.ts",
-    "tests/unit/sqlite-graph-store.test.ts",
-    "tests/unit/sqlite-module-dependencies.test.ts",
-    "tests/unit/typescript-analyzer-worker.test.ts",
-    "tests/unit/typescript-module-resolution.test.ts",
-    "tests/unit/typescript-module-syntax.test.ts",
+  /** 按数组顺序串行启动独立 Vitest 进程，隔离 SQLite 锁与构建后并行资源竞争。 */
+  unitShards: Object.freeze([
+    Object.freeze({
+      expectedTestCount: 257,
+      shardId: "default-unit",
+      tests: Object.freeze([
+        "tests/unit/analyzer-config-capture.test.ts",
+        "tests/unit/analyzer-config-snapshot.test.ts",
+        "tests/unit/composite-graph-patch.test.ts",
+        "tests/unit/index-job-runtime.test.ts",
+        "tests/unit/index-read-set.test.ts",
+        "tests/unit/module-dependency-domain.test.ts",
+        "tests/unit/module-fact-batch.test.ts",
+        "tests/unit/sqlite-graph-store.test.ts",
+        "tests/unit/typescript-analyzer-worker.test.ts",
+        "tests/unit/typescript-module-resolution.test.ts",
+        "tests/unit/typescript-module-syntax.test.ts",
+      ]),
+    }),
+    Object.freeze({
+      expectedTestCount: 24,
+      shardId: "sqlite-module-dependencies",
+      tests: Object.freeze([
+        "tests/unit/sqlite-module-dependencies.test.ts",
+      ]),
+    }),
   ]),
   version: 1,
 });
@@ -45,15 +58,17 @@ export function verifyTypeScriptModuleAnalysis() {
     const status = runPnpm(["--filter", filter, "build"]);
     if (status !== 0) {return status;}
   }
-  const unitStatus = runPnpm([
-    "exec",
-    "vitest",
-    "run",
-    "--config",
-    "vitest.config.ts",
-    ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitTests,
-  ]);
-  if (unitStatus !== 0) {return unitStatus;}
+  for (const shard of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards) {
+    const unitStatus = runPnpm([
+      "exec",
+      "vitest",
+      "run",
+      "--config",
+      "vitest.config.ts",
+      ...shard.tests,
+    ]);
+    if (unitStatus !== 0) {return unitStatus;}
+  }
   return runPnpm([
     "exec",
     "vitest",

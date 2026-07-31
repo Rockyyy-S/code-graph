@@ -7,8 +7,11 @@ import type { AnalyzerConfigSnapshotV1 } from "../indexing/analyzer-config-snaps
 import type { ModuleRelationSeedV1 } from "../indexing/module-fact-batch.js";
 
 /**
- * 生成与 TypeScript host 一致的路径 identity；大小写不敏感时刻意保留 İ、ı、ß，
- * 避免 locale/full-Unicode fold 扩展字符后误合并真实文件系统路径。
+ * 仅用于扩展名、保留目录名等 ASCII 协议文本比较。
+ *
+ * 现存宿主路径是否指向同一对象必须消费 `AnalyzerHostPathIdentitySidecarV1`，不得把本函数
+ * 的字符串结果当作 file identity。该文本启发式显式保留 İ、ı、ß、ẞ 等已知 NTFS 共存样本，
+ * 其余大小写折叠只服务 watcher、扩展名和保留目录名等保守分类。
  */
 export function normalizeHostPathIdentity(
   value: string,
@@ -17,9 +20,32 @@ export function normalizeHostPathIdentity(
   const normalized = value.replaceAll("\\", "/").normalize("NFC");
   if (caseSensitiveFileNames) {return normalized;}
   return normalized.replace(
-    /[^\u0130\u0131\u00DFa-z0-9\\/:\-_. ]+/gu,
+    /[^\u0130\u0131\u00DF\u1E9Ea-z0-9\\/:\-_. ]+/gu,
     (segment) => segment.toLowerCase(),
   );
+}
+
+/** 同一请求内由宿主句柄快照证明的逻辑路径映射；不得进入领域 ID 或持久化摘要。 */
+export interface AnalyzerHostPathIdentityEntryV1 {
+  /** Worker 对该对象返回的 manifest/config canonical logical path。 */
+  canonicalLogicalPath: string;
+  /** 只在本 sidecar 的 snapshotIdentity 内可比较的 opaque 对象身份。 */
+  identity: string;
+  /** broker 本批证明覆盖的精确 logical path，包括已证明的 ASCII alias。 */
+  logicalPath: string;
+}
+
+/**
+ * 请求级 HostPathIdentityBroker proof 投影。
+ *
+ * `proofDigest` 与 `snapshotIdentity` 只证明当前 Worker 请求使用同一批映射；调用方不得把它们
+ * 写入 file ID、configDigest、inputDigest、GraphPatch 或任何持久化事实。
+ */
+export interface AnalyzerHostPathIdentitySidecarV1 {
+  entries: readonly AnalyzerHostPathIdentityEntryV1[];
+  proofDigest: string;
+  snapshotIdentity: string;
+  version: 1;
 }
 
 /** graph-service 通过受控读取边界交付的不可变字节快照。 */
@@ -44,6 +70,8 @@ export interface AnalyzerConfigurationInputV1 {
   /** graph-service 选择的权威根配置入口；Worker 不再自行排序猜测。 */
   configurationEntryPaths?: readonly string[];
   configurationFiles: readonly AnalyzerByteFileV1[];
+  /** 大小写不敏感宿主上的现存路径必须由同一批 opaque proof 映射。 */
+  hostPathIdentitySidecar?: AnalyzerHostPathIdentitySidecarV1;
   /** graph-service broker 已安全读取的模块解析元数据。 */
   resolutionFiles?: readonly AnalyzerByteFileV1[];
   sourceFiles: readonly AnalyzerSourceFileV1[];

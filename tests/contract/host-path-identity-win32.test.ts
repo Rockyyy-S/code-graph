@@ -12,6 +12,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostPathIdentityBroker } from "../../apps/graph-service/src/host-path-identity.js";
+import {
+  createAnalyzerSemanticContextCapture,
+} from "../../apps/graph-service/src/analyzer-config.js";
+import { createInitialIgnoreState } from "../../apps/graph-service/src/ignore-bootstrap.js";
+import {
+  scanWorkspace,
+  verifyWorkspaceReadSetSync,
+} from "../../apps/graph-service/src/workspace-scanner.js";
+import {
+  analyzeTypeScriptModules,
+  observeTypeScriptConfiguration,
+} from "../../packages/adapters/analyzer-typescript/src/worker-analysis.js";
 
 const temporaryRoots: string[] = [];
 
@@ -212,4 +224,99 @@ describe("Windows host path identity contract", () => {
     expect(replacement.snapshotIdentity).not.toBe(renamed.snapshotIdentity);
     expect(JSON.stringify([before, renamed, replacement])).not.toContain(root);
   }, 30_000);
+
+  it("closes CR10-001 across scanner, Story capture, Worker aliases, and stale fences", async () => {
+    const root = await createWindowsRoot();
+    const sourceRoot = path.join(root, "src");
+    await mkdir(sourceRoot);
+    await writeFile(path.join(root, "tsconfig.json"), JSON.stringify({
+      compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" },
+      include: ["src/**/*.ts"],
+    }), { flag: "wx" });
+    await writeFile(path.join(sourceRoot, "index.ts"), [
+      'import { capital } from "./ẞ.js";',
+      'import { lower } from "./ß.js";',
+      'import { alias } from "./alias.js";',
+      "void capital; void lower; void alias;",
+    ].join("\n"), { flag: "wx" });
+    await writeFile(path.join(sourceRoot, "ẞ.ts"), "export const capital = 1;\n", { flag: "wx" });
+    await writeFile(path.join(sourceRoot, "ß.ts"), "export const lower = 2;\n", { flag: "wx" });
+    const aliasPath = path.join(sourceRoot, "Alias.ts");
+    await writeFile(aliasPath, "export const alias = 3;\n", { flag: "wx" });
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("Win32 contract ignore 前置条件不成立。");}
+    const scan = await scanWorkspace({
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      platform: "win32",
+    });
+    const analyzer = {
+      analyze: async () => ({ consultedLogicalPaths: [], files: [] }),
+      close: () => undefined,
+      observeConfiguration: async (input: Parameters<typeof observeTypeScriptConfiguration>[0]) =>
+        observeTypeScriptConfiguration(input),
+    };
+    const context = await createAnalyzerSemanticContextCapture({
+      analyzer,
+      effectiveIgnoreSnapshot: ignoreState.snapshot,
+      hostPathIdentityBroker: createBroker(root),
+      indexingRoot: root,
+      workspaceKey: "c".repeat(64),
+    })(scan);
+    const output = analyzeTypeScriptModules({
+      ...(context.caseSensitiveFileNames === undefined
+        ? {}
+        : { caseSensitiveFileNames: context.caseSensitiveFileNames }),
+      configDigest: context.configDigest,
+      configSnapshot: context.configSnapshot,
+      configurationEntryPaths: context.configurationEntryPaths,
+      configurationFiles: context.configurationFiles,
+      detectedAt: "2026-07-31T00:00:00.000Z",
+      ...(context.hostPathIdentitySidecar === undefined
+        ? {}
+        : { hostPathIdentitySidecar: context.hostPathIdentitySidecar }),
+      inputDigest: context.inputDigest,
+      resolutionFiles: context.resolutionFiles,
+      sourceFiles: context.sourceFiles,
+      workspaceKey: "c".repeat(64),
+    });
+    const targets = output.files.find((file) => file.path === "src/index.ts")?.relations
+      .flatMap((relation) => relation.target.kind === "internal-file"
+        ? [relation.target.resolvedPath]
+        : []);
+    const sidecar = context.hostPathIdentitySidecar;
+    if (sidecar === undefined || scan.verificationProof === undefined) {
+      throw new Error("Win32 Story consumer 必须产生 transient proof 与 scanner fence。");
+    }
+    const identityByPath = new Map(sidecar.entries.map((entry) => [entry.logicalPath, entry.identity]));
+
+    expect(targets).toEqual(expect.arrayContaining(["src/ẞ.ts", "src/ß.ts", "src/Alias.ts"]));
+    expect(identityByPath.get("src/ẞ.ts")).not.toBe(identityByPath.get("src/ß.ts"));
+    expect(identityByPath.get("src/alias.ts")).toBe(identityByPath.get("src/Alias.ts"));
+    expect(JSON.stringify(context.configSnapshot)).not.toContain(sidecar.snapshotIdentity);
+    expect(verifyWorkspaceReadSetSync({
+      expectedManifest: scan.manifest,
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      platform: "win32",
+      verificationProof: scan.verificationProof,
+    })).toBe(true);
+
+    await rename(aliasPath, path.join(sourceRoot, "Renamed.ts"));
+    expect(verifyWorkspaceReadSetSync({
+      expectedManifest: scan.manifest,
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      platform: "win32",
+      verificationProof: scan.verificationProof,
+    })).toBe(false);
+    await unlink(path.join(sourceRoot, "ß.ts"));
+    expect(verifyWorkspaceReadSetSync({
+      expectedManifest: scan.manifest,
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      platform: "win32",
+      verificationProof: scan.verificationProof,
+    })).toBe(false);
+  }, 60_000);
 });

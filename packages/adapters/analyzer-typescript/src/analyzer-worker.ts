@@ -63,6 +63,13 @@ function hydrateInput(input: Record<string, unknown>): Record<string, unknown> {
   if (!Array.isArray(input.configurationFiles) || !Array.isArray(input.sourceFiles)) {
     throw new WorkerAnalysisError("ANALYZER_PROTOCOL_INVALID", "Analyzer 文件数组缺失。");
   }
+  if (input.hostPathIdentitySidecar !== undefined &&
+    !isRecord(input.hostPathIdentitySidecar)) {
+    throw new WorkerAnalysisError(
+      "ANALYZER_PROTOCOL_INVALID",
+      "Analyzer host path identity sidecar 不是普通请求对象。",
+    );
+  }
   return {
     ...input,
     configurationFiles: input.configurationFiles.map(hydrateFile),

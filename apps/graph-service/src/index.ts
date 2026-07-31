@@ -15,6 +15,10 @@ import { createSafeLocalLogger, type SafeLocalLogger } from "./safe-log.js";
 import type { ServiceInstancePaths } from "./instance-owner.js";
 import { createInitialIgnoreState } from "./ignore-bootstrap.js";
 import { createVerifiedIndexJobRuntime } from "./index-job-runtime.js";
+import {
+  HostPathIdentityBroker,
+  MAX_HOST_PATH_CANDIDATES,
+} from "./host-path-identity.js";
 
 const STARTUP_LOGGER_CLOSE_TIMEOUT_MS = 250;
 
@@ -49,6 +53,15 @@ export async function startGraphService(
       initializeRuntime: async ({ serviceInstanceId, statusEpoch, workspaceKey }) => {
         let store: Awaited<ReturnType<typeof openSqliteGraphStore>> | null = null;
         const analyzer = createTypeScriptAnalyzer();
+        /**
+         * service instance 只创建一个 broker；每次 Analyzer capture 仍生成独立瞬态句柄批次，
+         * snapshot identity 不会进入 store、digest 或进程外协议。
+         */
+        const hostPathIdentityBroker = new HostPathIdentityBroker({
+          indexingRoot,
+          maxCandidates: MAX_HOST_PATH_CANDIDATES,
+          platform: options.platform ?? process.platform,
+        });
         try {
           store = await openSqliteGraphStore({
             databasePath: path.join(options.paths.workspaceDirectory, "graph.sqlite"),
@@ -58,6 +71,7 @@ export async function startGraphService(
           const ignoreState = await createInitialIgnoreState(indexingRoot);
           return await createVerifiedIndexJobRuntime({
             analyzer,
+            hostPathIdentityBroker,
             ignoreState,
             indexingRoot,
             serviceInstanceId,
