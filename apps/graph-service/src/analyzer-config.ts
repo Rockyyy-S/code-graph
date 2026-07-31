@@ -125,6 +125,12 @@ export interface AnalyzerBlockedResolutionInspectionV1 {
   capture(signal?: AbortSignal): Promise<{ byteLength: number; contentHash: string }>;
 }
 
+interface AnalyzerBlockedResolutionState {
+  byteLength: number;
+  contentHash: string;
+  path: string;
+}
+
 /** Analyzer 配置捕获的可替换 I/O 边界，生产默认实现仍执行完整文件身份校验。 */
 export interface AnalyzerConfigCaptureDependencies {
   /** 测试可固定 host 语义；生产省略时仍只读探测真实 indexing root。 */
@@ -351,7 +357,8 @@ export function createAnalyzerSemanticContextCapture(options: {
       });
     }
     const resolutionByPath = new Map<string, AnalyzerByteFileV1>();
-    const blockedResolutionByPath = new Map<string, { contentHash: string; path: string }>();
+    const blockedResolutionByPath = new Map<string, AnalyzerBlockedResolutionState>();
+    const reclaimedBlockedResolutionPaths = new Set<string>();
     const absentResolutionPaths = new Map<string, string>();
     const attemptedCandidates = new Set<string>();
     let attemptedCandidatePathBytes = 0;
@@ -380,8 +387,14 @@ export function createAnalyzerSemanticContextCapture(options: {
             if (candidate !== undefined) {candidate.role = "alias";}
           }
         }
-        for (const logicalPath of [...blockedResolutionByPath.keys()]) {
+        for (const [logicalPath, blocked] of [...blockedResolutionByPath]) {
           if (canonicalByPath.get(logicalPath) !== logicalPath) {
+            totalBytes = reclaimBlockedResolutionBytes(
+              totalBytes,
+              logicalPath,
+              blocked.byteLength,
+              reclaimedBlockedResolutionPaths,
+            );
             blockedResolutionByPath.delete(logicalPath);
             const candidate = presentHostCandidates.get(logicalPath);
             if (candidate !== undefined) {candidate.role = "alias";}
@@ -442,6 +455,7 @@ export function createAnalyzerSemanticContextCapture(options: {
             absentResolutionPaths.delete(logicalPath);
             totalBytes += blocked.byteLength;
             blockedResolutionByPath.set(logicalPath, {
+              byteLength: blocked.byteLength,
               contentHash: blocked.contentHash,
               path: blocked.path,
             });
@@ -543,7 +557,10 @@ export function createAnalyzerSemanticContextCapture(options: {
           .filter(([logicalPath]) => !requiredMissingSet.has(logicalPath))
           .map(([, logicalPath]) => logicalPath),
       ],
-      blockedResolutionFiles: [...blockedResolutionByPath.values()],
+      blockedResolutionFiles: [...blockedResolutionByPath.values()].map((file) => ({
+        contentHash: file.contentHash,
+        path: file.path,
+      })),
       consultedFiles,
       effectiveCompilerOptions: observation.effectiveCompilerOptions,
       effectiveIgnore: {
@@ -765,6 +782,27 @@ async function readTrustedMetadataFile(
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** blocked alias 离开计量集合时只允许归还一次；重复归还或下溢说明账本已损坏，必须 fail-closed。 */
+function reclaimBlockedResolutionBytes(
+  totalBytes: number,
+  logicalPath: string,
+  byteLength: number,
+  reclaimedPaths: Set<string>,
+): number {
+  if (
+    !Number.isSafeInteger(totalBytes) || totalBytes < 0 ||
+    !Number.isSafeInteger(byteLength) || byteLength < 0 ||
+    reclaimedPaths.has(logicalPath) || byteLength > totalBytes
+  ) {
+    throw new AnalyzerFailureError(
+      "ANALYZER_CONFIG_INVALID",
+      "Analyzer blocked 源码别名预算账本不一致。",
+    );
+  }
+  reclaimedPaths.add(logicalPath);
+  return totalBytes - byteLength;
 }
 
 /** 安全探测 manifest 外源码，只返回受界限保护的内容 hash，不向 Worker 交付源码字节。 */

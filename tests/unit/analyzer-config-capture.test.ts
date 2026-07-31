@@ -465,6 +465,76 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     expect(metrics.blockedStatPreRejected).toBe(1);
   }, 30_000);
 
+  it("CR11-003 reclaims blocked alias bytes before admitting the next unique object", async () => {
+    const aliasBytes = 6 * 1024 * 1024;
+    const uniqueBytes = 10 * 1024 * 1024;
+    const uniquePath = "src/unique.ts";
+    const scenarios = [
+      ["src/ALIAS.ts", "src/Alias.ts"],
+      ["src/Alias.ts", "src/ALIAS.ts"],
+      ["src/alias.ts", "src/Alias.ts", "src/ALIAS.ts"],
+    ] as const;
+    const captures = [];
+
+    for (const aliases of scenarios) {
+      const root = await mkdtemp(path.join(tmpdir(), "codegraph-blocked-alias-budget-"));
+      roots.push(root);
+      const ignoreState = await createInitialIgnoreState(root);
+      if (ignoreState.kind !== "ready") {throw new Error("测试 ignore 前置条件不成立。");}
+      const candidates = [...aliases, uniquePath];
+      let observationIndex = 0;
+      const analyzer: AnalyzerPort = {
+        analyze: async () => ({ consultedLogicalPaths: [], files: [] }),
+        close: () => undefined,
+        observeConfiguration: async () => ({
+          consultedLogicalPaths: [],
+          effectiveCompilerOptions: {},
+          projectConfigurations: [],
+          resolutionCandidateLogicalPaths:
+            observationIndex < candidates.length ? [candidates[observationIndex++]!] : [],
+        }),
+      };
+      const virtualFiles = new Map<string, number>([
+        ...aliases.map((alias) => [alias, aliasBytes] as const),
+        [uniquePath, uniqueBytes],
+      ]);
+
+      captures.push(await createAnalyzerSemanticContextCapture({
+        analyzer,
+        effectiveIgnoreSnapshot: ignoreState.snapshot,
+        indexingRoot: root,
+        workspaceKey: "b".repeat(64),
+      }, {
+        caseSensitiveFileNames: false,
+        inspectBlockedResolutionFile: createVirtualBlockedResolutionInspector(virtualFiles),
+      })({
+        candidateFiles: [],
+        excludedPathCount: 0,
+        manifest: [],
+        manifestDigest: sha256CanonicalJson([]),
+        sourceFiles: [],
+      }));
+    }
+
+    const [expected, ...permutations] = captures;
+    if (expected === undefined) {throw new Error("blocked alias 预算回归缺少基准捕获。");}
+    const expectedBlockedFiles = expected.configSnapshot.blockedResolutionFiles;
+    if (expectedBlockedFiles === undefined) {
+      throw new Error("blocked alias 预算回归缺少封口文件。");
+    }
+    expect(expectedBlockedFiles.map((file) => file.path)).toEqual([
+      "src/ALIAS.ts",
+      uniquePath,
+    ]);
+    expect(expectedBlockedFiles.every((file) =>
+      Object.keys(file).sort().join(",") === "contentHash,path")).toBe(true);
+    for (const capture of permutations) {
+      expect(capture.configDigest).toBe(expected.configDigest);
+      expect(capture.configSnapshot.blockedResolutionFiles)
+        .toEqual(expectedBlockedFiles);
+    }
+  }, 30_000);
+
   it("uses the graph-service authoritative config entry instead of sorting every config file", () => {
     const observation = observeTypeScriptConfiguration({
       configurationEntryPaths: ["tsconfig.json"],
