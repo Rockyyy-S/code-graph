@@ -6,6 +6,11 @@ const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const contractRoot = path.join(repositoryRoot, "tests/contract");
 const dedicatedPath: string = "tests/contract/host-path-identity-win32.test.ts";
 
+/** 从 dedicated 源码统计顶层业务测试，避免 verifier 计数合同随测试增删发生漂移。 */
+function countDedicatedTests(source: string): number {
+  return source.match(/^  it\(/gmu)?.length ?? 0;
+}
+
 /** 递归枚举全部 contract 测试文件，并统一为仓库相对 POSIX path。 */
 async function collectContractTests(directory = contractRoot): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -37,15 +42,18 @@ describe("contract execution partitions", () => {
   });
 
   it("binds portable and dedicated configs without passWithNoTests or skipped-test escape", async () => {
-    const [portableConfig, dedicatedConfig, packageSource, verifier] = await Promise.all([
+    const [portableConfig, dedicatedConfig, dedicatedSource, packageSource, verifier] = await Promise.all([
       readFile(path.join(repositoryRoot, "vitest.contract.config.ts"), "utf8"),
       readFile(path.join(repositoryRoot, "vitest.contract.win32.config.ts"), "utf8"),
+      readFile(path.join(repositoryRoot, dedicatedPath), "utf8"),
       readFile(path.join(repositoryRoot, "package.json"), "utf8"),
       readFile(path.join(repositoryRoot, "scripts/ci/verify-host-path-identity-v1.mjs"), "utf8"),
     ]);
     const scripts = (JSON.parse(packageSource) as { scripts: Record<string, string> }).scripts;
+    const dedicatedTestCount = countDedicatedTests(dedicatedSource);
 
     expect(scripts.contract).toBe("vitest run --config vitest.contract.config.ts");
+    expect(dedicatedTestCount).toBeGreaterThan(0);
     expect(portableConfig).toContain('include: ["tests/contract/**/*.test.ts"]');
     expect(portableConfig).toContain(`"${dedicatedPath}"`);
     expect(portableConfig).toContain("passWithNoTests: false");
@@ -56,7 +64,8 @@ describe("contract execution partitions", () => {
       "runVitestWithRequiredCounts(dedicatedContractConfigPath, contractTestPath)",
     );
     expect(verifier).toContain("suites.length !== 1");
-    expect(verifier).toContain("report.numTotalTests !== 4");
+    expect(verifier).toContain(`report.numTotalTests !== ${dedicatedTestCount}`);
+    expect(verifier).toContain(`report.numPassedTests !== ${dedicatedTestCount}`);
     expect(verifier).toContain("report.numTotalTestSuites <= 0");
     expect(`${portableConfig}\n${dedicatedConfig}\n${scripts.contract}\n${verifier}`).not.toContain(
       "passWithNoTests: true",
@@ -87,6 +96,5 @@ describe("contract execution partitions", () => {
     expect(dedicatedSource).not.toContain("Get-Volume");
     expect(dedicatedSource).not.toContain("spawnSync");
     expect(dedicatedConfig).not.toContain("hookTimeout");
-    expect(dedicatedSource.match(/^  it\(/gmu)).toHaveLength(4);
   });
 });
