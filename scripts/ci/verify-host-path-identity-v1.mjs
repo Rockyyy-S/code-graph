@@ -46,7 +46,7 @@ const allowedProductionImports = new Set([
   "node:os",
   "node:path",
 ]);
-const expectedProductionSourceDigest = "50dada1a79599a8f38d2ec099a6fd7934c0199d4454e3dfe37e47d988825e452";
+const expectedProductionSourceDigest = "b4b75125b60cd0775bbad0492dd4555a5b8e41e7ba1181fe00f9f1dc7e4b1d64";
 const expectedWindowsSnapshotScriptDigest = "67cea8cc0483baca6f2f226850a8c0b6b7cf0d2dac28047dbfe2fd13d226c863";
 const requiredProductionCalls = new Map([
   ["HostPathIdentityBroker.resolveCandidates", [
@@ -59,11 +59,30 @@ const requiredProductionCalls = new Map([
     "buildAliasGroups",
     "createProof",
   ]],
-  ["nativeSnapshotProvider.capture", [
+  ["createDefaultHostPathIdentitySnapshotProvider", [
     "createSnapshotFailure",
-    "captureWindowsHandleSnapshot",
+    "captureWindows",
+    "capturePosix",
   ]],
   ["prepareCandidates", ["validateAbsoluteHostPath", "createTrustedPath"]],
+  ["capturePosixDeviceInodeSnapshot", [
+    "capturePosixState",
+    "createSnapshotFailure",
+    "classifyNativeFailure",
+    "readErrorCode",
+    "digestJson",
+  ]],
+  ["capturePosixState", [
+    "readPosixPathChain",
+    "statfs",
+    "createPosixObjectId",
+    "toUnsignedHex",
+    "containsPosixObject",
+    "samePosixObject",
+    "digestJson",
+  ]],
+  ["readPosixPathChain", ["createNativeCaptureError", "lstat"]],
+  ["createPosixObjectId", ["toUnsignedHex"]],
   ["captureWindowsHandleSnapshot", [
     "mkdtemp",
     "writeFile",
@@ -602,6 +621,448 @@ function canonicalizeStrictUtf8(bytes, label) {
   return source.replaceAll("\r\n", "\n");
 }
 
+/** 读取标识符、this 与属性访问组成的静态访问链，私有字段仅用于精确 broker 装配校验。 */
+function readAccessPath(node) {
+  if (ts.isIdentifier(node)) {
+    return [node.text];
+  }
+  if (node.kind === ts.SyntaxKind.ThisKeyword) {
+    return ["this"];
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    const prefix = readAccessPath(node.expression);
+    if (prefix === null) {
+      return null;
+    }
+    const name = node.name.text;
+    return [...prefix, name === "#snapshotProvider" ? "snapshotProvider" : name];
+  }
+  return null;
+}
+
+/** 静态访问链必须逐段完全相等，禁止用源码 substring 或正则近似。 */
+function accessPathEquals(node, expected) {
+  const actual = readAccessPath(node);
+  return actual !== null &&
+    actual.length === expected.length &&
+    actual.every((part, index) => part === expected[index]);
+}
+
+/** 比较 AST literal，布尔值使用 SyntaxKind 而不是源码文本。 */
+function literalEquals(node, expected) {
+  if (typeof expected === "string") {
+    return ts.isStringLiteral(node) && node.text === expected;
+  }
+  if (expected === true) {
+    return node.kind === ts.SyntaxKind.TrueKeyword;
+  }
+  if (expected === false) {
+    return node.kind === ts.SyntaxKind.FalseKeyword;
+  }
+  return false;
+}
+
+/** 匹配左侧访问链与右侧访问链组成的精确二元表达式。 */
+function isBinaryAccessComparison(node, left, operator, right) {
+  return ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === operator &&
+    accessPathEquals(node.left, left) &&
+    accessPathEquals(node.right, right);
+}
+
+/** 匹配左侧访问链与右侧 literal 组成的精确二元表达式。 */
+function isBinaryAccessLiteralComparison(node, left, operator, right) {
+  return ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === operator &&
+    accessPathEquals(node.left, left) &&
+    literalEquals(node.right, right);
+}
+
+/** 匹配左侧访问链与右侧标识符组成的精确二元表达式。 */
+function isBinaryAccessIdentifierComparison(node, left, operator, identifier) {
+  return ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === operator &&
+    accessPathEquals(node.left, left) &&
+    ts.isIdentifier(node.right) &&
+    node.right.text === identifier;
+}
+
+/** 在给定 AST 子树内收集全部满足条件的节点。 */
+function collectAstNodes(root, predicate) {
+  const matches = [];
+  /** 深度遍历只消费 TypeScript AST，不读取或扫描源码文本。 */
+  function visit(node) {
+    if (predicate(node)) {
+      matches.push(node);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  return matches;
+}
+
+/** 子树只要存在一个满足条件的 AST 节点即返回 true。 */
+function hasAstNode(root, predicate) {
+  return collectAstNodes(root, predicate).length > 0;
+}
+
+/** 对象属性名只接受静态 identifier/string 名称。 */
+function objectPropertyName(property) {
+  if ((ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+      (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) {
+    return property.name.text;
+  }
+  return null;
+}
+
+/** 找到对象字面量中唯一的静态属性。 */
+function findObjectProperty(objectLiteral, name) {
+  const matches = objectLiteral.properties.filter((property) => objectPropertyName(property) === name);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** 判断语句子树是否返回精确的单参数静态调用。 */
+function hasReturnCall(root, callableName, argumentName = "request") {
+  return hasAstNode(root, (node) =>
+    ts.isReturnStatement(node) &&
+    node.expression !== undefined &&
+    ts.isCallExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === callableName &&
+    node.expression.arguments.length === 1 &&
+    ts.isIdentifier(node.expression.arguments[0]) &&
+    node.expression.arguments[0].text === argumentName
+  );
+}
+
+/** 判断语句子树是否返回精确的 fail-closed HostPath failure。 */
+function hasSnapshotFailureReturn(root, status, code, retryable) {
+  return hasAstNode(root, (node) =>
+    ts.isReturnStatement(node) &&
+    node.expression !== undefined &&
+    ts.isCallExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "createSnapshotFailure" &&
+    node.expression.arguments.length === 3 &&
+    literalEquals(node.expression.arguments[0], status) &&
+    literalEquals(node.expression.arguments[1], code) &&
+    literalEquals(node.expression.arguments[2], retryable)
+  );
+}
+
+/** 校验 factory 的原生 fallback 只能静态绑定到指定生产 capture。 */
+function validateNativeFallbackBinding(factory, variableName, optionName, nativeName, violations) {
+  const declarations = collectAstNodes(factory, (node) =>
+    ts.isVariableDeclaration(node) &&
+    ts.isIdentifier(node.name) &&
+    node.name.text === variableName
+  );
+  const initializer = declarations.length === 1 ? declarations[0].initializer : undefined;
+  if (
+    initializer === undefined ||
+    !ts.isBinaryExpression(initializer) ||
+    initializer.operatorToken.kind !== ts.SyntaxKind.QuestionQuestionToken ||
+    !accessPathEquals(initializer.left, ["options", optionName]) ||
+    !ts.isIdentifier(initializer.right) ||
+    initializer.right.text !== nativeName
+  ) {
+    violations.push(`provider factory 的 '${variableName}' 未静态绑定 '${nativeName}'。`);
+  }
+}
+
+/** 校验 broker 默认装配、平台 dispatch 与能力缺失路径全部结构化 fail-closed。 */
+function validateProviderFactoryStructure(sourceFile, brokerConstructorBody, violations) {
+  const factories = collectAstNodes(sourceFile, (node) =>
+    ts.isFunctionDeclaration(node) &&
+    node.name?.text === "createDefaultHostPathIdentitySnapshotProvider"
+  );
+  const factory = factories.length === 1 ? factories[0] : undefined;
+  if (factory?.body === undefined) {
+    violations.push("生产模块缺少唯一默认 HostPath provider factory。");
+    return;
+  }
+  validateNativeFallbackBinding(
+    factory,
+    "captureWindows",
+    "captureWindows",
+    "captureWindowsHandleSnapshot",
+    violations,
+  );
+  validateNativeFallbackBinding(
+    factory,
+    "capturePosix",
+    "capturePosix",
+    "capturePosixDeviceInodeSnapshot",
+    violations,
+  );
+
+  const returnedObjects = collectAstNodes(factory.body, (node) =>
+    ts.isReturnStatement(node) && node.expression !== undefined && ts.isObjectLiteralExpression(node.expression)
+  );
+  const providerObject = returnedObjects.length === 1 ? returnedObjects[0].expression : undefined;
+  const captureProperty = providerObject === undefined
+    ? undefined
+    : findObjectProperty(providerObject, "capture");
+  const captureFunction = captureProperty !== undefined && ts.isPropertyAssignment(captureProperty) &&
+      (ts.isArrowFunction(captureProperty.initializer) || ts.isFunctionExpression(captureProperty.initializer))
+    ? captureProperty.initializer
+    : undefined;
+  if (captureFunction === undefined || !ts.isBlock(captureFunction.body)) {
+    violations.push("provider factory 必须返回唯一的结构化 capture dispatch。");
+    return;
+  }
+
+  const mismatchBranches = collectAstNodes(captureFunction.body, (node) =>
+    ts.isIfStatement(node) &&
+    isBinaryAccessComparison(
+      node.expression,
+      ["request", "platform"],
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      ["options", "platform"],
+    )
+  );
+  if (
+    mismatchBranches.length !== 1 ||
+    !hasSnapshotFailureReturn(
+      mismatchBranches[0].thenStatement,
+      "unsupported",
+      "HOST_PATH_PROVIDER_PLATFORM_MISMATCH",
+      false,
+    )
+  ) {
+    violations.push("provider factory 的平台不匹配路径未精确 fail-closed。");
+  }
+
+  const win32Branches = collectAstNodes(captureFunction.body, (node) =>
+    ts.isIfStatement(node) &&
+    isBinaryAccessLiteralComparison(
+      node.expression,
+      ["request", "platform"],
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      "win32",
+    )
+  );
+  const win32Branch = win32Branches.length === 1 ? win32Branches[0] : undefined;
+  const win32NativeGuard = win32Branch === undefined
+    ? []
+    : collectAstNodes(win32Branch.thenStatement, (node) =>
+      ts.isIfStatement(node) &&
+      hasAstNode(node.expression, (entry) =>
+        ts.isPrefixUnaryExpression(entry) &&
+        entry.operator === ts.SyntaxKind.ExclamationToken &&
+        ts.isIdentifier(entry.operand) &&
+        entry.operand.text === "injectedWindows"
+      ) &&
+      hasAstNode(node.expression, (entry) =>
+        isBinaryAccessLiteralComparison(
+          entry,
+          ["process", "platform"],
+          ts.SyntaxKind.ExclamationEqualsEqualsToken,
+          "win32",
+        )
+      )
+    );
+  if (
+    win32Branch === undefined ||
+    !hasReturnCall(win32Branch.thenStatement, "captureWindows") ||
+    win32NativeGuard.length !== 1 ||
+    !hasSnapshotFailureReturn(
+      win32NativeGuard[0].thenStatement,
+      "unsupported",
+      "HOST_PATH_IDENTITY_UNSUPPORTED",
+      false,
+    )
+  ) {
+    violations.push("provider factory 的 Win32 原生 dispatch 或宿主保护不完整。");
+  }
+
+  const posixFailureBranches = collectAstNodes(captureFunction.body, (node) =>
+    ts.isIfStatement(node) &&
+    hasAstNode(node.expression, (entry) => accessPathEquals(entry, ["options", "caseSensitiveFileNames"])) &&
+    hasAstNode(node.expression, (entry) => isBinaryAccessLiteralComparison(
+      entry,
+      ["request", "platform"],
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      "darwin",
+    )) &&
+    hasAstNode(node.expression, (entry) => isBinaryAccessLiteralComparison(
+      entry,
+      ["request", "platform"],
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      "linux",
+    )) &&
+    hasAstNode(node.expression, (entry) =>
+      ts.isPrefixUnaryExpression(entry) &&
+      entry.operator === ts.SyntaxKind.ExclamationToken &&
+      ts.isIdentifier(entry.operand) &&
+      entry.operand.text === "injectedPosix"
+    ) &&
+    hasAstNode(node.expression, (entry) => isBinaryAccessComparison(
+      entry,
+      ["process", "platform"],
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      ["request", "platform"],
+    ))
+  );
+  if (
+    posixFailureBranches.length !== 1 ||
+    !hasSnapshotFailureReturn(
+      posixFailureBranches[0].thenStatement,
+      "unsupported",
+      "HOST_PATH_IDENTITY_UNSUPPORTED",
+      false,
+    ) ||
+    !hasReturnCall(captureFunction.body, "capturePosix")
+  ) {
+    violations.push("provider factory 的非 Win32 能力保护或 POSIX dispatch 不完整。");
+  }
+
+  if (brokerConstructorBody === undefined) {
+    violations.push("HostPathIdentityBroker 缺少默认 provider 装配构造器。");
+    return;
+  }
+  const providerAssignments = collectAstNodes(brokerConstructorBody, (node) =>
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    accessPathEquals(node.left, ["this", "snapshotProvider"])
+  );
+  const providerInitializer = providerAssignments.length === 1 ? providerAssignments[0].right : undefined;
+  const providerFactoryCall = providerInitializer !== undefined &&
+      ts.isBinaryExpression(providerInitializer) &&
+      providerInitializer.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken &&
+      accessPathEquals(providerInitializer.left, ["options", "snapshotProvider"]) &&
+      ts.isCallExpression(providerInitializer.right) &&
+      ts.isIdentifier(providerInitializer.right.expression) &&
+      providerInitializer.right.expression.text === "createDefaultHostPathIdentitySnapshotProvider"
+    ? providerInitializer.right
+    : undefined;
+  const providerOptions = providerFactoryCall?.arguments.length === 1 &&
+      ts.isObjectLiteralExpression(providerFactoryCall.arguments[0])
+    ? providerFactoryCall.arguments[0]
+    : undefined;
+  const caseSensitiveProperty = providerOptions === undefined
+    ? undefined
+    : findObjectProperty(providerOptions, "caseSensitiveFileNames");
+  const platformProperty = providerOptions === undefined
+    ? undefined
+    : findObjectProperty(providerOptions, "platform");
+  if (
+    providerFactoryCall === undefined ||
+    caseSensitiveProperty === undefined ||
+    platformProperty === undefined
+  ) {
+    violations.push("HostPathIdentityBroker 默认路径未调用 provider factory 并传递平台能力。");
+  }
+}
+
+/** 校验 complete capture 只能接受固定 Win32 或大小写不敏感 POSIX 对象能力。 */
+function validateCapabilityDispatchStructure(sourceFile, violations) {
+  const validators = collectAstNodes(sourceFile, (node) =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "validateCompleteCapture"
+  );
+  const validator = validators.length === 1 ? validators[0] : undefined;
+  if (validator?.body === undefined) {
+    violations.push("生产模块缺少唯一 complete capture 能力校验。");
+    return;
+  }
+  const declarations = new Map();
+  for (const node of collectAstNodes(validator.body, (entry) => ts.isVariableDeclaration(entry))) {
+    if (ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      declarations.set(node.name.text, node.initializer);
+    }
+  }
+  const win32 = declarations.get("win32Capability");
+  const posix = declarations.get("posixCapability");
+  const requiredWin32 = [
+    ["fileSystemType", "NTFS"],
+    ["fileIdInfo", true],
+    ["fixedVolume", true],
+  ];
+  const requiredPosix = [
+    ["fileSystemType", "POSIX"],
+    ["fileIdInfo", false],
+    ["fixedVolume", true],
+    ["objectIdentityKind", "device-inode"],
+    ["caseSensitiveFileNames", false],
+  ];
+  const win32Valid = win32 !== undefined && requiredWin32.every(([field, value]) =>
+    hasAstNode(win32, (node) => isBinaryAccessLiteralComparison(
+      node,
+      ["capture", "capability", field],
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      value,
+    ))
+  ) && hasAstNode(win32, (node) => isBinaryAccessIdentifierComparison(
+    node,
+    ["capture", "capability", "snapshotFence"],
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    "WINDOWS_SNAPSHOT_FENCE",
+  ));
+  const posixValid = posix !== undefined && requiredPosix.every(([field, value]) =>
+    hasAstNode(posix, (node) => isBinaryAccessLiteralComparison(
+      node,
+      ["capture", "capability", field],
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      value,
+    ))
+  ) && hasAstNode(posix, (node) => isBinaryAccessIdentifierComparison(
+    node,
+    ["capture", "capability", "snapshotFence"],
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    "POSIX_SNAPSHOT_FENCE",
+  ));
+  const rejectionBranches = collectAstNodes(validator.body, (node) =>
+    ts.isIfStatement(node) &&
+    hasAstNode(node.expression, (entry) =>
+      ts.isPrefixUnaryExpression(entry) &&
+      entry.operator === ts.SyntaxKind.ExclamationToken &&
+      ts.isIdentifier(entry.operand) &&
+      entry.operand.text === "win32Capability"
+    ) &&
+    hasAstNode(node.expression, (entry) =>
+      ts.isPrefixUnaryExpression(entry) &&
+      entry.operator === ts.SyntaxKind.ExclamationToken &&
+      ts.isIdentifier(entry.operand) &&
+      entry.operand.text === "posixCapability"
+    )
+  );
+  if (
+    !win32Valid ||
+    !posixValid ||
+    rejectionBranches.length !== 1 ||
+    !hasAstNode(rejectionBranches[0].thenStatement, (node) =>
+      ts.isReturnStatement(node) &&
+      node.expression !== undefined &&
+      ts.isCallExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "createFailure" &&
+      node.expression.arguments.length === 3 &&
+      literalEquals(node.expression.arguments[0], "unsupported") &&
+      literalEquals(node.expression.arguments[1], "HOST_PATH_IDENTITY_UNSUPPORTED") &&
+      literalEquals(node.expression.arguments[2], false)
+    )
+  ) {
+    violations.push("complete capture 未封闭校验 Win32/POSIX 能力与 fail-closed 分支。");
+  }
+}
+
+/** 使用 AST 起止偏移应用唯一结构变异；目标不唯一即使 oracle 自身失败。 */
+function applySingleAstMutation(source, mutation) {
+  const sourceFile = ts.createSourceFile(
+    "host-path-identity-mutation.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const matches = collectAstNodes(sourceFile, mutation.select);
+  if (matches.length !== 1) {
+    throw new Error(`${mutation.label}: AST 变异目标必须唯一，实际 ${matches.length}。`);
+  }
+  const target = mutation.target === undefined ? matches[0] : mutation.target(matches[0]);
+  return `${source.slice(0, target.getStart(sourceFile))}${mutation.replacement}${source.slice(target.end)}`;
+}
+
 /**
  * 正向封闭完整生产源码、依赖边与关键调用图，不依赖有限语法或字符串黑名单。
  *
@@ -609,6 +1070,17 @@ function canonicalizeStrictUtf8(bytes, label) {
  * @param {string} modulePath 用于稳定诊断的仓库相对路径。
  */
 export function validateHostPathIdentitySource(source, modulePath = sourcePath) {
+  validateHostPathIdentitySourceInternal(source, modulePath, true);
+}
+
+/**
+ * 结构化完整性校验可以在 mutation oracle 中关闭固定摘要，证明调用图本身会拒绝绕过。
+ *
+ * @param {string} source 待检查源码。
+ * @param {string} modulePath 稳定诊断路径。
+ * @param {boolean} enforceSourceDigest 是否同时锁定完整规范化源码摘要。
+ */
+function validateHostPathIdentitySourceInternal(source, modulePath, enforceSourceDigest) {
   if (/\r(?!\n)/u.test(source)) {
     throw new Error(`${modulePath}: host identity 源码包含不受信任的 lone CR。`);
   }
@@ -623,6 +1095,7 @@ export function validateHostPathIdentitySource(source, modulePath = sourcePath) 
   const violations = [];
   const imports = new Set();
   const observedProductionCalls = new Map();
+  let brokerConstructorBody;
   let windowsSnapshotScript;
 
   /** 记录指定函数或方法体内实际存在的直接与回调调用目标。 */
@@ -675,6 +1148,9 @@ export function validateHostPathIdentitySource(source, modulePath = sourcePath) 
       node.name?.text === "HostPathIdentityBroker"
     ) {
       for (const member of node.members) {
+        if (ts.isConstructorDeclaration(member) && member.body !== undefined) {
+          brokerConstructorBody = member.body;
+        }
         if (
           ts.isMethodDeclaration(member) &&
           ts.isIdentifier(member.name) &&
@@ -696,23 +1172,9 @@ export function validateHostPathIdentitySource(source, modulePath = sourcePath) 
     if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
-      node.name.text === "nativeSnapshotProvider" &&
-      node.initializer !== undefined &&
-      ts.isObjectLiteralExpression(node.initializer)
+      node.name.text === "nativeSnapshotProvider"
     ) {
-      const captureProperty = node.initializer.properties.find((property) =>
-        ts.isPropertyAssignment(property) &&
-        ts.isIdentifier(property.name) &&
-        property.name.text === "capture"
-      );
-      if (
-        captureProperty !== undefined &&
-        ts.isPropertyAssignment(captureProperty) &&
-        (ts.isArrowFunction(captureProperty.initializer) ||
-          ts.isFunctionExpression(captureProperty.initializer))
-      ) {
-        recordCalls("nativeSnapshotProvider.capture", captureProperty.initializer.body);
-      }
+      violations.push("生产模块不得保留绕过 provider factory 的第二套默认身份实现。");
     }
     if (
       ts.isVariableDeclaration(node) &&
@@ -732,8 +1194,10 @@ export function validateHostPathIdentitySource(source, modulePath = sourcePath) 
   }
 
   visit(sourceFile);
+  validateProviderFactoryStructure(sourceFile, brokerConstructorBody, violations);
+  validateCapabilityDispatchStructure(sourceFile, violations);
   const sourceDigest = createHash("sha256").update(source, "utf8").digest("hex");
-  if (sourceDigest !== expectedProductionSourceDigest) {
+  if (enforceSourceDigest && sourceDigest !== expectedProductionSourceDigest) {
     violations.push("生产模块完整源码摘要漂移，存在未审计的第二套身份语义。");
   }
   for (const required of allowedProductionImports) {
@@ -773,8 +1237,11 @@ export function validateHostPathIdentitySource(source, modulePath = sourcePath) 
   }
 }
 
-/** 固定变异集注入完整生产源码，必须全部破坏正向源码闭包而被拒绝。 */
-function validateMutationOracle(source) {
+/**
+ * 固定变异集同时验证完整源码摘要和 provider factory/platform/capability 结构合同。
+ * 结构变异通过 AST 精确定位目标节点，并在关闭摘要后仍必须被正向调用图拒绝。
+ */
+export function validateMutationOracle(source) {
   const mutations = [
     `const mutationMember=["to","LowerCase"].join(""); export const mutationValue="A"[mutationMember]();`,
     `import { createRequire as mutationCreateRequire } from "node:module"; mutationCreateRequire(import.meta.url)("./helper.cjs");`,
@@ -795,6 +1262,97 @@ function validateMutationOracle(source) {
     }
     if (!rejected) {
       throw new Error(`mutation-oracle-${index}: verifier 未拒绝固定绕过样本。`);
+    }
+  }
+
+  const structuralMutations = [
+    {
+      label: "broker-default-provider-factory",
+      replacement: "captureWindowsHandleSnapshot",
+      select: (node) => ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "createDefaultHostPathIdentitySnapshotProvider",
+    },
+    {
+      label: "win32-native-binding",
+      replacement: "options.captureWindows ?? capturePosixDeviceInodeSnapshot",
+      select: (node) => ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "captureWindows" &&
+        node.initializer !== undefined,
+      target: (node) => node.initializer,
+    },
+    {
+      label: "posix-native-binding",
+      replacement: "options.capturePosix ?? captureWindowsHandleSnapshot",
+      select: (node) => ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "capturePosix" &&
+        node.initializer !== undefined,
+      target: (node) => node.initializer,
+    },
+    {
+      label: "platform-mismatch-fail-closed",
+      replacement: "request.platform === options.platform",
+      select: (node) => isBinaryAccessComparison(
+        node,
+        ["request", "platform"],
+        ts.SyntaxKind.ExclamationEqualsEqualsToken,
+        ["options", "platform"],
+      ),
+    },
+    {
+      label: "case-sensitive-posix-fail-closed",
+      replacement: "false",
+      select: (node) => ts.isIfStatement(node) &&
+        hasAstNode(node.expression, (entry) =>
+          accessPathEquals(entry, ["options", "caseSensitiveFileNames"])
+        ) &&
+        hasAstNode(node.expression, (entry) => isBinaryAccessLiteralComparison(
+          entry,
+          ["request", "platform"],
+          ts.SyntaxKind.ExclamationEqualsEqualsToken,
+          "darwin",
+        )),
+      target: (node) => node.expression,
+    },
+    {
+      label: "posix-platform-dispatch",
+      replacement: "captureWindows(request)",
+      select: (node) => ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "capturePosix" &&
+        node.arguments.length === 1 &&
+        ts.isIdentifier(node.arguments[0]) &&
+        node.arguments[0].text === "request",
+    },
+    {
+      label: "posix-capability-fail-closed",
+      replacement: "capture.capability.caseSensitiveFileNames === true",
+      select: (node) => isBinaryAccessLiteralComparison(
+        node,
+        ["capture", "capability", "caseSensitiveFileNames"],
+        ts.SyntaxKind.EqualsEqualsEqualsToken,
+        false,
+      ),
+    },
+  ];
+  for (const [index, mutation] of structuralMutations.entries()) {
+    const mutated = applySingleAstMutation(source, mutation);
+    let rejected = false;
+    try {
+      validateHostPathIdentitySourceInternal(
+        mutated,
+        `structural-mutation-oracle-${index}.ts`,
+        false,
+      );
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) {
+      throw new Error(
+        `structural-mutation-oracle-${index}:${mutation.label}: verifier 未拒绝结构化绕过样本。`,
+      );
     }
   }
 }

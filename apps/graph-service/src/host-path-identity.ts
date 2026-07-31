@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, rm, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const DEFAULT_MAX_HOST_PATH_CANDIDATES = 256;
-export const MAX_HOST_PATH_CANDIDATES = 4096;
+export const MAX_HOST_PATH_CANDIDATES = 6_144;
 export const DEFAULT_MAX_HOST_PATH_LOGICAL_BYTES = 4096;
 export const MAX_HOST_PATH_LOGICAL_BYTES = 16 * 1024;
 export const DEFAULT_MAX_HOST_PATH_ABSOLUTE_BYTES = 32 * 1024;
@@ -14,6 +14,7 @@ export const DEFAULT_MAX_HOST_PATH_BATCH_BYTES = 2 * 1024 * 1024;
 export const MAX_HOST_PATH_BATCH_BYTES = 8 * 1024 * 1024;
 
 const WINDOWS_SNAPSHOT_FENCE = "non-delete-shared-handle-lease-v1";
+const POSIX_SNAPSHOT_FENCE = "two-phase-device-inode-capture-v1";
 const WINDOWS_CAPTURE_TIMEOUT_MS = 30_000;
 const WINDOWS_CAPTURE_OUTPUT_LIMIT = 1024 * 1024;
 
@@ -102,9 +103,11 @@ export type HostPathCandidateResolutionV1 =
 
 /** 原生快照必须声明明确的卷与句柄栅栏能力。 */
 export interface HostPathSnapshotCapabilityV1 {
+  caseSensitiveFileNames?: boolean;
   fileIdInfo: boolean;
   fileSystemType: string;
   fixedVolume: boolean;
+  objectIdentityKind?: "device-inode" | "win32-file-id-info";
   snapshotFence: string;
 }
 
@@ -153,6 +156,14 @@ export interface HostPathIdentitySnapshotProvider {
   }): Promise<HostPathSnapshotCaptureV1>;
 }
 
+/** 默认 provider 的平台选择与测试注入边界。 */
+export interface DefaultHostPathIdentitySnapshotProviderOptions {
+  capturePosix?: HostPathIdentitySnapshotProvider["capture"];
+  captureWindows?: HostPathIdentitySnapshotProvider["capture"];
+  caseSensitiveFileNames: boolean;
+  platform: NodeJS.Platform;
+}
+
 /** 单路径观察显式绑定 indexing root。 */
 export interface ObserveHostPathIdentityOptions {
   indexingRoot: string;
@@ -162,6 +173,7 @@ export interface ObserveHostPathIdentityOptions {
 
 /** broker 配置固定 root、宿主能力和所有输入预算。 */
 export interface HostPathIdentityBrokerOptions extends ObserveHostPathIdentityOptions {
+  caseSensitiveFileNames?: boolean;
   maxAbsolutePathBytes?: number;
   maxBatchBytes?: number;
   maxCandidates?: number;
@@ -200,19 +212,53 @@ interface CapturedIdentityContext {
   volumeIdentity: string;
 }
 
-/** 默认宿主边界只在真实 Win32 上提供 FILE_ID_INFO 与非删除共享句柄快照。 */
-const nativeSnapshotProvider: HostPathIdentitySnapshotProvider = {
-  capture: async (request) => {
-    if (request.platform !== "win32" || process.platform !== "win32") {
-      return createSnapshotFailure(
-        "unsupported",
-        "HOST_PATH_IDENTITY_UNSUPPORTED",
-        false,
-      );
-    }
-    return captureWindowsHandleSnapshot(request);
-  },
-};
+/**
+ * 根据生产宿主语义选择真实对象身份 provider。
+ *
+ * 非 Win32 只有在组合根已只读证明大小写不敏感时才启用设备/inode capture；
+ * 平台伪装、能力缺失或大小写敏感宿主均封闭失败。
+ */
+export function createDefaultHostPathIdentitySnapshotProvider(
+  options: DefaultHostPathIdentitySnapshotProviderOptions,
+): HostPathIdentitySnapshotProvider {
+  const captureWindows = options.captureWindows ?? captureWindowsHandleSnapshot;
+  const capturePosix = options.capturePosix ?? capturePosixDeviceInodeSnapshot;
+  const injectedWindows = options.captureWindows !== undefined;
+  const injectedPosix = options.capturePosix !== undefined;
+  return {
+    capture: async (request) => {
+      if (request.platform !== options.platform) {
+        return createSnapshotFailure(
+          "unsupported",
+          "HOST_PATH_PROVIDER_PLATFORM_MISMATCH",
+          false,
+        );
+      }
+      if (request.platform === "win32") {
+        if (!injectedWindows && process.platform !== "win32") {
+          return createSnapshotFailure(
+            "unsupported",
+            "HOST_PATH_IDENTITY_UNSUPPORTED",
+            false,
+          );
+        }
+        return captureWindows(request);
+      }
+      if (
+        options.caseSensitiveFileNames ||
+        (request.platform !== "darwin" && request.platform !== "linux") ||
+        (!injectedPosix && process.platform !== request.platform)
+      ) {
+        return createSnapshotFailure(
+          "unsupported",
+          "HOST_PATH_IDENTITY_UNSUPPORTED",
+          false,
+        );
+      }
+      return capturePosix(request);
+    },
+  };
+}
 
 /** 观察单个文件，并返回只在该原生句柄快照内有效的 opaque identity。 */
 export async function observeHostPathIdentity(
@@ -264,7 +310,11 @@ export class HostPathIdentityBroker {
     };
     this.#indexingRoot = options.indexingRoot;
     this.#platform = platform;
-    this.#snapshotProvider = options.snapshotProvider ?? nativeSnapshotProvider;
+    this.#snapshotProvider = options.snapshotProvider ??
+      createDefaultHostPathIdentitySnapshotProvider({
+        caseSensitiveFileNames: options.caseSensitiveFileNames ?? platform !== "win32",
+        platform,
+      });
   }
 
   /** 单路径只把 requested path 当作断言，containment 由原生 root ancestry 证明。 */
@@ -424,7 +474,7 @@ export class HostPathIdentityBroker {
   }
 }
 
-/** 原生 complete 结果必须满足封闭 Win32 能力合同。 */
+/** 原生 complete 结果必须满足封闭 Win32 或 POSIX 对象身份能力合同。 */
 function validateCompleteCapture(
   capture: CompleteHostPathSnapshotV1,
   captureNonce: string,
@@ -438,12 +488,19 @@ function validateCompleteCapture(
   ) {
     return createFailure("error", "HOST_PATH_SNAPSHOT_INVALID", false);
   }
-  if (
-    capture.capability.fileSystemType !== "NTFS" ||
-    capture.capability.fileIdInfo !== true ||
-    capture.capability.fixedVolume !== true ||
-    capture.capability.snapshotFence !== WINDOWS_SNAPSHOT_FENCE
-  ) {
+  const win32Capability = capture.capability.fileSystemType === "NTFS" &&
+    capture.capability.fileIdInfo === true &&
+    capture.capability.fixedVolume === true &&
+    capture.capability.snapshotFence === WINDOWS_SNAPSHOT_FENCE &&
+    (capture.capability.objectIdentityKind === undefined ||
+      capture.capability.objectIdentityKind === "win32-file-id-info");
+  const posixCapability = capture.capability.fileSystemType === "POSIX" &&
+    capture.capability.fileIdInfo === false &&
+    capture.capability.fixedVolume === true &&
+    capture.capability.snapshotFence === POSIX_SNAPSHOT_FENCE &&
+    capture.capability.objectIdentityKind === "device-inode" &&
+    capture.capability.caseSensitiveFileNames === false;
+  if (!win32Capability && !posixCapability) {
     return createFailure(
       "unsupported",
       "HOST_PATH_IDENTITY_UNSUPPORTED",
@@ -671,7 +728,23 @@ function createSnapshotFailure(
 
 /** 永久宿主错误必须 non-retryable unsupported。 */
 function classifyNativeFailure(code: string): FailedHostPathSnapshotV1 {
-  if (["ENAMETOOLONG", "EINVAL", "ENOSYS", "ENOTSUP"].includes(code)) {
+  if (code === "HOST_PATH_CHANGED") {
+    return createSnapshotFailure("changed", code, true);
+  }
+  if ([
+    "ENAMETOOLONG",
+    "EINVAL",
+    "ELOOP",
+    "ENOSYS",
+    "ENOTSUP",
+    "HOST_PATH_LOGICAL_MAPPING_MISMATCH",
+    "HOST_PATH_NOT_DIRECTORY",
+    "HOST_PATH_NOT_REGULAR_FILE",
+    "HOST_PATH_OUTSIDE_INDEXING_ROOT",
+    "HOST_PATH_REPARSE_POINT",
+    "HOST_PATH_TOPOLOGY_UNSUPPORTED",
+    "HOST_PATH_VOLUME_MISMATCH",
+  ].includes(code)) {
     return createSnapshotFailure("unsupported", code, false);
   }
   if (code === "EACCES" || code === "EPERM") {
@@ -812,6 +885,193 @@ function compareOrdinal(left: string, right: string): number {
 /** 稳定字段顺序的本地证明摘要。 */
 function digestJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+interface PosixObjectFingerprint {
+  ctimeNs: string;
+  dev: string;
+  ino: string;
+  kind: "directory" | "file";
+  mode: string;
+  nlink: string;
+  size: string;
+}
+
+interface PosixCaptureState {
+  items: HostPathSnapshotItemV1[];
+  rootObjectId: string;
+  topologyDigest: string;
+  volumeId: string;
+}
+
+/**
+ * 非 Win32 provider 以两阶段 lstat 拓扑捕获证明同批设备/inode 身份。
+ *
+ * 两阶段都逐组件拒绝符号链接和特殊文件，并复核 root、volume、logical mapping 与
+ * 全部候选指纹；任一 ABA、rename、替换或批次漂移均返回 changed。路径字符串只用于
+ * 本次捕获，不进入对象 ID、proof 或持久化摘要。
+ */
+async function capturePosixDeviceInodeSnapshot(request: {
+  candidates: readonly HostPathSnapshotCandidateV1[];
+  captureNonce: string;
+  indexingRoot: string;
+  platform: NodeJS.Platform;
+}): Promise<HostPathSnapshotCaptureV1> {
+  try {
+    const first = await capturePosixState(request);
+    const second = await capturePosixState(request);
+    if (
+      first.rootObjectId !== second.rootObjectId ||
+      first.volumeId !== second.volumeId ||
+      first.topologyDigest !== second.topologyDigest ||
+      digestJson(first.items) !== digestJson(second.items)
+    ) {
+      return createSnapshotFailure("changed", "HOST_PATH_CHANGED", true);
+    }
+    return {
+      capability: {
+        caseSensitiveFileNames: false,
+        fileIdInfo: false,
+        fileSystemType: "POSIX",
+        fixedVolume: true,
+        objectIdentityKind: "device-inode",
+        snapshotFence: POSIX_SNAPSHOT_FENCE,
+      },
+      captureNonce: request.captureNonce,
+      items: first.items,
+      rootObjectId: first.rootObjectId,
+      status: "complete",
+      volumeId: first.volumeId,
+    };
+  } catch (error) {
+    return classifyNativeFailure(readErrorCode(error));
+  }
+}
+
+/** 单阶段读取使用精确路径缓存，使 6144 项标准规模保持有界而不持有海量句柄。 */
+async function capturePosixState(request: {
+  candidates: readonly HostPathSnapshotCandidateV1[];
+  indexingRoot: string;
+}): Promise<PosixCaptureState> {
+  const observations = new Map<string, PosixObjectFingerprint>();
+  const rootChain = await readPosixPathChain(request.indexingRoot, true, observations);
+  const root = rootChain.at(-1);
+  if (root === undefined) {
+    throw createNativeCaptureError("HOST_PATH_TOPOLOGY_UNSUPPORTED");
+  }
+  const fileSystem = await statfs(request.indexingRoot, { bigint: true });
+  const rootObjectId = createPosixObjectId(root);
+  const volumeId = `posix-volume:${toUnsignedHex(root.dev)}:${toUnsignedHex(fileSystem.type)}`;
+  const topology: unknown[] = [["root", rootChain]];
+  const items: HostPathSnapshotItemV1[] = [];
+
+  for (const candidate of request.candidates) {
+    const trustedChain = await readPosixPathChain(candidate.trustedPath, false, observations);
+    const assertedChain = await readPosixPathChain(candidate.absolutePath, false, observations);
+    const trusted = trustedChain.at(-1);
+    const asserted = assertedChain.at(-1);
+    if (trusted === undefined || asserted === undefined) {
+      throw createNativeCaptureError("HOST_PATH_TOPOLOGY_UNSUPPORTED");
+    }
+    if (!containsPosixObject(trustedChain, root) || !containsPosixObject(assertedChain, root)) {
+      throw createNativeCaptureError("HOST_PATH_OUTSIDE_INDEXING_ROOT");
+    }
+    if (trusted.dev !== root.dev || asserted.dev !== root.dev) {
+      throw createNativeCaptureError("HOST_PATH_VOLUME_MISMATCH");
+    }
+    if (!samePosixObject(trusted, asserted)) {
+      throw createNativeCaptureError("HOST_PATH_LOGICAL_MAPPING_MISMATCH");
+    }
+    items.push({
+      candidateIndex: candidate.candidateIndex,
+      objectId: createPosixObjectId(trusted),
+    });
+    topology.push([candidate.candidateIndex, trustedChain, assertedChain]);
+  }
+  return {
+    items,
+    rootObjectId,
+    topologyDigest: digestJson(topology),
+    volumeId,
+  };
+}
+
+/** 每个路径组件都用 lstat 观察，任何 symlink 或类型漂移都拒绝整批证明。 */
+async function readPosixPathChain(
+  input: string,
+  finalDirectory: boolean,
+  cache: Map<string, PosixObjectFingerprint>,
+): Promise<PosixObjectFingerprint[]> {
+  if (!path.posix.isAbsolute(input) || path.posix.normalize(input) !== input) {
+    throw createNativeCaptureError("EINVAL");
+  }
+  const segments = input.split("/").filter((segment) => segment.length > 0);
+  const paths = ["/"];
+  let current = "/";
+  for (const segment of segments) {
+    current = path.posix.join(current, segment);
+    paths.push(current);
+  }
+  const chain: PosixObjectFingerprint[] = [];
+  for (let index = 0; index < paths.length; index += 1) {
+    const candidatePath = paths[index]!;
+    let fingerprint = cache.get(candidatePath);
+    if (fingerprint === undefined) {
+      const status = await lstat(candidatePath, { bigint: true });
+      if (status.isSymbolicLink()) {
+        throw createNativeCaptureError("HOST_PATH_REPARSE_POINT");
+      }
+      const expectedDirectory = index < paths.length - 1 || finalDirectory;
+      if (expectedDirectory ? !status.isDirectory() : !status.isFile()) {
+        throw createNativeCaptureError(
+          expectedDirectory ? "HOST_PATH_NOT_DIRECTORY" : "HOST_PATH_NOT_REGULAR_FILE",
+        );
+      }
+      fingerprint = {
+        ctimeNs: status.ctimeNs.toString(),
+        dev: status.dev.toString(),
+        ino: status.ino.toString(),
+        kind: expectedDirectory ? "directory" : "file",
+        mode: status.mode.toString(),
+        nlink: status.nlink.toString(),
+        size: status.size.toString(),
+      };
+      cache.set(candidatePath, fingerprint);
+    }
+    chain.push(fingerprint);
+  }
+  return chain;
+}
+
+/** dev/inode 是宿主对象身份；ctime 等字段只用于同批一致性，不进入对象 ID。 */
+function createPosixObjectId(fingerprint: PosixObjectFingerprint): string {
+  return `posix:${toUnsignedHex(fingerprint.dev)}:${toUnsignedHex(fingerprint.ino)}`;
+}
+
+/** POSIX 标识统一用无符号十六进制，避免平台十进制格式差异。 */
+function toUnsignedHex(value: bigint | string): string {
+  return BigInt(value).toString(16);
+}
+
+/** root containment 按同批真实对象 tuple 判断，不使用 realpath 或字符串折叠。 */
+function containsPosixObject(
+  chain: readonly PosixObjectFingerprint[],
+  expected: PosixObjectFingerprint,
+): boolean {
+  return chain.some((entry) => samePosixObject(entry, expected));
+}
+
+/** 同一 capture 内只有设备与 inode 同时相等才视为同一对象。 */
+function samePosixObject(
+  left: PosixObjectFingerprint,
+  right: PosixObjectFingerprint,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/** 构造只携带稳定 code 的原生边界错误。 */
+function createNativeCaptureError(code: string): Error {
+  return Object.assign(new Error(code), { code });
 }
 
 /** PowerShell/C# 原生边界固定使用 FILE_ID_INFO 与不共享删除的全路径句柄链。 */

@@ -6,7 +6,9 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createDefaultHostPathIdentitySnapshotProvider,
   HostPathIdentityBroker,
+  MAX_HOST_PATH_CANDIDATES,
   observeHostPathIdentity,
   type CompleteHostPathSnapshotV1,
   type FailedHostPathSnapshotV1,
@@ -22,6 +24,7 @@ import {
   serializeHostPathIdentityEnvelope,
   validateCandidateSourceIdentity,
   validateHostPathIdentitySource,
+  validateMutationOracle,
 } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
 import { runProcessWithDeadline } from "../../scripts/ci/run-process-with-deadline.mjs";
 
@@ -42,6 +45,15 @@ const supportedCapability: HostPathSnapshotCapabilityV1 = {
   fileSystemType: "NTFS",
   fixedVolume: true,
   snapshotFence: "non-delete-shared-handle-lease-v1",
+};
+
+const supportedPosixCapability: HostPathSnapshotCapabilityV1 = {
+  caseSensitiveFileNames: false,
+  fileIdInfo: false,
+  fileSystemType: "POSIX",
+  fixedVolume: true,
+  objectIdentityKind: "device-inode",
+  snapshotFence: "two-phase-device-inode-capture-v1",
 };
 
 /** 构造显式 FILE_ID_INFO 与句柄租约能力的确定性原生边界。 */
@@ -615,6 +627,7 @@ describe("host path identity broker", () => {
       source,
       "apps/graph-service/src/host-path-identity.ts",
     )).not.toThrow();
+    expect(() => validateMutationOracle(source)).not.toThrow();
 
     for (const mutation of [
       `const member = ["to", "LowerCase"].join(""); export const folded = "A"[member]();`,
@@ -651,6 +664,67 @@ describe("host path identity broker", () => {
     expect(proof.entries.every(({ observation }) =>
       observation.status === "present" && observation.identityLifetime === "snapshot"
     )).toBe(true);
+  });
+
+  it("selects the default POSIX object provider for a case-insensitive non-Win32 host", async () => {
+    const captureWindows = vi.fn<HostPathIdentitySnapshotProvider["capture"]>();
+    const capturePosix = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => ({
+      capability: supportedPosixCapability,
+      captureNonce: request.captureNonce,
+      items: request.candidates.map((candidate) => ({
+        candidateIndex: candidate.candidateIndex,
+        objectId: candidate.logicalPath === "alias.ts"
+          ? "0000000000000001:0000000000000010"
+          : "0000000000000001:0000000000000011",
+      })),
+      rootObjectId: "0000000000000001:0000000000000001",
+      status: "complete",
+      volumeId: "0000000000000001:posix-local",
+    }));
+    const provider = createDefaultHostPathIdentitySnapshotProvider({
+      capturePosix,
+      captureWindows,
+      caseSensitiveFileNames: false,
+      platform: "darwin",
+    });
+    const proof = await new HostPathIdentityBroker({
+      indexingRoot: "/repo",
+      platform: "darwin",
+      snapshotProvider: provider,
+    }).resolveCandidates([
+      { absolutePath: "/repo/Alias.ts", logicalPath: "alias.ts" },
+      { absolutePath: "/repo/distinct.ts", logicalPath: "distinct.ts" },
+    ]);
+
+    expect(proof.status).toBe("complete");
+    expect(proof.aliasGroups).toHaveLength(2);
+    expect(capturePosix).toHaveBeenCalledTimes(1);
+    expect(captureWindows).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the default non-Win32 provider lacks case-insensitive capability", async () => {
+    const capturePosix = vi.fn<HostPathIdentitySnapshotProvider["capture"]>();
+    const provider = createDefaultHostPathIdentitySnapshotProvider({
+      capturePosix,
+      captureWindows: vi.fn<HostPathIdentitySnapshotProvider["capture"]>(),
+      caseSensitiveFileNames: true,
+      platform: "linux",
+    });
+    const proof = await new HostPathIdentityBroker({
+      indexingRoot: "/repo",
+      platform: "linux",
+      snapshotProvider: provider,
+    }).resolveCandidates([
+      { absolutePath: "/repo/a.ts", logicalPath: "a.ts" },
+    ]);
+
+    expect(proof.status).toBe("failed");
+    expect(proof.entries[0]?.observation).toMatchObject({
+      code: "HOST_PATH_IDENTITY_UNSUPPORTED",
+      retryable: false,
+      status: "unsupported",
+    });
+    expect(capturePosix).not.toHaveBeenCalled();
   });
 
   it("accepts Win32 root, intermediate and leaf casing aliases after object proof", async () => {
@@ -896,6 +970,73 @@ describe("host path identity broker", () => {
     });
     expect(lateRead).not.toHaveBeenCalled();
     expect(fake.capture).not.toHaveBeenCalled();
+  });
+
+  it("covers 5000 sources, 1024 resolution metadata entries and bounded root metadata", async () => {
+    expect(MAX_HOST_PATH_CANDIDATES).toBe(6_144);
+    const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => ({
+      capability: supportedPosixCapability,
+      captureNonce: request.captureNonce,
+      items: request.candidates.map((candidate) => ({
+        candidateIndex: candidate.candidateIndex,
+        objectId: `object-${candidate.candidateIndex.toString().padStart(8, "0")}`,
+      })),
+      rootObjectId: "root-object-0001",
+      status: "complete",
+      volumeId: "volume-posix-0001",
+    }));
+    const candidates = [
+      ...Array.from({ length: 5_000 }, (_, index) => ({
+        absolutePath: `/repo/src/file-${index}.ts`,
+        logicalPath: `src/file-${index}.ts`,
+      })),
+      ...Array.from({ length: 1_024 }, (_, index) => ({
+        absolutePath: `/repo/node_modules/pkg-${index}/package.json`,
+        logicalPath: `node_modules/pkg-${index}/package.json`,
+      })),
+      ...Array.from({ length: 120 }, (_, index) => ({
+        absolutePath: `/repo/.metadata/root-${index}.json`,
+        logicalPath: `.metadata/root-${index}.json`,
+      })),
+    ];
+    const broker = new HostPathIdentityBroker({
+      indexingRoot: "/repo",
+      maxCandidates: MAX_HOST_PATH_CANDIDATES,
+      platform: "linux",
+      snapshotProvider: { capture },
+    });
+
+    const proof = await broker.resolveCandidates(candidates);
+
+    expect(proof.status).toBe("complete");
+    expect(proof.entries).toHaveLength(6_144);
+    expect(capture).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the standard proof limit plus one before candidate materialization or capture", async () => {
+    expect(MAX_HOST_PATH_CANDIDATES).toBe(6_144);
+    const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>();
+    const unread = vi.fn(() => {
+      throw new Error("MAX+1 不得读取任何候选字段。");
+    });
+    const candidates = Array.from({ length: 6_145 }, () =>
+      Object.defineProperties({}, {
+        absolutePath: { get: unread },
+        logicalPath: { get: unread },
+      })) as Array<{ absolutePath: string; logicalPath: string }>;
+    const broker = new HostPathIdentityBroker({
+      indexingRoot: "/repo",
+      maxCandidates: 6_144,
+      platform: "linux",
+      snapshotProvider: { capture },
+    });
+
+    await expect(broker.resolveCandidates(candidates)).resolves.toMatchObject({
+      code: "HOST_PATH_CANDIDATE_LIMIT_EXCEEDED",
+      status: "rejected",
+    });
+    expect(unread).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("sorts unique logical paths while keeping broker generation separate from snapshot identity", async () => {

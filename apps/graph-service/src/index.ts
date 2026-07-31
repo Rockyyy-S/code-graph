@@ -16,9 +16,11 @@ import type { ServiceInstancePaths } from "./instance-owner.js";
 import { createInitialIgnoreState } from "./ignore-bootstrap.js";
 import { createVerifiedIndexJobRuntime } from "./index-job-runtime.js";
 import {
+  createDefaultHostPathIdentitySnapshotProvider,
   HostPathIdentityBroker,
   MAX_HOST_PATH_CANDIDATES,
 } from "./host-path-identity.js";
+import { isFileSystemCaseSensitive } from "./workspace-scanner.js";
 
 const STARTUP_LOGGER_CLOSE_TIMEOUT_MS = 250;
 
@@ -57,10 +59,17 @@ export async function startGraphService(
          * service instance 只创建一个 broker；每次 Analyzer capture 仍生成独立瞬态句柄批次，
          * snapshot identity 不会进入 store、digest 或进程外协议。
          */
+        const platform = options.platform ?? process.platform;
+        const caseSensitiveFileNames = isFileSystemCaseSensitive(indexingRoot);
         const hostPathIdentityBroker = new HostPathIdentityBroker({
+          caseSensitiveFileNames,
           indexingRoot,
           maxCandidates: MAX_HOST_PATH_CANDIDATES,
-          platform: options.platform ?? process.platform,
+          platform,
+          snapshotProvider: createDefaultHostPathIdentitySnapshotProvider({
+            caseSensitiveFileNames,
+            platform,
+          }),
         });
         try {
           store = await openSqliteGraphStore({
