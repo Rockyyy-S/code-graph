@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 /** Windows taskkill 在高进程负载下需要更长的有界树清理窗口。 */
 export const DEFAULT_PROCESS_CLEANUP_GRACE_MS =
   process.platform === "win32" ? 10_000 : 2_000;
 const MAX_NODE_TIMER_MS = 2_147_483_647;
-const WINDOWS_JOB_READY_MARKER = Buffer.from("CODEGRAPH_WINDOWS_JOB_READY\n", "ascii");
+const WINDOWS_JOB_CONTROL_START = Buffer.from([0x1e]);
+const WINDOWS_JOB_CONTROL_END = Buffer.from([0x1f]);
+const WINDOWS_JOB_CONTROL_TAIL_BYTES = 4 * 1024;
 const WINDOWS_JOB_SHELL_EXECUTABLE = "pwsh.exe";
 
 /**
@@ -13,20 +16,26 @@ const WINDOWS_JOB_SHELL_EXECUTABLE = "pwsh.exe";
  * 程序集由同一对象的 source 编译，摘要在 helper 加载前再次校验。
  */
 const WINDOWS_JOB_HOST_ARTIFACT = Object.freeze({
-  assemblyBase64: "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AgAEAAIABQACAAYAAgAHAAIAFwBPAAAAAGNiUmVzZXJ2ZWQyAGxwUmVzZXJ2ZWQyADxNb2R1bGU+AENSRUFURV9TVVNQRU5ERUQASk9CX09CSkVDVF9MSU1JVF9LSUxMX09OX0pPQl9DTE9TRQBJTkZJTklURQBnZXRfQVNDSUkAUFJPQ0VTU19JTkZPUk1BVElPTgBKT0JPQkpFQ1RfQkFTSUNfTElNSVRfSU5GT1JNQVRJT04ASk9CT0JKRUNUX0VYVEVOREVEX0xJTUlUX0lORk9STUFUSU9OAFNUQVJUVVBJTkZPAFN5c3RlbS5JTwBTVEFSVEZfVVNFU1RESEFORExFUwBJT19DT1VOVEVSUwBDUkVBVEVfVU5JQ09ERV9FTlZJUk9OTUVOVABDcmVhdGVQcm9jZXNzVwBkd1gAZHdZAGNiAGpvYgBkd1RocmVhZElkAGR3UHJvY2Vzc0lkAFJlc3VtZVRocmVhZABoVGhyZWFkAHRocmVhZABQZWFrSm9iTWVtb3J5VXNlZABQZWFrUHJvY2Vzc01lbW9yeVVzZWQAbHBSZXNlcnZlZABleGl0Q29kZQBzdGFuZGFyZEhhbmRsZQBHZXRTdGRIYW5kbGUAUnVudGltZVR5cGVIYW5kbGUAQ2xvc2VIYW5kbGUAR2V0VHlwZUZyb21IYW5kbGUAaGFuZGxlAFN5c3RlbS5Db25zb2xlAGxwVGl0bGUAYXBwbGljYXRpb25OYW1lAG5hbWUAU3lzdGVtLlJ1bnRpbWUAY29tbWFuZExpbmUAVmFsdWVUeXBlAFdyaXRlAERlYnVnZ2FibGVBdHRyaWJ1dGUAZHdGaWxsQXR0cmlidXRlAFJlZlNhZmV0eVJ1bGVzQXR0cmlidXRlAENvbXBpbGF0aW9uUmVsYXhhdGlvbnNBdHRyaWJ1dGUAUnVudGltZUNvbXBhdGliaWxpdHlBdHRyaWJ1dGUAZHdYU2l6ZQBkd1lTaXplAE1pbmltdW1Xb3JraW5nU2V0U2l6ZQBNYXhpbXVtV29ya2luZ1NldFNpemUAU2l6ZU9mAEVuY29kaW5nAFN0cmluZwBGbHVzaABpbmZvcm1hdGlvbkxlbmd0aABBbGxvY0hHbG9iYWwARnJlZUhHbG9iYWwATWFyc2hhbABTeXN0ZW0uQ29tcG9uZW50TW9kZWwAa2VybmVsMzIuZGxsAHcwcjBhMnR2LjR2di5kbGwAU3RyZWFtAFN5c3RlbQBwcm9jZXNzSW5mb3JtYXRpb24AQmFzaWNMaW1pdEluZm9ybWF0aW9uAGluZm9ybWF0aW9uAFdpbjMyRXhjZXB0aW9uAFJ1bgBJb0luZm8Ac3RhcnR1cEluZm8AWmVybwBscERlc2t0b3AAU3RyaW5nQnVpbGRlcgBHZXRMYXN0V2luMzJFcnJvcgBoU3RkRXJyb3IALmN0b3IAU3RydWN0dXJlVG9QdHIASW50UHRyAFN5c3RlbS5EaWFnbm9zdGljcwBtaWxsaXNlY29uZHMAU3lzdGVtLlJ1bnRpbWUuSW50ZXJvcFNlcnZpY2VzAFN5c3RlbS5SdW50aW1lLkNvbXBpbGVyU2VydmljZXMARGVidWdnaW5nTW9kZXMAaW5oZXJpdEhhbmRsZXMAam9iQXR0cmlidXRlcwB0aHJlYWRBdHRyaWJ1dGVzAHByb2Nlc3NBdHRyaWJ1dGVzAEdldEJ5dGVzAE1pY3Jvc29mdC5XaW4zMi5QcmltaXRpdmVzAGNyZWF0aW9uRmxhZ3MATGltaXRGbGFncwBkd0ZsYWdzAGR3WENvdW50Q2hhcnMAZHdZQ291bnRDaGFycwBTY2hlZHVsaW5nQ2xhc3MAaW5mb3JtYXRpb25DbGFzcwBQcmlvcml0eUNsYXNzAEdldEV4aXRDb2RlUHJvY2VzcwBUZXJtaW5hdGVQcm9jZXNzAGhQcm9jZXNzAHByb2Nlc3MAQ3JlYXRlSm9iT2JqZWN0AFNldEluZm9ybWF0aW9uSm9iT2JqZWN0AEFzc2lnblByb2Nlc3NUb0pvYk9iamVjdABXYWl0Rm9yU2luZ2xlT2JqZWN0AFBlckpvYlVzZXJUaW1lTGltaXQAUGVyUHJvY2Vzc1VzZXJUaW1lTGltaXQAQWN0aXZlUHJvY2Vzc0xpbWl0AEpvYk1lbW9yeUxpbWl0AFByb2Nlc3NNZW1vcnlMaW1pdABlbnZpcm9ubWVudABSZWFkT3BlcmF0aW9uQ291bnQAV3JpdGVPcGVyYXRpb25Db3VudABPdGhlck9wZXJhdGlvbkNvdW50AFJlYWRUcmFuc2ZlckNvdW50AFdyaXRlVHJhbnNmZXJDb3VudABPdGhlclRyYW5zZmVyQ291bnQAQ29kZUdyYXBoV2luZG93c0pvYkhvc3QAaFN0ZElucHV0AE9wZW5TdGFuZGFyZE91dHB1dABoU3RkT3V0cHV0AFN5c3RlbS5UZXh0AHcwcjBhMnR2LjR2dgB3U2hvd1dpbmRvdwBjdXJyZW50RGlyZWN0b3J5AEFmZmluaXR5AElzTnVsbE9yRW1wdHkAAAAAOUMATwBEAEUARwBSAEEAUABIAF8AVwBJAE4ARABPAFcAUwBfAEoATwBCAF8AUgBFAEEARABZAAoAAADYKL7QInB2SIKjgr+WeYC6AAQgAQEIAyAAAQUgAQERERwHFRgREAICERwIGBEMHQUSIQkCAgICAgIIAgICAgYYAwAACAYAARI1ETkFAAEIEjUEAAEYCAgQAQMBHgAYAgQKAREcBAABARgEAAECDgQgAQEOBAAAEkEFIAEdBQ4EAAASIQcgAwEdBQgICLA/X38R1Qo6BAQAAAAEAAQAAAT/////BAAgAAAEAAEAAAIGCQIGDgIGBgIGCgIGGQIGCwMGERQDBhEYEgAKAg4SHRgYAgkYDhARDBAREAUAAhgYDgcABAIYCBgJBQACAhgYBAABCRgFAAIJGAkGAAICGBAJBQACAhgJBAABAhgGAAMIDg4OCAEACAAAAAAAHgEAAQBUAhZXcmFwTm9uRXhjZXB0aW9uVGhyb3dzAQgBAAcBAAAAAAgBAAsAAAAAANAxAAAAAAAAAAAAAOoxAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAADcMQAAAAAAAAAAAAAAAF9Db3JEbGxNYWluAG1zY29yZWUuZGxsAAAAAAD/JQAgABAAMAAADAAAAPwxAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
-  assemblySha256: "6c6cf74ee292fe308ad22b5ffa4f36bf1fd6062aded5065d9ddb44cc8f0a6d47",
+  assemblyBase64: "TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAA4fug4AtAnNIbgBTM0hVGhpcyBwcm9ncmFtIGNhbm5vdCBiZSBydW4gaW4gRE9TIG1vZGUuDQ0KJAAAAAAAAABQRQAATAEDAHXBamoAAAAAAAAAAOAAAiELAQsAACAAAAAGAAAAAAAAPj4AAAAgAAAAQAAAAAAAEAAgAAAAAgAABAAAAAAAAAAEAAAAAAAAAACAAAAAAgAAAAAAAAMAQIUAABAAABAAAAAAEAAAEAAAAAAAABAAAAAAAAAAAAAAAPA9AABLAAAAAEAAAOACAAAAAAAAAAAAAAAAAAAAAAAAAGAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAACAAAAAAAAAAAAAAACCAAAEgAAAAAAAAAAAAAAC50ZXh0AAAARB4AAAAgAAAAIAAAAAIAAAAAAAAAAAAAAAAAACAAAGAucnNyYwAAAOACAAAAQAAAAAQAAAAiAAAAAAAAAAAAAAAAAABAAABALnJlbG9jAAAMAAAAAGAAAAACAAAAJgAAAAAAAAAAAAAAAAAAQAAAQgAAAAAAAAAAAAAAAAAAAAAgPgAAAAAAAEgAAAACAAUAjCcAAGQWAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABswBQBlAAAAAQAAEQDQBgAAAigFAAAKKAYAAAoKBigHAAAKCwACFwcGEgIoBAAABhMFEQUtDAAoCAAACnMJAAAKegfQBgAAAigFAAAKKAoAAAqlBgAAAg0SA3suAAAEEwTeCgAHKAsAAAoAANwAEQQqAAAAARAAAAIAGAA/VwAKAAAAABMwAgBEAAAAAgAAEQAoDAAACgorNgACKA8AAAYW/gEW/gELBy0DACsmBm8NAAAKA2r+BAsHLQwAcgEAAHBzDgAACnobKA8AAAoAABcLK8YqGzADANgAAAADAAARAAMoEAAACi0IAygRAAAKKwEWABMFEQUtCQAWEwQ4sgAAAAADKBIAAAooEwAACm8UAAAKCgDeCiYAFhME3ZMAAAAABhIBKBUAAAosCQcW/gEW/gErARYAEwURBS0MAHJtAABwcxYAAAp6IAAQAAAWBygIAAAGDAh+FwAACigYAAAKFv4BEwURBS0MACgIAAAKcwkAAAp6AAgCEgMoBgAABhMFEQUtDAAoCAAACnMJAAAKegkTBREFLQwAcr8AAHBzGQAACnoHEwTeCgAIKA4AAAYmANwAEQQqARwAAAAAIgAVNwAKFgAAAQIAlgA0ygAKAAAAABMwBAA2AAAABAAAEQAoGgAACnIdAQBwAnIhAQBwKBsAAApvHAAACgooHQAACgsHBhYGjmlvHgAACgAHbx8AAAoAKgAAGzAKALEEAAAFAAARAH4XAAAKFCgCAAAGCgZ+FwAACigYAAAKFv4BExERES0MACgIAAAKcwkAAAp6EgH+FQQAAAIWDAASA/4VCAAAAhIDfDYAAAQgACAAAH0hAAAE0AgAAAIoBQAACigGAAAKEwQRBCgHAAAKEwUACREFFigBAAArAAYfCREFEQQoAwAABhMREREtDAAoCAAACnMJAAAKegDeCwARBSgLAAAKAADcABIG/hUDAAACEgbQAwAAAigFAAAKKAYAAAp9CQAABBIGIAABAAB9FAAABBIGH/YoDQAABn0YAAAEEgYf9SgNAAAGfRkAAAQSBh/0KA0AAAZ9GgAABAIoEAAACi0DAisBFAADcyEAAAp+FwAACn4XAAAKFyAEBAAAfhcAAAoEEgYSASgBAAAGExERES0MACgIAAAKcwkAAAp6FwwGEgF7GwAABCgFAAAGExERES0MACgIAAAKcwkAAAp6EgF7GwAABAYSBygGAAAGLAQRBysBFgATERERLQwAKAgAAApzCQAACnoGKA8AAAYTCBEIF/4BExERES0MAHIlAQBwcxkAAAp6HI0PAAABExIREhZyhQEAcKIREhcFohESGHK/AQBwohESGRIBfB0AAAQoIgAACqIREhpyvwEAcKIREhsSCCgiAAAKohESKCMAAAooEgAABgASAXscAAAEKAkAAAYV/gEW/gETERERLQwAKAgAAApzCQAACnooDAAAChMJFhMKFhMLFhMMOJAAAAAAEQwW/gEW/gETERERLQwABg4GKBEAAAYTDAAfCmoXag4EahEJbw0AAApZKCQAAAooJQAACm0TDRIBexsAAAQRDSgKAAAGEw4RDhb+ARb+ARMREREtBgAXEwsrPBEOIAIBAAD+ARMREREtDAAoCAAACnMJAAAKehEJbw0AAAoOBGr+BBMREREtBgAXEworCQAXExE4aP///xEMFv4BFv4BExERES0MAAYOBigRAAAGEwwADgYoEAAACi0KEQwW/gEW/gErARcAExERES0MAHLDAQBwcxkAAAp6FxMPEQssEBIBexsAAAQSDygLAAAGKwEXABMREREtDAAoCAAACnMJAAAKegYoDwAABhY2EwYRCi0EEQ8rAh98ACgHAAAGKwEXABMREREtDAAoCAAACnMJAAAKegYOBSgQAAAGAB8KjQ8AAAETEhESFnIhAgBwohESFwWiERIYcr8BAHCiERIZEQotB3JhAgBwKwVyawIAcACiERIacr8BAHCiERIbEg8oIgAACqIREhxyewIAcKIREh0SAXwdAAAEKCIAAAqiERIecr8BAHCiERIfCRIMKCIAAAqiERIoIwAACigSAAAGABYTEN23AAAAJgAILBYSAXsbAAAEfhcAAAooJgAAChb+ASsBFwATERERLTYAAAYoDwAABhb+Axb+ARMREREtCgAGFygHAAAGJgAA3hMmABIBexsAAAQXKAwAAAYmAN4AAAD+GgASAXscAAAEfhcAAAooJgAAChb+ARMREREtDwASAXscAAAEKA4AAAYmABIBexsAAAR+FwAACigmAAAKFv4BExERES0PABIBexsAAAQoDgAABiYABigOAAAGJgDcABEQKgAAAEFkAAACAAAAawAAACwAAACXAAAACwAAAAAAAAAAAAAAGgQAACAAAAA6BAAAEwAAAAEAAAEAAAAANwAAAL8DAAD2AwAAWwAAAAEAAAECAAAANwAAABoEAABRBAAAXAAAAAAAAABCU0pCAQABAAAAAAAMAAAAdjQuMC4zMDMxOQAAAAAFAGwAAAAcBwAAI34AAIgHAACICgAAI1N0cmluZ3MAAAAAEBIAAIQCAAAjVVMAlBQAABAAAAAjR1VJRAAAAKQUAADAAQAAI0Jsb2IAAAAAAAAAAgAAAVcdAhQJCgAAAPolMwAWAAABAAAAGwAAAAgAAAA7AAAAEwAAADUAAAAnAAAACAAAAAIAAAAFAAAAAQAAAA4AAAABAAAAAgAAAAYAAAABAAAAAAAKAAEAAAAAAAYA6ADhAAYA7wDhAAYArwGjAQYApwaIBgYA2ge6BwYA+ge6BwYAGAiIBgYAOAjhAAYA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Sk9CT0JKRUNUX0JBU0lDX0FDQ09VTlRJTkdfSU5GT1JNQVRJT04ASU9fQ09VTlRFUlMASk9CT0JKRUNUX0VYVEVOREVEX0xJTUlUX0lORk9STUFUSU9OAG1zY29ybGliAFN5c3RlbQBPYmplY3QAVmFsdWVUeXBlAENSRUFURV9TVVNQRU5ERUQAQ1JFQVRFX1VOSUNPREVfRU5WSVJPTk1FTlQASU5GSU5JVEUASk9CX09CSkVDVF9MSU1JVF9LSUxMX09OX0pPQl9DTE9TRQBQUk9DRVNTX1FVRVJZX0xJTUlURURfSU5GT1JNQVRJT04AU1RBUlRGX1VTRVNUREhBTkRMRVMAV0FJVF9PQkpFQ1RfMABXQUlUX1RJTUVPVVQAU3lzdGVtLlRleHQAU3RyaW5nQnVpbGRlcgBDcmVhdGVQcm9jZXNzVwBDcmVhdGVKb2JPYmplY3QAU2V0SW5mb3JtYXRpb25Kb2JPYmplY3QAUXVlcnlJbmZvcm1hdGlvbkpvYk9iamVjdABBc3NpZ25Qcm9jZXNzVG9Kb2JPYmplY3QASXNQcm9jZXNzSW5Kb2IAVGVybWluYXRlSm9iT2JqZWN0AE9wZW5Qcm9jZXNzAFJlc3VtZVRocmVhZABXYWl0Rm9yU2luZ2xlT2JqZWN0AEdldEV4aXRDb2RlUHJvY2VzcwBUZXJtaW5hdGVQcm9jZXNzAEdldFN0ZEhhbmRsZQBDbG9zZUhhbmRsZQBRdWVyeUFjdGl2ZVByb2Nlc3NlcwBXYWl0Rm9yQWN0aXZlUHJvY2Vzc1plcm8AVHJ5QXR0ZXN0RGVzY2VuZGFudABXcml0ZUNvbnRyb2wAUnVuAGNiAGxwUmVzZXJ2ZWQAbHBEZXNrdG9wAGxwVGl0bGUAZHdYAGR3WQBkd1hTaXplAGR3WVNpemUAZHdYQ291bnRDaGFycwBkd1lDb3VudENoYXJzAGR3RmlsbEF0dHJpYnV0ZQBkd0ZsYWdzAHdTaG93V2luZG93AGNiUmVzZXJ2ZWQyAGxwUmVzZXJ2ZWQyAGhTdGRJbnB1dABoU3RkT3V0cHV0AGhTdGRFcnJvcgBoUHJvY2VzcwBoVGhyZWFkAGR3UHJvY2Vzc0lkAGR3VGhyZWFkSWQAUGVyUHJvY2Vzc1VzZXJUaW1lTGltaXQAUGVySm9iVXNlclRpbWVMaW1pdABMaW1pdEZsYWdzAE1pbmltdW1Xb3JraW5nU2V0U2l6ZQBNYXhpbXVtV29ya2luZ1NldFNpemUAQWN0aXZlUHJvY2Vzc0xpbWl0AEFmZmluaXR5AFByaW9yaXR5Q2xhc3MAU2NoZWR1bGluZ0NsYXNzAFRvdGFsVXNlclRpbWUAVG90YWxLZXJuZWxUaW1lAFRoaXNQZXJpb2RUb3RhbFVzZXJUaW1lAFRoaXNQZXJpb2RUb3RhbEtlcm5lbFRpbWUAVG90YWxQYWdlRmF1bHRDb3VudABUb3RhbFByb2Nlc3NlcwBBY3RpdmVQcm9jZXNzZXMAVG90YWxUZXJtaW5hdGVkUHJvY2Vzc2VzAFJlYWRPcGVyYXRpb25Db3VudABXcml0ZU9wZXJhdGlvbkNvdW50AE90aGVyT3BlcmF0aW9uQ291bnQAUmVhZFRyYW5zZmVyQ291bnQAV3JpdGVUcmFuc2ZlckNvdW50AE90aGVyVHJhbnNmZXJDb3VudABCYXNpY0xpbWl0SW5mb3JtYXRpb24ASW9JbmZvAFByb2Nlc3NNZW1vcnlMaW1pdABKb2JNZW1vcnlMaW1pdABQZWFrUHJvY2Vzc01lbW9yeVVzZWQAUGVha0pvYk1lbW9yeVVzZWQAYXBwbGljYXRpb25OYW1lAGNvbW1hbmRMaW5lAHByb2Nlc3NBdHRyaWJ1dGVzAHRocmVhZEF0dHJpYnV0ZXMAaW5oZXJpdEhhbmRsZXMAY3JlYXRpb25GbGFncwBlbnZpcm9ubWVudABjdXJyZW50RGlyZWN0b3J5AHN0YXJ0dXBJbmZvAHByb2Nlc3NJbmZvcm1hdGlvbgBTeXN0ZW0uUnVudGltZS5JbnRlcm9wU2VydmljZXMAT3V0QXR0cmlidXRlAC5jdG9yAGpvYkF0dHJpYnV0ZXMAbmFtZQBqb2IAaW5mb3JtYXRpb25DbGFzcwBpbmZvcm1hdGlvbgBpbmZvcm1hdGlvbkxlbmd0aAByZXR1cm5MZW5ndGgAcHJvY2VzcwByZXN1bHQAZXhpdENvZGUAZGVzaXJlZEFjY2VzcwBpbmhlcml0SGFuZGxlAHByb2Nlc3NJZAB0aHJlYWQAaGFuZGxlAG1pbGxpc2Vjb25kcwBzdGFuZGFyZEhhbmRsZQB0aW1lb3V0TXMAcmVhZHlQYXRoAHZhbHVlAG5vbmNlAGNsZWFudXBUaW1lb3V0TXMAZGVzY2VuZGFudFJlYWR5UGF0aABTeXN0ZW0uUnVudGltZS5Db21waWxlclNlcnZpY2VzAENvbXBpbGF0aW9uUmVsYXhhdGlvbnNBdHRyaWJ1dGUAUnVudGltZUNvbXBhdGliaWxpdHlBdHRyaWJ1dGUARGxsSW1wb3J0QXR0cmlidXRlAGtlcm5lbDMyLmRsbABUeXBlAFJ1bnRpbWVUeXBlSGFuZGxlAEdldFR5cGVGcm9tSGFuZGxlAE1hcnNoYWwAU2l6ZU9mAEFsbG9jSEdsb2JhbABHZXRMYXN0V2luMzJFcnJvcgBTeXN0ZW0uQ29tcG9uZW50TW9kZWwAV2luMzJFeGNlcHRpb24AUHRyVG9TdHJ1Y3R1cmUARnJlZUhHbG9iYWwAU3lzdGVtLkRpYWdub3N0aWNzAFN0b3B3YXRjaABTdGFydE5ldwBnZXRfRWxhcHNlZE1pbGxpc2Vjb25kcwBUaW1lb3V0RXhjZXB0aW9uAFN5c3RlbS5UaHJlYWRpbmcAVGhyZWFkAFNsZWVwAFN0cmluZwBJc051bGxPckVtcHR5AFN5c3RlbS5JTwBGaWxlAEV4aXN0cwBFbmNvZGluZwBnZXRfVVRGOABSZWFkQWxsVGV4dABUcmltAFVJbnQzMgBUcnlQYXJzZQBJbnZhbGlkRGF0YUV4Y2VwdGlvbgBJbnRQdHIAWmVybwBvcF9FcXVhbGl0eQBJbnZhbGlkT3BlcmF0aW9uRXhjZXB0aW9uAElPRXhjZXB0aW9uAGdldF9BU0NJSQBDb25jYXQAR2V0Qnl0ZXMAQ29uc29sZQBTdHJlYW0AT3BlblN0YW5kYXJkRXJyb3IAV3JpdGUARmx1c2gAU3RydWN0dXJlVG9QdHIAVG9TdHJpbmcATWF0aABNYXgATWluAG9wX0luZXF1YWxpdHkAU3RydWN0TGF5b3V0QXR0cmlidXRlAExheW91dEtpbmQAAGtXAGkAbgBkAG8AdwBzACAASgBvAGIAIABBAGMAdABpAHYAZQBQAHIAbwBjAGUAcwBzAGUAcwAgAGQAaQBkACAAbgBvAHQAIABjAG8AbgB2AGUAcgBnAGUAIAB0AG8AIAB6AGUAcgBvAC4AAFFXAGkAbgBkAG8AdwBzACAAZABlAHMA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",
+  assemblySha256: "117e213700c359895de604df9e22c4933103f311b8a9c1418e94181020988805",
   source: String.raw`
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 public static class CodeGraphWindowsJobHost {
   private const uint CREATE_SUSPENDED = 0x00000004;
   private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
   private const uint INFINITE = 0xFFFFFFFF;
   private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+  private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000;
   private const uint STARTF_USESTDHANDLES = 0x00000100;
+  private const uint WAIT_OBJECT_0 = 0x00000000;
+  private const uint WAIT_TIMEOUT = 0x00000102;
 
   [StructLayout(LayoutKind.Sequential)]
   private struct STARTUPINFO {
@@ -69,6 +78,18 @@ public static class CodeGraphWindowsJobHost {
     public UIntPtr Affinity;
     public uint PriorityClass;
     public uint SchedulingClass;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+    public long TotalUserTime;
+    public long TotalKernelTime;
+    public long ThisPeriodTotalUserTime;
+    public long ThisPeriodTotalKernelTime;
+    public uint TotalPageFaultCount;
+    public uint TotalProcesses;
+    public uint ActiveProcesses;
+    public uint TotalTerminatedProcesses;
   }
 
   [StructLayout(LayoutKind.Sequential)]
@@ -115,7 +136,24 @@ public static class CodeGraphWindowsJobHost {
     uint informationLength);
 
   [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool QueryInformationJobObject(
+    IntPtr job,
+    int informationClass,
+    IntPtr information,
+    uint informationLength,
+    out uint returnLength);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
   private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
 
   [DllImport("kernel32.dll", SetLastError = true)]
   private static extern uint ResumeThread(IntPtr thread);
@@ -135,7 +173,80 @@ public static class CodeGraphWindowsJobHost {
   [DllImport("kernel32.dll")]
   private static extern bool CloseHandle(IntPtr handle);
 
-  public static int Run(string applicationName, string commandLine, string currentDirectory) {
+  private static uint QueryActiveProcesses(IntPtr job) {
+    int size = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+    IntPtr pointer = Marshal.AllocHGlobal(size);
+    try {
+      uint returned;
+      if (!QueryInformationJobObject(job, 1, pointer, (uint)size, out returned)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error());
+      }
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting =
+        (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)Marshal.PtrToStructure(
+          pointer,
+          typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+      return accounting.ActiveProcesses;
+    } finally {
+      Marshal.FreeHGlobal(pointer);
+    }
+  }
+
+  private static void WaitForActiveProcessZero(IntPtr job, int timeoutMs) {
+    Stopwatch timer = Stopwatch.StartNew();
+    while (true) {
+      if (QueryActiveProcesses(job) == 0) { return; }
+      if (timer.ElapsedMilliseconds >= timeoutMs) {
+        throw new TimeoutException("Windows Job ActiveProcesses did not converge to zero.");
+      }
+      Thread.Sleep(5);
+    }
+  }
+
+  private static uint TryAttestDescendant(IntPtr job, string readyPath) {
+    if (String.IsNullOrEmpty(readyPath) || !File.Exists(readyPath)) { return 0; }
+    string text;
+    try {
+      text = File.ReadAllText(readyPath, Encoding.UTF8).Trim();
+    } catch (IOException) {
+      return 0;
+    }
+    uint descendantPid;
+    if (!UInt32.TryParse(text, out descendantPid) || descendantPid == 0) {
+      throw new InvalidDataException("Windows descendant ready PID is invalid.");
+    }
+    IntPtr descendant = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, descendantPid);
+    if (descendant == IntPtr.Zero) {
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+    try {
+      bool belongsToJob;
+      if (!IsProcessInJob(descendant, job, out belongsToJob)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error());
+      }
+      if (!belongsToJob) {
+        throw new InvalidOperationException("Windows descendant is not assigned to the Job.");
+      }
+      return descendantPid;
+    } finally {
+      CloseHandle(descendant);
+    }
+  }
+
+  private static void WriteControl(string value) {
+    byte[] bytes = Encoding.ASCII.GetBytes("\u001e" + value + "\u001f");
+    Stream output = Console.OpenStandardError();
+    output.Write(bytes, 0, bytes.Length);
+    output.Flush();
+  }
+
+  public static int Run(
+    string applicationName,
+    string commandLine,
+    string currentDirectory,
+    string nonce,
+    int timeoutMs,
+    int cleanupTimeoutMs,
+    string descendantReadyPath) {
     IntPtr job = CreateJobObject(IntPtr.Zero, null);
     if (job == IntPtr.Zero) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
     PROCESS_INFORMATION process = new PROCESS_INFORMATION();
@@ -177,30 +288,79 @@ public static class CodeGraphWindowsJobHost {
       if (!AssignProcessToJobObject(job, process.hProcess)) {
         throw new Win32Exception(Marshal.GetLastWin32Error());
       }
-      byte[] ready = Encoding.ASCII.GetBytes("CODEGRAPH_WINDOWS_JOB_READY\n");
-      System.IO.Stream output = Console.OpenStandardOutput();
-      output.Write(ready, 0, ready.Length);
-      output.Flush();
+      bool rootInJob;
+      if (!IsProcessInJob(process.hProcess, job, out rootInJob) || !rootInJob) {
+        throw new Win32Exception(Marshal.GetLastWin32Error());
+      }
+      uint initialActiveProcesses = QueryActiveProcesses(job);
+      if (initialActiveProcesses != 1) {
+        throw new InvalidOperationException("Windows Job initial ActiveProcesses is not one.");
+      }
+      WriteControl(
+        "CODEGRAPH_WINDOWS_JOB_READY:" + nonce + ":" +
+        process.dwProcessId.ToString() + ":" + initialActiveProcesses.ToString());
       if (ResumeThread(process.hThread) == UInt32.MaxValue) {
         throw new Win32Exception(Marshal.GetLastWin32Error());
       }
-      if (WaitForSingleObject(process.hProcess, INFINITE) == UInt32.MaxValue) {
+
+      Stopwatch execution = Stopwatch.StartNew();
+      bool timedOut = false;
+      bool rootExited = false;
+      uint descendantPid = 0;
+      while (true) {
+        if (descendantPid == 0) {
+          descendantPid = TryAttestDescendant(job, descendantReadyPath);
+        }
+        uint waitMs = (uint)Math.Min(10, Math.Max(1, timeoutMs - execution.ElapsedMilliseconds));
+        uint wait = WaitForSingleObject(process.hProcess, waitMs);
+        if (wait == WAIT_OBJECT_0) {
+          rootExited = true;
+          break;
+        }
+        if (wait != WAIT_TIMEOUT) {
+          throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        if (execution.ElapsedMilliseconds >= timeoutMs) {
+          timedOut = true;
+          break;
+        }
+      }
+      if (descendantPid == 0) {
+        descendantPid = TryAttestDescendant(job, descendantReadyPath);
+      }
+      if (!String.IsNullOrEmpty(descendantReadyPath) && descendantPid == 0) {
+        throw new InvalidOperationException("Windows descendant readiness was not attested.");
+      }
+
+      uint rootExitCode = 1;
+      if (rootExited && !GetExitCodeProcess(process.hProcess, out rootExitCode)) {
         throw new Win32Exception(Marshal.GetLastWin32Error());
       }
-      uint exitCode;
-      if (!GetExitCodeProcess(process.hProcess, out exitCode)) {
+      if (QueryActiveProcesses(job) > 0 &&
+          !TerminateJobObject(job, timedOut ? 124U : rootExitCode)) {
         throw new Win32Exception(Marshal.GetLastWin32Error());
       }
-      return unchecked((int)exitCode);
+      WaitForActiveProcessZero(job, cleanupTimeoutMs);
+      WriteControl(
+        "CODEGRAPH_WINDOWS_JOB_TERMINAL:" + nonce + ":" +
+        (timedOut ? "timeout" : "exit") + ":" + rootExitCode.ToString() +
+        ":0:" + process.dwProcessId.ToString() + ":" + descendantPid.ToString());
+      return 0;
     } catch {
       if (created && process.hProcess != IntPtr.Zero) {
-        TerminateProcess(process.hProcess, 1);
+        try {
+          if (QueryActiveProcesses(job) > 0) {
+            TerminateJobObject(job, 1);
+          }
+        } catch {
+          TerminateProcess(process.hProcess, 1);
+        }
       }
       throw;
     } finally {
       if (process.hThread != IntPtr.Zero) { CloseHandle(process.hThread); }
       if (process.hProcess != IntPtr.Zero) { CloseHandle(process.hProcess); }
-      // 关闭 Job 的最后一个句柄是内核级收敛点，孤儿化后代也会在此被终止。
+      // KILL_ON_JOB_CLOSE 仅作为异常路径最后保险，正常结果必须先证明 ActiveProcesses=0。
       CloseHandle(job);
     }
   }
@@ -208,9 +368,10 @@ public static class CodeGraphWindowsJobHost {
 `,
 });
 
+
 const WINDOWS_JOB_HOST_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
-$assemblyBytes = [Convert]::FromBase64String('${WINDOWS_JOB_HOST_ARTIFACT.assemblyBase64}')
+$assemblyBytes = [Convert]::FromBase64String($env:CODEGRAPH_JOB_ASSEMBLY_BASE64)
 $assemblyDigest = [Convert]::ToHexString(
   [Security.Cryptography.SHA256]::HashData($assemblyBytes)
 ).ToLowerInvariant()
@@ -226,10 +387,27 @@ function Decode-CodeGraphValue([string] $name) {
 $applicationName = Decode-CodeGraphValue $env:CODEGRAPH_JOB_APPLICATION
 $commandLine = Decode-CodeGraphValue $env:CODEGRAPH_JOB_COMMAND_LINE
 $workingDirectory = Decode-CodeGraphValue $env:CODEGRAPH_JOB_WORKING_DIRECTORY
+$nonce = Decode-CodeGraphValue $env:CODEGRAPH_JOB_NONCE
+$descendantReadyPath = Decode-CodeGraphValue $env:CODEGRAPH_JOB_DESCENDANT_READY_PATH
+$timeoutMs = [int]$env:CODEGRAPH_JOB_TIMEOUT_MS
+$cleanupTimeoutMs = [int]$env:CODEGRAPH_JOB_CLEANUP_TIMEOUT_MS
+Remove-Item Env:CODEGRAPH_JOB_ASSEMBLY_BASE64 -ErrorAction SilentlyContinue
 Remove-Item Env:CODEGRAPH_JOB_APPLICATION -ErrorAction SilentlyContinue
 Remove-Item Env:CODEGRAPH_JOB_COMMAND_LINE -ErrorAction SilentlyContinue
 Remove-Item Env:CODEGRAPH_JOB_WORKING_DIRECTORY -ErrorAction SilentlyContinue
-$exitCode = [CodeGraphWindowsJobHost]::Run($applicationName, $commandLine, $workingDirectory)
+Remove-Item Env:CODEGRAPH_JOB_NONCE -ErrorAction SilentlyContinue
+Remove-Item Env:CODEGRAPH_JOB_DESCENDANT_READY_PATH -ErrorAction SilentlyContinue
+Remove-Item Env:CODEGRAPH_JOB_TIMEOUT_MS -ErrorAction SilentlyContinue
+Remove-Item Env:CODEGRAPH_JOB_CLEANUP_TIMEOUT_MS -ErrorAction SilentlyContinue
+$exitCode = [CodeGraphWindowsJobHost]::Run(
+  $applicationName,
+  $commandLine,
+  $workingDirectory,
+  $nonce,
+  $timeoutMs,
+  $cleanupTimeoutMs,
+  $descendantReadyPath
+)
 exit $exitCode
 `;
 /** 预编码避免高并发时通过 PowerShell stdin 解析 host 脚本造成额外启动阻塞。 */
@@ -241,7 +419,7 @@ const WINDOWS_JOB_HOST_ENCODED_COMMAND = Buffer.from(
 /**
  * 以 shell:false 执行进程，并用绝对 deadline、升级终止和有界输出保证最终收敛。
  *
- * @param {{args:string[],cleanupProcessTree?:(child:import("node:child_process").ChildProcess,timeoutMs:number)=>Promise<void>,cleanupProcessTreeOnExit?:boolean,cwd:string,env?:NodeJS.ProcessEnv,executable:string,killGraceMs?:number,outputLimitBytes?:number,spawnProcess?:typeof spawn,timeoutMs:number,windowsVerbatimArguments?:boolean}} options 进程执行参数。
+ * @param {{args:string[],cleanupProcessTree?:(child:import("node:child_process").ChildProcess,timeoutMs:number)=>Promise<void>,cleanupProcessTreeOnExit?:boolean,cwd:string,env?:NodeJS.ProcessEnv,executable:string,killGraceMs?:number,outputLimitBytes?:number,spawnProcess?:typeof spawn,timeoutMs:number,windowsDescendantReadyPath?:string,windowsVerbatimArguments?:boolean}} options 进程执行参数。
  */
 export function runProcessWithDeadline(options) {
   const timeoutMs = options.timeoutMs;
@@ -255,9 +433,18 @@ export function runProcessWithDeadline(options) {
     killGraceMs <= 0 ||
     killGraceMs > MAX_NODE_TIMER_MS ||
     !Number.isSafeInteger(outputLimitBytes) ||
-    outputLimitBytes <= 0
+    outputLimitBytes <= 0 ||
+    (options.windowsDescendantReadyPath !== undefined &&
+      !path.win32.isAbsolute(options.windowsDescendantReadyPath))
   ) {
     throw new TypeError("进程 deadline 与终止宽限必须是 Node timer 上限内的正安全整数，输出上限必须是正安全整数。");
+  }
+  if (process.platform === "win32" && options.spawnProcess === undefined) {
+    return runWindowsJobProcessWithDeadline(options, {
+      killGraceMs,
+      outputLimitBytes,
+      timeoutMs,
+    });
   }
   return new Promise((resolve) => {
     const stdout = createBoundedCollector(outputLimitBytes);
@@ -309,7 +496,7 @@ export function runProcessWithDeadline(options) {
         return;
       }
       cleanupStarted = true;
-      // close 依赖后代释放继承的 stdio；无论 cleanup Promise 如何结束都保留硬收敛上限。
+      /** close 依赖后代释放继承的 stdio；无论 cleanup Promise 如何结束都保留硬收敛上限。 */
       postExitDeadline = setTimeout(() => {
         finish(postExitFailure(cleanupSucceeded ? "EPIPEOPEN" : "EPROCESSCLEANUPTIMEOUT"));
       }, killGraceMs);
@@ -337,8 +524,7 @@ export function runProcessWithDeadline(options) {
         });
     };
     try {
-      const spawnProcess = options.spawnProcess ??
-        (process.platform === "win32" ? spawnWindowsJobHostedProcess : spawn);
+      const spawnProcess = options.spawnProcess ?? spawn;
       child = spawnProcess(options.executable, options.args, {
         cwd: options.cwd,
         /** Windows 也建立独立进程组，使 deadline 能先广播 SIGBREAK 阻止后代继续执行。 */
@@ -349,9 +535,6 @@ export function runProcessWithDeadline(options) {
         windowsHide: true,
         windowsVerbatimArguments: options.windowsVerbatimArguments === true,
       });
-      if (options.spawnProcess === undefined && process.platform === "win32") {
-        child.codegraphWindowsJobHosted = true;
-      }
     } catch (error) {
       finish(spawnError(error));
       return;
@@ -420,7 +603,7 @@ export function runProcessWithDeadline(options) {
         return;
       }
       clearTimeout(bootstrapDeadline);
-      // 主进程已经退出后，原执行 deadline 不得再覆盖其真实退出结论。
+      /** 主进程已经退出后，原执行 deadline 不得再覆盖其真实退出结论。 */
       clearTimeout(deadline);
       exitResult = processExitResult(code, signal);
       beginExitCleanup();
@@ -450,6 +633,181 @@ export function runProcessWithDeadline(options) {
       startExecutionDeadline();
     }
   });
+}
+
+/**
+ * 由 Windows Job helper 独占执行 deadline 与树终止，并只在 ActiveProcesses=0 后发布结果。
+ *
+ * @param {{args:string[],cwd:string,env?:NodeJS.ProcessEnv,executable:string,windowsDescendantReadyPath?:string,windowsVerbatimArguments?:boolean}} options 进程执行参数。
+ * @param {{killGraceMs:number,outputLimitBytes:number,timeoutMs:number}} limits 已验证的有界资源参数。
+ * @returns {Promise<object>} 绑定 Job 终态证明的执行结果。
+ */
+function runWindowsJobProcessWithDeadline(options, limits) {
+  return new Promise((resolve) => {
+    const stdout = createBoundedCollector(limits.outputLimitBytes);
+    const stderr = createBoundedCollector(limits.outputLimitBytes);
+    const nonce = randomBytes(16).toString("hex");
+    let protocol = Buffer.alloc(0);
+    let readyProof = null;
+    let child;
+    let outerGuard;
+    let settled = false;
+    const outerGuardMs = Math.min(
+      MAX_NODE_TIMER_MS,
+      limits.timeoutMs + limits.killGraceMs + 5_000,
+    );
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(outerGuard);
+      resolve({
+        ...result,
+        stderr: stderr.bytes(),
+        stderrBytes: stderr.totalBytes(),
+        stderrTruncated: stderr.truncated(),
+        stdout: stdout.bytes(),
+        stdoutBytes: stdout.totalBytes(),
+        stdoutTruncated: stdout.truncated(),
+      });
+    };
+    try {
+      child = spawnWindowsJobHostedProcess(options, limits, nonce);
+    } catch (error) {
+      finish(spawnError(error));
+      return;
+    }
+    child.stdout.on("data", (chunk) => stdout.append(chunk));
+    child.stderr.on("data", (chunk) => {
+      protocol = Buffer.concat([protocol, Buffer.from(chunk)]);
+      const parsed = consumeWindowsJobReadyControl(protocol, nonce);
+      if (parsed !== null) {
+        readyProof = parsed.proof;
+        protocol = parsed.remaining;
+      }
+      if (protocol.length > WINDOWS_JOB_CONTROL_TAIL_BYTES) {
+        const flushBytes = protocol.length - WINDOWS_JOB_CONTROL_TAIL_BYTES;
+        stderr.append(protocol.subarray(0, flushBytes));
+        protocol = protocol.subarray(flushBytes);
+      }
+    });
+    child.once("error", (error) => finish(spawnError(error)));
+    child.once("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
+      const terminal = consumeWindowsJobTerminalControl(protocol, nonce);
+      if (terminal !== null) {
+        stderr.append(terminal.payload);
+      } else if (protocol.length > 0) {
+        stderr.append(protocol);
+      }
+      if (readyProof === null) {
+        finish(postExitFailure("EPROCESSBOOTSTRAP"));
+        return;
+      }
+      if (
+        code !== 0 ||
+        signal !== null ||
+        terminal === null ||
+        terminal.proof.activeProcesses !== 0
+      ) {
+        finish(postExitFailure("EPROCESSCLEANUP"));
+        return;
+      }
+      const windowsJob = {
+        activeProcesses: terminal.proof.activeProcesses,
+        descendantPid: terminal.proof.descendantPid,
+        rootPid: readyProof.rootPid,
+        terminalProof: "query-information-job-object",
+      };
+      finish(terminal.proof.kind === "timeout"
+        ? { ...timeoutResult(), windowsJob }
+        : { ...processExitResult(terminal.proof.exitCode, null), windowsJob });
+    });
+    /** helper 失控时关闭其最后 Job 句柄仅作保险，未取得终态证明必须 fail closed。 */
+    outerGuard = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /** close 事件仍负责发布唯一失败结果。 */
+      }
+      finish(postExitFailure("EPROCESSCLEANUPTIMEOUT"));
+    }, outerGuardMs);
+  });
+}
+
+/**
+ * 解析 helper 在目标进程 ResumeThread 前发布的 root Job 归属证明。
+ *
+ * @param {Buffer} bytes 待解析的控制流尾部。
+ * @param {string} nonce 当前 helper 唯一随机绑定值。
+ * @returns {{proof:{activeProcesses:number,rootPid:number},remaining:Buffer}|null} 完整证明或未完成状态。
+ */
+function consumeWindowsJobReadyControl(bytes, nonce) {
+  if (!bytes.subarray(0, 1).equals(WINDOWS_JOB_CONTROL_START)) {
+    return null;
+  }
+  const end = bytes.indexOf(WINDOWS_JOB_CONTROL_END, 1);
+  if (end < 0) {
+    return null;
+  }
+  const fields = bytes.subarray(1, end).toString("ascii").split(":");
+  if (
+    fields.length !== 4 ||
+    fields[0] !== "CODEGRAPH_WINDOWS_JOB_READY" ||
+    fields[1] !== nonce ||
+    !/^[1-9][0-9]*$/u.test(fields[2]) ||
+    fields[3] !== "1"
+  ) {
+    return null;
+  }
+  return {
+    proof: { activeProcesses: 1, rootPid: Number.parseInt(fields[2], 10) },
+    remaining: bytes.subarray(end + 1),
+  };
+}
+
+/**
+ * 解析 helper 在 QueryInformationJobObject 证明零活动进程后发布的唯一终态帧。
+ *
+ * @param {Buffer} bytes 已保留控制帧尾部的 stderr 字节。
+ * @param {string} nonce 当前 helper 唯一随机绑定值。
+ * @returns {{payload:Buffer,proof:{activeProcesses:number,descendantPid:number,exitCode:number,kind:"exit"|"timeout",rootPid:number}}|null} 终态证明。
+ */
+function consumeWindowsJobTerminalControl(bytes, nonce) {
+  const marker = Buffer.from(
+    `\u001eCODEGRAPH_WINDOWS_JOB_TERMINAL:${nonce}:`,
+    "ascii",
+  );
+  const start = bytes.lastIndexOf(marker);
+  if (start < 0) {
+    return null;
+  }
+  const end = bytes.indexOf(WINDOWS_JOB_CONTROL_END, start + marker.length);
+  if (end < 0 || end !== bytes.length - 1) {
+    return null;
+  }
+  const fields = bytes.subarray(start + marker.length, end).toString("ascii").split(":");
+  if (
+    fields.length !== 5 ||
+    !["exit", "timeout"].includes(fields[0]) ||
+    !fields.slice(1).every((value) => /^(?:0|[1-9][0-9]*)$/u.test(value))
+  ) {
+    return null;
+  }
+  const [kind, exitCode, activeProcesses, rootPid, descendantPid] = fields;
+  return {
+    payload: bytes.subarray(0, start),
+    proof: {
+      activeProcesses: Number.parseInt(activeProcesses, 10),
+      descendantPid: Number.parseInt(descendantPid, 10),
+      exitCode: Number.parseInt(exitCode, 10),
+      kind,
+      rootPid: Number.parseInt(rootPid, 10),
+    },
+  };
 }
 
 /** 正常退出后使用独立 deadline 清理残留后代，不复用已完成的执行 deadline。 */
@@ -521,18 +879,33 @@ async function terminateWindowsProcessTree(
   }
 }
 
-/** 默认 Windows 执行路径用 Job Object 封口目标及其所有代际后代。 */
-function spawnWindowsJobHostedProcess(executable, args, options) {
+/**
+ * 启动只负责 Job 生命周期的固定 helper，目标进程由 helper 使用 CREATE_SUSPENDED 创建。
+ *
+ * @param {{args:string[],cwd:string,env?:NodeJS.ProcessEnv,executable:string,windowsDescendantReadyPath?:string,windowsVerbatimArguments?:boolean}} options 目标执行参数。
+ * @param {{killGraceMs:number,timeoutMs:number}} limits helper 自持有的 deadline 参数。
+ * @param {string} nonce 不传播给目标进程的控制帧绑定值。
+ * @returns {import("node:child_process").ChildProcess} Windows helper 子进程。
+ */
+function spawnWindowsJobHostedProcess(options, limits, nonce) {
   const commandLine = buildWindowsCommandLine(
-    executable,
-    args,
+    options.executable,
+    options.args,
     options.windowsVerbatimArguments === true,
   );
-  const applicationName = path.win32.isAbsolute(executable) ? executable : "";
+  const applicationName = path.win32.isAbsolute(options.executable) ? options.executable : "";
   const env = {
     ...(options.env ?? process.env),
     CODEGRAPH_JOB_APPLICATION: Buffer.from(applicationName, "utf8").toString("base64"),
+    CODEGRAPH_JOB_ASSEMBLY_BASE64: WINDOWS_JOB_HOST_ARTIFACT.assemblyBase64,
+    CODEGRAPH_JOB_CLEANUP_TIMEOUT_MS: `${limits.killGraceMs}`,
     CODEGRAPH_JOB_COMMAND_LINE: Buffer.from(commandLine, "utf8").toString("base64"),
+    CODEGRAPH_JOB_DESCENDANT_READY_PATH: Buffer.from(
+      options.windowsDescendantReadyPath ?? "",
+      "utf8",
+    ).toString("base64"),
+    CODEGRAPH_JOB_NONCE: Buffer.from(nonce, "utf8").toString("base64"),
+    CODEGRAPH_JOB_TIMEOUT_MS: `${limits.timeoutMs}`,
     CODEGRAPH_JOB_WORKING_DIRECTORY: Buffer.from(options.cwd, "utf8").toString("base64"),
   };
   /** helper 不进入目标目录，避免启动阶段失败时自身工作目录阻塞临时仓库回收。 */
@@ -541,11 +914,11 @@ function spawnWindowsJobHostedProcess(executable, args, options) {
     WINDOWS_JOB_SHELL_EXECUTABLE,
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", WINDOWS_JOB_HOST_ENCODED_COMMAND],
     {
-      ...options,
       cwd: helperCwd,
       detached: false,
       env,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
       windowsVerbatimArguments: false,
     },
   );
@@ -627,7 +1000,7 @@ function runWindowsTaskkill(pid, timeoutMs) {
       );
       cleanupChild.once("error", (error) => finish(error));
       cleanupChild.once("close", (code) => {
-        // 128 只证明根 PID 不存在，调用方必须继续验证后代快照。
+        /** 128 只证明根 PID 不存在，调用方必须继续验证后代快照。 */
         finish(
           code === 0 || code === 128
             ? undefined
