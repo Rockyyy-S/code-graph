@@ -1061,6 +1061,22 @@ function assertMonitorHealthy(error: unknown): void {
   }
 }
 
+/**
+ * tracked metadata 的父目录 rename 同样会改变其身份；比较必须复用 watcher host identity，
+ * 并以 `/` 作为 segment 边界，避免把 `pkg` 误判为 `pkg2` 的父路径。
+ */
+function isTrackedMetadataPathAtOrBelow(
+  trackedPath: string,
+  eventPathKey: string,
+  caseSensitivePaths: boolean,
+): boolean {
+  const trackedPathKey = normalizeWatcherPathKey(
+    trackedPath.replaceAll("\\", "/").normalize("NFC"),
+    caseSensitivePaths,
+  );
+  return trackedPathKey === eventPathKey || trackedPathKey.startsWith(`${eventPathKey}/`);
+}
+
 /** watcher 回调可能被同步提交阻塞，因此最终栅栏必须直接复核根级保留名。 */
 /** Analyzer 配置、manifest、lockfile 与已封口 consulted path 都属于语义事件。 */
 function isAnalyzerMetadataPath(
@@ -1089,22 +1105,23 @@ function isAnalyzerMetadataPath(
   if (Array.isArray(consultedFiles) && consultedFiles.some((entry) =>
     typeof entry === "object" && entry !== null && "path" in entry &&
     typeof (entry as { path?: unknown }).path === "string" &&
-    normalizeWatcherPathKey(
+    isTrackedMetadataPathAtOrBelow(
       (entry as { path: string }).path,
+      normalizedKey,
       caseSensitivePaths,
-    ) === normalizedKey)) {
+    ))) {
     return true;
   }
   const absentFiles = (snapshot as { absentFiles?: unknown }).absentFiles;
   if (Array.isArray(absentFiles) && absentFiles.some((entry) => typeof entry === "string" &&
-    normalizeWatcherPathKey(entry, caseSensitivePaths) === normalizedKey)) {
+    isTrackedMetadataPathAtOrBelow(entry, normalizedKey, caseSensitivePaths))) {
     return true;
   }
   const absentResolutionFiles = (snapshot as { absentResolutionFiles?: unknown })
     .absentResolutionFiles;
   if (Array.isArray(absentResolutionFiles) &&
     absentResolutionFiles.some((entry) => typeof entry === "string" &&
-      normalizeWatcherPathKey(entry, caseSensitivePaths) === normalizedKey)) {
+      isTrackedMetadataPathAtOrBelow(entry, normalizedKey, caseSensitivePaths))) {
     return true;
   }
   const blockedResolutionFiles = (snapshot as { blockedResolutionFiles?: unknown })
@@ -1112,10 +1129,11 @@ function isAnalyzerMetadataPath(
   return Array.isArray(blockedResolutionFiles) && blockedResolutionFiles.some((entry) =>
     typeof entry === "object" && entry !== null && "path" in entry &&
     typeof (entry as { path?: unknown }).path === "string" &&
-    normalizeWatcherPathKey(
+    isTrackedMetadataPathAtOrBelow(
       (entry as { path: string }).path,
+      normalizedKey,
       caseSensitivePaths,
-    ) === normalizedKey);
+    ));
 }
 
 /** close/abort 统一使用稳定 AbortError，确保调用方不会遗留悬挂 Promise。 */

@@ -253,6 +253,184 @@ describe("index read-set provider", () => {
     provider.close?.();
   });
 
+  const metadataAncestorRenameCases = [
+    {
+      label: "consulted metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        consultedFiles: [{
+          contentHash: "1".repeat(64),
+          path: "node_modules/pkg/package.json",
+        }],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+    {
+      label: "absent config metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        absentFiles: ["node_modules/pkg/tsconfig.json"],
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        consultedFiles: [],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+    {
+      label: "absent resolution metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        consultedFiles: [],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+    {
+      label: "blocked resolution metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        blockedResolutionFiles: [{
+          contentHash: "2".repeat(64),
+          path: "node_modules/pkg/private.ts",
+        }],
+        consultedFiles: [],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+  ] as const;
+
+  for (const metadataCase of metadataAncestorRenameCases) {
+    it(`CR11-007 immediately invalidates an ignored ancestor rename for ${metadataCase.label}`, async () => {
+      const root = await createRoot();
+      await writeFile(path.join(root, "index.ts"), "export const value = 1;\n");
+      await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+      const ignoreState = await createInitialIgnoreState(root);
+      if (ignoreState.kind !== "ready") {
+        throw new Error("测试前置条件不成立。");
+      }
+      const config = metadataCase.createConfig(ignoreState.snapshot.effectiveDigest);
+      let notifyWorkspaceChanged!: (
+        relativePath?: string,
+        eventType?: "change" | "rename",
+      ) => void;
+      const onSemanticChange = vi.fn();
+      const provider = createIndexReadSetProvider({
+        captureAnalyzerSemanticContext: async () => ({
+          configDigest: config.configDigest,
+          configSnapshot: config.snapshot,
+          configurationEntryPaths: [],
+          configurationFiles: [],
+          inputDigest: "3".repeat(64),
+          resolutionFiles: [],
+          sourceFiles: [],
+        }),
+        createWorkspaceChangeMonitor: (_indexingRoot, onChange) => {
+          notifyWorkspaceChanged = onChange;
+          return { close: vi.fn() };
+        },
+        ignoreSnapshot: ignoreState.snapshot,
+        indexingRoot: root,
+        statusEpoch: `epoch-cr11-007-${metadataCase.label.replaceAll(" ", "-")}`,
+        watchWorkspaceChanges: true,
+        workspaceChangeHandler: onSemanticChange,
+      });
+      const expected = await provider.capture(null);
+
+      try {
+        notifyWorkspaceChanged("node_modules/pkg", "rename");
+
+        expect(onSemanticChange).toHaveBeenCalledTimes(1);
+        expect(provider.isFenceCurrent?.(expected.readSet)).toBe(false);
+      } finally {
+        provider.close?.();
+        await provider.awaitPendingRenameVerification?.();
+      }
+    });
+  }
+
+  it("CR11-007 uses case-aware ancestor identity without crossing path segments", async () => {
+    const root = await createRoot();
+    await writeFile(path.join(root, "index.ts"), "export const value = 1;\n");
+    await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "pkg2"), { recursive: true });
+    const packageMetadata = "{}\n";
+    await writeFile(path.join(root, "node_modules", "pkg2", "package.json"), packageMetadata);
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {
+      throw new Error("测试前置条件不成立。");
+    }
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{
+        contentHash: createHash("sha256").update(packageMetadata).digest("hex"),
+        path: "NODE_MODULES/PKG2/package.json",
+      }],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    let notifyWorkspaceChanged!: (
+      relativePath?: string,
+      eventType?: "change" | "rename",
+    ) => void;
+    let scanCalls = 0;
+    const onSemanticChange = vi.fn();
+    const provider = createIndexReadSetProvider({
+      caseSensitivePaths: false,
+      captureAnalyzerSemanticContext: async () => ({
+        caseSensitiveFileNames: false,
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "5".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      createWorkspaceChangeMonitor: (_indexingRoot, onChange) => {
+        notifyWorkspaceChanged = onChange;
+        return { close: vi.fn() };
+      },
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      scan: async (options) => {
+        scanCalls += 1;
+        return scanWorkspace(options);
+      },
+      statusEpoch: "epoch-cr11-007-segment-boundary",
+      watchWorkspaceChanges: true,
+      workspaceChangeHandler: onSemanticChange,
+    });
+    const expected = await provider.capture(null);
+
+    try {
+      notifyWorkspaceChanged("node_modules/pkg", "rename");
+      await provider.awaitPendingRenameVerification?.();
+
+      expect(scanCalls).toBe(2);
+      expect(onSemanticChange).not.toHaveBeenCalled();
+      expect(provider.isFenceCurrent?.(expected.readSet)).toBe(true);
+
+      notifyWorkspaceChanged("node_modules/PKG2", "rename");
+      expect(onSemanticChange).toHaveBeenCalledTimes(1);
+      expect(provider.isFenceCurrent?.(expected.readSet)).toBe(false);
+    } finally {
+      provider.close?.();
+      await provider.awaitPendingRenameVerification?.();
+    }
+  });
+
   it("keeps native raw events separate from non-semantic README changes", async () => {
     const root = await createRoot();
     const readmePath = path.join(root, "README.md");
