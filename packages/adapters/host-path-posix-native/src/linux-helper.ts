@@ -16,7 +16,8 @@ import {
 } from "./protocol.js";
 
 export const LINUX_HELPER_PROTOCOL_VERSION = 1 as const;
-export const LINUX_HELPER_ABI_VERSION = 1 as const;
+export const LINUX_HELPER_ABI_VERSION = 2 as const;
+export const LINUX_HELPER_PROVENANCE_SCHEMA_VERSION = 2 as const;
 export const LINUX_HELPER_MAX_FRAME_BYTES = 2 * 1024 * 1024;
 export const LINUX_HELPER_MAX_DEADLINE_MS = 60_000;
 
@@ -25,6 +26,7 @@ const LINUX_HELPER_INSTALL_PATHS = Object.freeze({
   bridgeExecutable: "/usr/libexec/codegraph-host-path-bridge",
   keyPath: "/etc/codegraph-host-path/client.key",
   provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+  publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
   socketPath: "/run/codegraph-host-path/helper.sock",
 });
 const LINUX_HELPER_ENVIRONMENT = Object.freeze({
@@ -51,6 +53,7 @@ const RESPONSE_KEYS = [
   "transcriptMac",
   "volumeId",
 ] as const;
+const FAILED_RESPONSE_KEYS = [...RESPONSE_KEYS, "error"] as const;
 
 export interface LinuxHelperBridgeInvocationV1 {
   args: string[];
@@ -62,7 +65,7 @@ export interface LinuxHelperBridgeInvocationV1 {
 
 export interface LinuxHelperResponseBindingV1 {
   batchDigest: string;
-  binarySha256?: string;
+  bridgeBinarySha256?: string;
   capabilityDigest: string;
   daemonEpoch?: string;
   nonce: string;
@@ -89,11 +92,12 @@ interface LinuxHelperBridgeRequestV1 {
 }
 
 export interface LinuxSnapshotHelperProviderOptionsV1 {
-  binarySha256: string;
+  bridgeBinarySha256: string;
   bridgeExecutable: string;
   deadlineMs?: number;
   keyPath: string;
   provenancePath: string;
+  publicKeyPath: string;
   signerId: string;
   socketPath: string;
 }
@@ -150,6 +154,7 @@ export function createLinuxHelperBridgeInvocationV1(input: {
   deadlineMs: number;
   keyPath: string;
   provenancePath: string;
+  publicKeyPath: string;
   rootFd: number;
   socketPath: string;
 }): LinuxHelperBridgeInvocationV1 {
@@ -158,6 +163,7 @@ export function createLinuxHelperBridgeInvocationV1(input: {
     ["helper socket", input.socketPath],
     ["client key", input.keyPath],
     ["provenance manifest", input.provenancePath],
+    ["release public key", input.publicKeyPath],
   ] as const) {
     if (!isCanonicalLinuxAbsolutePath(value)) {
       throw new Error(`${label} 必须是 canonical Linux 绝对路径。`);
@@ -187,6 +193,8 @@ export function createLinuxHelperBridgeInvocationV1(input: {
       input.keyPath,
       "--provenance",
       input.provenancePath,
+      "--public-key",
+      input.publicKeyPath,
       "--deadline-ms",
       String(input.deadlineMs),
     ],
@@ -242,27 +250,44 @@ export function validateLinuxHelperResponseEnvelopeV1(
 ):
   | { response: Record<string, unknown>; status: "accepted" }
   | { reason: "RESPONSE_BINDING_MISMATCH" | "RESPONSE_SHAPE_INVALID"; status: "rejected" } {
-  if (!isRecord(value) || !hasExactKeys(value, RESPONSE_KEYS)) {
+  if (!isRecord(value) || typeof value.status !== "string") {
+    return { reason: "RESPONSE_SHAPE_INVALID", status: "rejected" };
+  }
+  const expectedKeys = value.status === "complete"
+    ? RESPONSE_KEYS
+    : value.status === "failed"
+      ? FAILED_RESPONSE_KEYS
+      : null;
+  if (expectedKeys === null || !hasExactKeys(value, expectedKeys)) {
     return { reason: "RESPONSE_SHAPE_INVALID", status: "rejected" };
   }
   if (
     value.protocolVersion !== LINUX_HELPER_PROTOCOL_VERSION ||
     value.abiVersion !== LINUX_HELPER_ABI_VERSION ||
-    value.status !== "complete" ||
+    !isSha256(value.batchDigest) ||
+    !isSha256(value.capabilityDigest) ||
+    !isStableToken(value.daemonEpoch) ||
     !Array.isArray(value.items) ||
-    !isStableToken(value.rootObjectId) ||
-    !isStableToken(value.volumeId) ||
+    !isStableToken(value.nonce) ||
+    !isSha256(value.requestDigest) ||
+    !isStableToken(value.requestId) ||
+    !Number.isSafeInteger(value.sequence) ||
+    (value.sequence as number) < 0 ||
     !isStableToken(value.snapshotView) ||
     !isStableToken(value.snapshotFence) ||
     !isSha256(value.transcriptMac) ||
     !isRecord(value.provenance) ||
     !hasExactKeys(value.provenance, [
-      "binarySha256",
+      "bridgeBinarySha256",
+      "daemonBinarySha256",
       "manifestSha256",
+      "schemaVersion",
       "signatureKeyId",
       "signerId",
     ]) ||
-    !isSha256(value.provenance.binarySha256) ||
+    value.provenance.schemaVersion !== LINUX_HELPER_PROVENANCE_SCHEMA_VERSION ||
+    !isSha256(value.provenance.bridgeBinarySha256) ||
+    !isSha256(value.provenance.daemonBinarySha256) ||
     !isSha256(value.provenance.manifestSha256) ||
     !isStableToken(value.provenance.signatureKeyId) ||
     !isStableToken(value.provenance.signerId)
@@ -277,11 +302,23 @@ export function validateLinuxHelperResponseEnvelopeV1(
     (expected.daemonEpoch !== undefined && value.daemonEpoch !== expected.daemonEpoch) ||
     (expected.requestDigest !== undefined && value.requestDigest !== expected.requestDigest) ||
     (expected.sequence !== undefined && value.sequence !== expected.sequence) ||
-    (expected.binarySha256 !== undefined &&
-      value.provenance.binarySha256 !== expected.binarySha256) ||
+    (expected.bridgeBinarySha256 !== undefined &&
+      value.provenance.bridgeBinarySha256 !== expected.bridgeBinarySha256) ||
     (expected.signerId !== undefined && value.provenance.signerId !== expected.signerId)
   ) {
     return { reason: "RESPONSE_BINDING_MISMATCH", status: "rejected" };
+  }
+  if (value.status === "complete") {
+    if (!isStableToken(value.rootObjectId) || !isStableToken(value.volumeId)) {
+      return { reason: "RESPONSE_SHAPE_INVALID", status: "rejected" };
+    }
+  } else if (
+    value.items.length !== 0 ||
+    value.rootObjectId !== null ||
+    value.volumeId !== null ||
+    !isKnownLinuxHelperError(value.error)
+  ) {
+    return { reason: "RESPONSE_SHAPE_INVALID", status: "rejected" };
   }
   return { response: value, status: "accepted" };
 }
@@ -292,7 +329,10 @@ export function validateLinuxHelperResponseEnvelopeV1(
 export function createLinuxSnapshotHelperProviderV1(
   options: LinuxSnapshotHelperProviderOptionsV1,
 ): HostPathPosixNativeProviderV1 {
-  const capability = createLinuxSnapshotHelperCapabilityV1(options);
+  const capability = createLinuxSnapshotHelperCapabilityV1({
+    binarySha256: options.bridgeBinarySha256,
+    signerId: options.signerId,
+  });
   const deadlineMs = options.deadlineMs ?? 30_000;
   return Object.freeze({
     capture: async (request: HostPathPosixCaptureRequestV1) =>
@@ -353,7 +393,7 @@ async function captureWithLinuxBridge(
       options.deadlineMs,
     );
     const decoded = decodeLinuxHelperFrameV1(result);
-    return mapBridgeResponse(decoded, request, bridgeRequest, options);
+    return mapLinuxHelperBridgeResponseV1(decoded, request, bridgeRequest, options);
   } finally {
     await root.close();
   }
@@ -430,16 +470,26 @@ function runBridge(
 }
 
 /** bridge 最终只暴露既有 adapter capture 联合，额外安全绑定停留在内部 ABI。 */
-function mapBridgeResponse(
+export function mapLinuxHelperBridgeResponseV1(
   value: unknown,
   request: HostPathPosixCaptureRequestV1,
   bridgeRequest: LinuxHelperBridgeRequestV1,
   options: Required<LinuxSnapshotHelperProviderOptionsV1>,
 ): HostPathPosixCaptureResponseV1 {
-  if (!isRecord(value) || typeof value.status !== "string") {
+  const validated = validateLinuxHelperResponseEnvelopeV1(value, {
+    batchDigest: bridgeRequest.batchDigest,
+    bridgeBinarySha256: options.bridgeBinarySha256,
+    capabilityDigest: bridgeRequest.capabilityDigest,
+    nonce: bridgeRequest.nonce,
+    requestId: bridgeRequest.requestId,
+    signerId: options.signerId,
+  });
+  if (validated.status !== "accepted") {
     throw new Error("Linux helper bridge 响应非法。");
   }
-  if (value.status === "failed") {
+  const response = validated.response;
+  if (response.status === "failed") {
+    const error = response.error as Record<string, unknown>;
     return {
       abiVersion: request.abiVersion,
       capabilityDigest: request.capabilityDigest,
@@ -447,22 +497,10 @@ function mapBridgeResponse(
       failClosedReason: "PROVIDER_ERROR",
       platform: "linux",
       protocolVersion: request.protocolVersion,
-      retryable: false,
+      retryable: error.retryable as boolean,
       status: "failed",
     };
   }
-  const validated = validateLinuxHelperResponseEnvelopeV1(value, {
-    batchDigest: bridgeRequest.batchDigest,
-    binarySha256: options.binarySha256,
-    capabilityDigest: bridgeRequest.capabilityDigest,
-    nonce: bridgeRequest.nonce,
-    requestId: bridgeRequest.requestId,
-    signerId: options.signerId,
-  });
-  if (validated.status !== "accepted") {
-    throw new Error("Linux helper bridge complete 响应非法。");
-  }
-  const response = validated.response;
   return {
     abiVersion: request.abiVersion,
     capabilityDigest: request.capabilityDigest,
@@ -474,6 +512,40 @@ function mapBridgeResponse(
     status: "complete",
     volumeId: response.volumeId as string,
   };
+}
+
+/** failed error 只接受 Rust 协议的封闭 class，且永久 class 不得伪造为 retryable。 */
+function isKnownLinuxHelperError(value: unknown): value is Record<string, unknown> {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["class", "code", "retryable"]) ||
+    !isStableToken(value.code) ||
+    typeof value.retryable !== "boolean"
+  ) {
+    return false;
+  }
+  if (value.class === "snapshot") {
+    return true;
+  }
+  if (
+    value.class === "deadline" ||
+    value.class === "namespace-drift" ||
+    value.class === "volume-drift"
+  ) {
+    return value.retryable === true;
+  }
+  if (
+    value.class === "authentication" ||
+    value.class === "budget" ||
+    value.class === "cleanup" ||
+    value.class === "path-boundary" ||
+    value.class === "protocol" ||
+    value.class === "replay" ||
+    value.class === "unsupported"
+  ) {
+    return value.retryable === false;
+  }
+  return false;
 }
 
 /** Linux 配置路径不接受反斜杠、NUL、`.`、`..` 或重复分隔符。 */

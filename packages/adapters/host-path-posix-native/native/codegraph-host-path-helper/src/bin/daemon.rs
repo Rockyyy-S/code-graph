@@ -16,8 +16,11 @@ mod linux {
         canonical::{canonical_json, decode_frame, encode_frame},
         command::SystemCommandExecutor,
         path_boundary::stat_identity_fd,
-        protocol::{AuthenticatedRequestEnvelopeV1, HelperError, InstallProvenanceV1},
-        security::{ObservedRootV1, SecurityPolicyV1},
+        protocol::{AuthenticatedRequestEnvelopeV1, HelperError, InstallProvenanceV2},
+        security::{
+            ExecutableRoleV2, ObservedRootV1, SecurityPolicyV1,
+            validate_running_executable_provenance,
+        },
         transport::{
             DAEMON_ROOT_FD, duplicate_to_daemon_root_fd, observed_peer,
             receive_frame_with_fd, write_frame,
@@ -49,14 +52,19 @@ mod linux {
 
     pub fn main() -> Result<(), HelperError> {
         let args = parse_args(env::args().skip(1).collect())?;
-        let boot_id = read_token(Path::new("/proc/sys/kernel/random/boot_id"))?;
-        let transcript_key = read_hex(&args.key_path, 32)?;
         let public_key = VerifyingKey::from_bytes(
             &read_hex(&args.public_key_path, 32)?
                 .try_into()
                 .map_err(|_| HelperError::authentication("PUBLIC_KEY_INVALID"))?,
         ).map_err(|_| HelperError::authentication("PUBLIC_KEY_INVALID"))?;
-        let expected_provenance: InstallProvenanceV1 = read_canonical_json(&args.provenance_path)?;
+        let expected_provenance: InstallProvenanceV2 = read_canonical_json(&args.provenance_path)?;
+        validate_running_executable_provenance(
+            &expected_provenance,
+            &public_key,
+            ExecutableRoleV2::Daemon,
+        )?;
+        let boot_id = read_token(Path::new("/proc/sys/kernel/random/boot_id"))?;
+        let transcript_key = read_hex(&args.key_path, 32)?;
         let daemon_epoch = create_daemon_epoch(&boot_id, &args.socket_path)?;
         let policy = SecurityPolicyV1 {
             boot_id,

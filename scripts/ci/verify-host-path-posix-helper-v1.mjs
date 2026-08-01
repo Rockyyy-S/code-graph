@@ -122,6 +122,8 @@ async function validateStaticClosure() {
     "ReplayCache",
     "SEQUENCE_NOT_MONOTONIC",
     "PROVENANCE_SIGNATURE_INVALID",
+    "PROVENANCE_EXECUTABLE_DIGEST_MISMATCH",
+    "/proc/self/exe",
     "ROOTLESS_CONTAINER_UNSUPPORTED",
     "OVERLAYFS_UNSUPPORTED",
     "EXT4_XFS_FREEZE_DEFERRED",
@@ -178,7 +180,8 @@ async function validateStaticClosure() {
     "filesystem-snapshot",
     "complete-request-batch",
     "validateLinuxHelperResponseEnvelopeV1(value",
-    "binarySha256: options.binarySha256",
+    "bridgeBinarySha256: options.bridgeBinarySha256",
+    "retryable: error.retryable as boolean",
   ], "TypeScript bridge");
   if (/CAP_SYS_ADMIN|setuid|sudo\b/u.test(linuxHelper)) {
     throw new Error("Node bridge 不得获取或请求特权。 ");
@@ -218,16 +221,28 @@ async function validateStaticClosure() {
     await readText(packagingPath);
   }
   const provenanceTemplate = await readText("packaging/linux/provenance.template.json");
+  assertIncludes(provenanceTemplate, [
+    '"bridgeBinarySha256": "RELEASE_BRIDGE_BINARY_SHA256"',
+    '"daemonBinarySha256": "RELEASE_DAEMON_BINARY_SHA256"',
+    '"schemaVersion": 2',
+  ], "provenance schema v2");
   if (/"[a-f0-9]{64}"/u.test(provenanceTemplate)) {
     throw new Error("provenance template 不得伪装成已签名 release。 ");
   }
   const workflow = await readText(".github/workflows/host-path-posix-linux.yml");
   assertIncludes(workflow, [
     "ubuntu-24.04",
+    "github.event.pull_request.head.sha",
+    "git rev-parse HEAD",
+    "node-version: 24.18.0",
+    "version: 11.12.0",
     "rustup toolchain install 1.88.0 --profile minimal --no-self-update",
     "pnpm install --frozen-lockfile",
     "verify-host-path-posix-helper-v1.mjs",
   ], "Linux workflow");
+  if (/\bsudo\b|\bsystemctl\b|\b(?:mount|umount|fsfreeze)\s/u.test(workflow)) {
+    throw new Error("普通 hosted workflow 禁止 snapshot/mount/freeze/systemd 安装或提权。 ");
+  }
 
   const actualRustFiles = await listFiles(
     path.join(repositoryRoot, HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST.crateRoot, "src"),

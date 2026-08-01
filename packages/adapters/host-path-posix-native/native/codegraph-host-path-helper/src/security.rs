@@ -1,18 +1,24 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::Read,
+};
+
+#[cfg(target_os = "linux")]
+use std::fs::File;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     canonical::{canonical_json, canonical_sha256},
     protocol::{
         ABI_VERSION, AuthenticatedRequestEnvelopeV1, AuthenticatedRequestV1, BridgeCandidateV1,
-        HelperError, InstallProvenanceV1, MAX_BATCH_BYTES, MAX_CANDIDATES,
-        MAX_DEADLINE_WINDOW_MS, MAX_PATH_BYTES, PROTOCOL_VERSION, PeerIdentityV1,
-        ProvenancePayloadV1,
+        HelperError, INSTALL_PROVENANCE_SCHEMA_VERSION, InstallProvenanceV2, MAX_BATCH_BYTES,
+        MAX_CANDIDATES, MAX_DEADLINE_WINDOW_MS, MAX_PATH_BYTES, PROTOCOL_VERSION,
+        PeerIdentityV1, ProvenancePayloadV2,
     },
 };
 
@@ -39,7 +45,7 @@ pub struct ObservedRootV1 {
 pub struct SecurityPolicyV1 {
     pub boot_id: String,
     pub daemon_epoch: String,
-    pub expected_provenance: InstallProvenanceV1,
+    pub expected_provenance: InstallProvenanceV2,
     pub install_public_key: VerifyingKey,
     pub max_clock_skew_ms: u64,
     pub transcript_key: Vec<u8>,
@@ -217,18 +223,22 @@ pub fn verify_transcript_mac<T: Serialize>(
 }
 
 pub fn validate_install_provenance(
-    provenance: &InstallProvenanceV1,
+    provenance: &InstallProvenanceV2,
     public_key: &VerifyingKey,
 ) -> Result<(), HelperError> {
-    if !is_sha256(&provenance.binary_sha256) ||
+    if provenance.schema_version != INSTALL_PROVENANCE_SCHEMA_VERSION ||
+        !is_sha256(&provenance.bridge_binary_sha256) ||
+        !is_sha256(&provenance.daemon_binary_sha256) ||
         !is_sha256(&provenance.manifest_sha256) ||
         !is_stable_token(&provenance.signature_key_id) ||
         !is_stable_token(&provenance.signer_id)
     {
         return Err(HelperError::authentication("PROVENANCE_SHAPE_INVALID"));
     }
-    let payload = ProvenancePayloadV1 {
-        binary_sha256: provenance.binary_sha256.clone(),
+    let payload = ProvenancePayloadV2 {
+        bridge_binary_sha256: provenance.bridge_binary_sha256.clone(),
+        daemon_binary_sha256: provenance.daemon_binary_sha256.clone(),
+        schema_version: provenance.schema_version,
         signature_key_id: provenance.signature_key_id.clone(),
         signer_id: provenance.signer_id.clone(),
     };
@@ -243,6 +253,54 @@ pub fn validate_install_provenance(
     public_key
         .verify(&payload_bytes, &signature)
         .map_err(|_| HelperError::authentication("PROVENANCE_SIGNATURE_INVALID"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutableRoleV2 {
+    Bridge,
+    Daemon,
+}
+
+/// 先验证签名 manifest，再从已打开 executable 句柄计算摘要并绑定到明确角色。
+pub fn validate_executable_provenance_bytes<R: Read>(
+    provenance: &InstallProvenanceV2,
+    public_key: &VerifyingKey,
+    mut executable: R,
+    role: ExecutableRoleV2,
+) -> Result<(), HelperError> {
+    validate_install_provenance(provenance, public_key)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes = executable.read(&mut buffer)
+            .map_err(|_| HelperError::authentication("PROVENANCE_EXECUTABLE_UNREADABLE"))?;
+        if bytes == 0 {
+            break;
+        }
+        digest.update(&buffer[..bytes]);
+    }
+    let expected = match role {
+        ExecutableRoleV2::Bridge => &provenance.bridge_binary_sha256,
+        ExecutableRoleV2::Daemon => &provenance.daemon_binary_sha256,
+    };
+    if hex::encode(digest.finalize()) != *expected {
+        return Err(HelperError::authentication(
+            "PROVENANCE_EXECUTABLE_DIGEST_MISMATCH",
+        ));
+    }
+    Ok(())
+}
+
+/// `/proc/self/exe` 由内核绑定到当前执行文件对象；打开后按该 FD 读取，避免可替换路径 TOCTOU。
+#[cfg(target_os = "linux")]
+pub fn validate_running_executable_provenance(
+    provenance: &InstallProvenanceV2,
+    public_key: &VerifyingKey,
+    role: ExecutableRoleV2,
+) -> Result<(), HelperError> {
+    let executable = File::open("/proc/self/exe")
+        .map_err(|_| HelperError::authentication("PROVENANCE_EXECUTABLE_UNREADABLE"))?;
+    validate_executable_provenance_bytes(provenance, public_key, executable, role)
 }
 
 pub fn root_handle_digest(
@@ -326,7 +384,8 @@ fn validate_request_shape(request: &AuthenticatedRequestV1) -> Result<(), Helper
         &request.capability_digest,
         &request.client_request_digest,
         &request.root_identity.root_handle_digest,
-        &request.provenance.binary_sha256,
+        &request.provenance.bridge_binary_sha256,
+        &request.provenance.daemon_binary_sha256,
         &request.provenance.manifest_sha256,
     ] {
         if !is_sha256(digest) {
@@ -423,7 +482,10 @@ pub struct ResponseMacBody<'a, T: Serialize> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use ed25519_dalek::{Signer, SigningKey};
+    use sha2::Digest;
 
     use super::*;
     use crate::protocol::{
@@ -433,15 +495,19 @@ mod tests {
 
     fn fixture() -> (AuthenticatedRequestEnvelopeV1, SecurityPolicyV1, ObservedPeerV1, ObservedRootV1) {
         let signing = SigningKey::from_bytes(&[7; 32]);
-        let payload = ProvenancePayloadV1 {
-            binary_sha256: "a".repeat(64),
+        let payload = ProvenancePayloadV2 {
+            bridge_binary_sha256: "a".repeat(64),
+            daemon_binary_sha256: "b".repeat(64),
+            schema_version: INSTALL_PROVENANCE_SCHEMA_VERSION,
             signature_key_id: "release-key-1".into(),
             signer_id: "codegraph-release-1".into(),
         };
         let payload_bytes = canonical_json(&payload).expect("payload");
-        let provenance = InstallProvenanceV1 {
-            binary_sha256: payload.binary_sha256.clone(),
+        let provenance = InstallProvenanceV2 {
+            bridge_binary_sha256: payload.bridge_binary_sha256.clone(),
+            daemon_binary_sha256: payload.daemon_binary_sha256.clone(),
             manifest_sha256: canonical_sha256(&payload).expect("digest"),
+            schema_version: payload.schema_version,
             signature: hex::encode(signing.sign(&payload_bytes).to_bytes()),
             signature_key_id: payload.signature_key_id.clone(),
             signer_id: payload.signer_id.clone(),
@@ -572,6 +638,61 @@ mod tests {
         assert_eq!(
             replay.consume(&new_bridge, 11_000).expect_err("monotonic sequence").code,
             "SEQUENCE_NOT_MONOTONIC",
+        );
+    }
+
+    #[test]
+    fn signed_provenance_must_match_each_running_executable_role() {
+        let signing = SigningKey::from_bytes(&[5; 32]);
+        let executable = b"trusted-daemon-executable";
+        let payload = ProvenancePayloadV2 {
+            bridge_binary_sha256: hex::encode(Sha256::digest(b"trusted-bridge-executable")),
+            daemon_binary_sha256: hex::encode(Sha256::digest(executable)),
+            schema_version: INSTALL_PROVENANCE_SCHEMA_VERSION,
+            signature_key_id: "release-key-1".into(),
+            signer_id: "codegraph-release-1".into(),
+        };
+        let provenance = InstallProvenanceV2 {
+            bridge_binary_sha256: payload.bridge_binary_sha256.clone(),
+            daemon_binary_sha256: payload.daemon_binary_sha256.clone(),
+            manifest_sha256: canonical_sha256(&payload).expect("digest"),
+            schema_version: payload.schema_version,
+            signature: hex::encode(
+                signing.sign(&canonical_json(&payload).expect("payload")).to_bytes(),
+            ),
+            signature_key_id: payload.signature_key_id.clone(),
+            signer_id: payload.signer_id.clone(),
+        };
+
+        validate_executable_provenance_bytes(
+            &provenance,
+            &signing.verifying_key(),
+            Cursor::new(executable),
+            ExecutableRoleV2::Daemon,
+        ).expect("matching executable");
+        validate_executable_provenance_bytes(
+            &provenance,
+            &signing.verifying_key(),
+            Cursor::new(b"trusted-bridge-executable"),
+            ExecutableRoleV2::Bridge,
+        ).expect("matching bridge executable");
+        assert_eq!(
+            validate_executable_provenance_bytes(
+                &provenance,
+                &signing.verifying_key(),
+                Cursor::new(b"replaced-daemon-executable"),
+                ExecutableRoleV2::Daemon,
+            ).expect_err("replacement must be rejected").code,
+            "PROVENANCE_EXECUTABLE_DIGEST_MISMATCH",
+        );
+        assert_eq!(
+            validate_executable_provenance_bytes(
+                &provenance,
+                &signing.verifying_key(),
+                Cursor::new(executable),
+                ExecutableRoleV2::Bridge,
+            ).expect_err("daemon digest must not satisfy the bridge role").code,
+            "PROVENANCE_EXECUTABLE_DIGEST_MISMATCH",
         );
     }
 }

@@ -9,6 +9,7 @@ describe("Linux helper bridge boundary", () => {
     ["relative socket", "run/codegraph-host-path/helper.sock"],
     ["relative key", "etc/codegraph-host-path/client.key"],
     ["relative provenance", "usr/share/codegraph-host-path/provenance.json"],
+    ["relative public key", "usr/share/codegraph-host-path/release.pub"],
   ])("fail closed: %s", (_label, invalidPath) => {
     expect(() => createLinuxHelperBridgeInvocationV1({
       bridgeExecutable: invalidPath.includes("bridge")
@@ -21,6 +22,9 @@ describe("Linux helper bridge boundary", () => {
       provenancePath: invalidPath.includes("provenance")
         ? invalidPath
         : "/usr/share/codegraph-host-path/provenance.json",
+      publicKeyPath: invalidPath.includes("release.pub")
+        ? invalidPath
+        : "/usr/share/codegraph-host-path/release.pub",
       rootFd: 7,
       socketPath: invalidPath.includes("helper.sock")
         ? invalidPath
@@ -34,6 +38,7 @@ describe("Linux helper bridge boundary", () => {
       deadlineMs: value === 1_000_001 ? value : 30_000,
       keyPath: "/etc/codegraph-host-path/client.key",
       provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+      publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
       rootFd: value === 1_000_001 ? 7 : value,
       socketPath: "/run/codegraph-host-path/helper.sock",
     })).toThrow();
@@ -45,6 +50,7 @@ describe("Linux helper bridge boundary", () => {
       deadlineMs: 30_000,
       keyPath: "/etc/codegraph-host-path/client.key",
       provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+      publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
       rootFd: 7,
       socketPath: "/run/codegraph-host-path/helper.sock",
     })).toThrow(/固定安装布局/u);

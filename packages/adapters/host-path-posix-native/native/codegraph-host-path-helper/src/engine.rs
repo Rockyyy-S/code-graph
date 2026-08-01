@@ -117,9 +117,9 @@ mod tests {
     use crate::{
         canonical::{canonical_json, canonical_sha256},
         protocol::{
-            BridgeCandidateV1, InstallProvenanceV1, MountNamespaceV1, PeerIdentityV1,
-            ProvenancePayloadV1, RootIdentityV1, SnapshotBackendKindV1, SnapshotBindingV1,
-            VolumeIdentityV1,
+            BridgeCandidateV1, INSTALL_PROVENANCE_SCHEMA_VERSION, InstallProvenanceV2,
+            MountNamespaceV1, PeerIdentityV1, ProvenancePayloadV2, RootIdentityV1,
+            SnapshotBackendKindV1, SnapshotBindingV1, VolumeIdentityV1,
         },
         security::{RequestMacBody, root_handle_digest},
     };
@@ -159,14 +159,18 @@ mod tests {
         ObservedRootV1,
     ) {
         let signing = SigningKey::from_bytes(&[3; 32]);
-        let payload = ProvenancePayloadV1 {
-            binary_sha256: "a".repeat(64),
+        let payload = ProvenancePayloadV2 {
+            bridge_binary_sha256: "a".repeat(64),
+            daemon_binary_sha256: "b".repeat(64),
+            schema_version: INSTALL_PROVENANCE_SCHEMA_VERSION,
             signature_key_id: "key-1".into(),
             signer_id: "signer-1".into(),
         };
-        let provenance = InstallProvenanceV1 {
-            binary_sha256: payload.binary_sha256.clone(),
+        let provenance = InstallProvenanceV2 {
+            bridge_binary_sha256: payload.bridge_binary_sha256.clone(),
+            daemon_binary_sha256: payload.daemon_binary_sha256.clone(),
             manifest_sha256: canonical_sha256(&payload).expect("manifest"),
+            schema_version: payload.schema_version,
             signature: hex::encode(signing.sign(&canonical_json(&payload).expect("payload")).to_bytes()),
             signature_key_id: payload.signature_key_id.clone(),
             signer_id: payload.signer_id.clone(),

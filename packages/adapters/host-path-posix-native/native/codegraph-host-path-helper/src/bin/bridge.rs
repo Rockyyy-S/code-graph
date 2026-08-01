@@ -17,36 +17,42 @@ mod linux {
         protocol::{
             ABI_VERSION, AuthenticatedRequestEnvelopeV1, AuthenticatedRequestV1,
             AuthenticatedResponseEnvelopeV1, BridgeCaptureRequestV1, CaptureItemV1,
-            ErrorResponseV1, HelperError, InstallProvenanceV1, MountNamespaceV1,
+            ErrorResponseV1, HelperError, InstallProvenanceV2, MountNamespaceV1,
             LvmFilesystemV1, PeerIdentityV1, PROTOCOL_VERSION, ResponseStatusV1, RootIdentityV1,
             SnapshotBackendKindV1, SnapshotBindingV1, VolumeIdentityV1,
         },
         security::{
-            RequestMacBody, ResponseMacBody, is_stable_token, root_handle_digest,
-            sign_transcript, validate_bridge_request, verify_transcript_mac,
+            ExecutableRoleV2, RequestMacBody, ResponseMacBody, is_stable_token,
+            root_handle_digest, sign_transcript, validate_bridge_request,
+            validate_running_executable_provenance, verify_transcript_mac,
         },
         transport::{read_frame, self_peer, send_frame_with_fd, write_frame},
     };
+    use ed25519_dalek::VerifyingKey;
     use serde::Serialize;
 
     const ROOT_FD: i32 = 3;
     const SOCKET_PATH: &str = "/run/codegraph-host-path/helper.sock";
     const KEY_PATH: &str = "/etc/codegraph-host-path/client.key";
     const PROVENANCE_PATH: &str = "/usr/share/codegraph-host-path/provenance.json";
+    const PUBLIC_KEY_PATH: &str = "/usr/share/codegraph-host-path/release.pub";
 
     #[derive(Debug)]
     struct Args {
         deadline_ms: u64,
         key_path: PathBuf,
         provenance_path: PathBuf,
+        public_key_path: PathBuf,
         socket_path: PathBuf,
     }
 
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct BridgeOutputProvenanceV1<'a> {
-        binary_sha256: &'a str,
+    struct BridgeOutputProvenanceV2<'a> {
+        bridge_binary_sha256: &'a str,
+        daemon_binary_sha256: &'a str,
         manifest_sha256: &'a str,
+        schema_version: u16,
         signature_key_id: &'a str,
         signer_id: &'a str,
     }
@@ -61,7 +67,7 @@ mod linux {
         items: &'a [CaptureItemV1],
         nonce: &'a str,
         protocol_version: u16,
-        provenance: BridgeOutputProvenanceV1<'a>,
+        provenance: BridgeOutputProvenanceV2<'a>,
         request_digest: &'a str,
         request_id: &'a str,
         root_object_id: &'a str,
@@ -76,8 +82,24 @@ mod linux {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct BridgeFailedOutputV1<'a> {
+        abi_version: u16,
+        batch_digest: &'a str,
+        capability_digest: &'a str,
+        daemon_epoch: &'a str,
         error: &'a ErrorResponseV1,
+        items: &'a [CaptureItemV1],
+        nonce: &'a str,
+        protocol_version: u16,
+        provenance: BridgeOutputProvenanceV2<'a>,
+        request_digest: &'a str,
+        request_id: &'a str,
+        root_object_id: Option<&'a str>,
+        sequence: u64,
+        snapshot_fence: &'a str,
+        snapshot_view: &'a str,
         status: &'static str,
+        transcript_mac: &'a str,
+        volume_id: Option<&'a str>,
     }
 
     pub fn main() -> Result<(), HelperError> {
@@ -85,8 +107,18 @@ mod linux {
         let frame = read_frame(&mut io::stdin().lock())?;
         let client: BridgeCaptureRequestV1 = decode_frame(&frame)?;
         validate_bridge_request(&client)?;
-        let key = read_hex_key(&args.key_path)?;
-        let provenance: InstallProvenanceV1 = read_canonical_json(&args.provenance_path)?;
+        let public_key = VerifyingKey::from_bytes(
+            &read_hex(&args.public_key_path, 32)?
+                .try_into()
+                .map_err(|_| HelperError::authentication("PUBLIC_KEY_INVALID"))?,
+        ).map_err(|_| HelperError::authentication("PUBLIC_KEY_INVALID"))?;
+        let provenance: InstallProvenanceV2 = read_canonical_json(&args.provenance_path)?;
+        validate_running_executable_provenance(
+            &provenance,
+            &public_key,
+            ExecutableRoleV2::Bridge,
+        )?;
+        let key = read_hex(&args.key_path, 32)?;
         let boot_id = read_token(Path::new("/proc/sys/kernel/random/boot_id"))?;
         let epoch_path = args.socket_path.parent()
             .ok_or_else(|| HelperError::protocol("SOCKET_PARENT"))?
@@ -185,9 +217,11 @@ mod linux {
                     items: &response.response.items,
                     nonce: &response.response.nonce,
                     protocol_version: response.response.protocol_version,
-                    provenance: BridgeOutputProvenanceV1 {
-                        binary_sha256: &response.response.provenance.binary_sha256,
+                    provenance: BridgeOutputProvenanceV2 {
+                        bridge_binary_sha256: &response.response.provenance.bridge_binary_sha256,
+                        daemon_binary_sha256: &response.response.provenance.daemon_binary_sha256,
                         manifest_sha256: &response.response.provenance.manifest_sha256,
+                        schema_version: response.response.provenance.schema_version,
                         signature_key_id: &response.response.provenance.signature_key_id,
                         signer_id: &response.response.provenance.signer_id,
                     },
@@ -205,7 +239,33 @@ mod linux {
             ResponseStatusV1::Failed => {
                 let error = response.response.error.as_ref()
                     .ok_or_else(|| HelperError::protocol("FAILED_ERROR_MISSING"))?;
-                encode_frame(&BridgeFailedOutputV1 { error, status: "failed" })?
+                encode_frame(&BridgeFailedOutputV1 {
+                    abi_version: response.response.abi_version,
+                    batch_digest: &response.response.batch_digest,
+                    capability_digest: &response.response.capability_digest,
+                    daemon_epoch: &response.response.daemon_epoch,
+                    error,
+                    items: &response.response.items,
+                    nonce: &response.response.nonce,
+                    protocol_version: response.response.protocol_version,
+                    provenance: BridgeOutputProvenanceV2 {
+                        bridge_binary_sha256: &response.response.provenance.bridge_binary_sha256,
+                        daemon_binary_sha256: &response.response.provenance.daemon_binary_sha256,
+                        manifest_sha256: &response.response.provenance.manifest_sha256,
+                        schema_version: response.response.provenance.schema_version,
+                        signature_key_id: &response.response.provenance.signature_key_id,
+                        signer_id: &response.response.provenance.signer_id,
+                    },
+                    request_digest: &response.response.request_digest,
+                    request_id: &response.response.request_id,
+                    root_object_id: response.response.root_object_id.as_deref(),
+                    sequence: response.response.sequence,
+                    snapshot_fence: &response.response.snapshot_fence,
+                    snapshot_view: &response.response.snapshot_view,
+                    status: "failed",
+                    transcript_mac: &response.transcript_mac,
+                    volume_id: response.response.volume_id.as_deref(),
+                })?
             }
         };
         write_frame(&mut io::stdout().lock(), &output)
@@ -252,22 +312,26 @@ mod linux {
     }
 
     fn parse_args(values: Vec<String>) -> Result<Args, HelperError> {
-        if values.len() != 9 || values[0] != "capture-v1" || values[1] != "--socket" ||
-            values[3] != "--key" || values[5] != "--provenance" || values[7] != "--deadline-ms"
+        if values.len() != 11 || values[0] != "capture-v1" || values[1] != "--socket" ||
+            values[3] != "--key" || values[5] != "--provenance" ||
+            values[7] != "--public-key" || values[9] != "--deadline-ms"
         {
             return Err(HelperError::protocol("BRIDGE_ARGV"));
         }
-        if values[2] != SOCKET_PATH || values[4] != KEY_PATH || values[6] != PROVENANCE_PATH {
+        if values[2] != SOCKET_PATH || values[4] != KEY_PATH || values[6] != PROVENANCE_PATH ||
+            values[8] != PUBLIC_KEY_PATH
+        {
             return Err(HelperError::protocol("BRIDGE_INSTALL_LAYOUT"));
         }
         let socket_path = canonical_absolute_path(&values[2])?;
         let key_path = canonical_absolute_path(&values[4])?;
         let provenance_path = canonical_absolute_path(&values[6])?;
-        let deadline_ms = values[8].parse::<u64>()
+        let public_key_path = canonical_absolute_path(&values[8])?;
+        let deadline_ms = values[10].parse::<u64>()
             .ok()
             .filter(|value| (1..=60_000).contains(value))
             .ok_or_else(|| HelperError::deadline("BRIDGE_DEADLINE"))?;
-        Ok(Args { deadline_ms, key_path, provenance_path, socket_path })
+        Ok(Args { deadline_ms, key_path, provenance_path, public_key_path, socket_path })
     }
 
     fn canonical_absolute_path(value: &str) -> Result<PathBuf, HelperError> {
@@ -283,10 +347,12 @@ mod linux {
         Ok(path.to_owned())
     }
 
-    fn read_hex_key(path: &Path) -> Result<Vec<u8>, HelperError> {
+    fn read_hex(path: &Path, expected_bytes: usize) -> Result<Vec<u8>, HelperError> {
         let source = fs::read_to_string(path).map_err(|_| HelperError::authentication("KEY_UNREADABLE"))?;
         let value = source.trim_end_matches(['\r', '\n']);
-        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
+        if value.len() != expected_bytes * 2 ||
+            !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
             return Err(HelperError::authentication("KEY_INVALID"));
         }
         hex::decode(value).map_err(|_| HelperError::authentication("KEY_INVALID"))

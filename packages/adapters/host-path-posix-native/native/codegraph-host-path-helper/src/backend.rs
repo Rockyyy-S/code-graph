@@ -914,7 +914,8 @@ mod tests {
     use crate::{
         canonical::canonical_sha256,
         protocol::{
-            ABI_VERSION, AuthenticatedRequestV1, BridgeCandidateV1, InstallProvenanceV1,
+            ABI_VERSION, AuthenticatedRequestV1, BridgeCandidateV1,
+            INSTALL_PROVENANCE_SCHEMA_VERSION, InstallProvenanceV2,
             MountNamespaceV1, PeerIdentityV1, PROTOCOL_VERSION, RootIdentityV1,
             LvmFilesystemV1, SnapshotBackendKindV1, SnapshotBindingV1, VolumeIdentityV1,
         },
@@ -944,9 +945,11 @@ mod tests {
             nonce: "nonce-1".into(),
             peer: PeerIdentityV1 { gid: 1, pid: 1, start_time_ticks: 1, uid: 1 },
             protocol_version: PROTOCOL_VERSION,
-            provenance: InstallProvenanceV1 {
-                binary_sha256: "c".repeat(64),
+            provenance: InstallProvenanceV2 {
+                bridge_binary_sha256: "c".repeat(64),
+                daemon_binary_sha256: "d".repeat(64),
                 manifest_sha256: "d".repeat(64),
+                schema_version: INSTALL_PROVENANCE_SCHEMA_VERSION,
                 signature: "e".repeat(128),
                 signature_key_id: "key-1".into(),
                 signer_id: "signer-1".into(),

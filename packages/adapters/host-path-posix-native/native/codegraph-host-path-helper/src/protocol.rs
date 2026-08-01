@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
-pub const ABI_VERSION: u16 = 1;
+pub const ABI_VERSION: u16 = 2;
+pub const INSTALL_PROVENANCE_SCHEMA_VERSION: u16 = 2;
 pub const MAX_CANDIDATES: usize = 6_144;
 pub const MAX_PATH_BYTES: usize = 128 * 1024;
 pub const MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
@@ -54,7 +55,7 @@ pub struct AuthenticatedRequestV1 {
     pub nonce: String,
     pub peer: PeerIdentityV1,
     pub protocol_version: u16,
-    pub provenance: InstallProvenanceV1,
+    pub provenance: InstallProvenanceV2,
     pub request_id: String,
     pub root_identity: RootIdentityV1,
     pub sequence: u64,
@@ -158,9 +159,11 @@ impl VolumeIdentityV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct InstallProvenanceV1 {
-    pub binary_sha256: String,
+pub struct InstallProvenanceV2 {
+    pub bridge_binary_sha256: String,
+    pub daemon_binary_sha256: String,
     pub manifest_sha256: String,
+    pub schema_version: u16,
     pub signature: String,
     pub signature_key_id: String,
     pub signer_id: String,
@@ -168,8 +171,10 @@ pub struct InstallProvenanceV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProvenancePayloadV1 {
-    pub binary_sha256: String,
+pub struct ProvenancePayloadV2 {
+    pub bridge_binary_sha256: String,
+    pub daemon_binary_sha256: String,
+    pub schema_version: u16,
     pub signature_key_id: String,
     pub signer_id: String,
 }
@@ -193,7 +198,7 @@ pub struct HelperResponseV1 {
     pub items: Vec<CaptureItemV1>,
     pub nonce: String,
     pub protocol_version: u16,
-    pub provenance: InstallProvenanceV1,
+    pub provenance: InstallProvenanceV2,
     pub request_digest: String,
     pub request_id: String,
     pub root_object_id: Option<String>,

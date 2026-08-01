@@ -12,5 +12,6 @@ LVM 仅接受已绑定 VG/LV UUID 的 thin origin；ext4 使用 `ro,noload`，XF
 Node 主进程只打开 indexing root 目录并把真实 FD 继承给无特权 bridge。bridge 再通过
 `SCM_RIGHTS` 把 FD 交给独立 systemd daemon；只有 daemon 的 capability bounding set 包含
 `CAP_SYS_ADMIN`。安装器必须生成 32 字节 client key、安装 Ed25519 公钥与签名 provenance，
-并按 `install-layout.v1.json` 设置所有权和权限。仓库测试和 CI 不执行真实 snapshot、mount、
-systemd 安装或提权。
+并按 `install-layout.v1.json` 设置所有权和权限。provenance schema v2 分别签名 bridge 与
+daemon 的 SHA-256；两个进程都从 `/proc/self/exe` 打开的当前执行文件对象重算摘要，避免仅
+依赖可替换路径字符串。仓库测试和 CI 不执行真实 snapshot、mount、systemd 安装或提权。

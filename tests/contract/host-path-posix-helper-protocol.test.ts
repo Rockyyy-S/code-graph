@@ -5,12 +5,13 @@ import {
   createLinuxHelperBridgeInvocationV1,
   decodeLinuxHelperFrameV1,
   encodeLinuxHelperFrameV1,
+  mapLinuxHelperBridgeResponseV1,
   validateLinuxHelperResponseEnvelopeV1,
 } from "../../packages/adapters/host-path-posix-native/src/linux-helper.js";
 
 const digest = "a".repeat(64);
 
-describe("Linux HostPath helper protocol v1", () => {
+describe("Linux HostPath helper protocol v1 / ABI v2", () => {
   it("使用大端长度前缀并拒绝非 canonical JSON", () => {
     const frame = encodeLinuxHelperFrameV1({ b: 2, a: 1 });
 
@@ -31,6 +32,7 @@ describe("Linux HostPath helper protocol v1", () => {
       deadlineMs: 30_000,
       keyPath: "/etc/codegraph-host-path/client.key",
       provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+      publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
       rootFd: 47,
       socketPath: "/run/codegraph-host-path/helper.sock",
     });
@@ -44,6 +46,8 @@ describe("Linux HostPath helper protocol v1", () => {
         "/etc/codegraph-host-path/client.key",
         "--provenance",
         "/usr/share/codegraph-host-path/provenance.json",
+        "--public-key",
+        "/usr/share/codegraph-host-path/release.pub",
         "--deadline-ms",
         "30000",
       ],
@@ -57,7 +61,7 @@ describe("Linux HostPath helper protocol v1", () => {
   it("严格绑定响应 envelope、snapshot fence 与安装 provenance", () => {
     const expected = {
       batchDigest: digest,
-      binarySha256: "d".repeat(64),
+      bridgeBinarySha256: "d".repeat(64),
       capabilityDigest: "b".repeat(64),
       daemonEpoch: "epoch-1",
       nonce: "nonce-1",
@@ -75,8 +79,10 @@ describe("Linux HostPath helper protocol v1", () => {
       nonce: expected.nonce,
       protocolVersion: LINUX_HELPER_PROTOCOL_VERSION,
       provenance: {
-        binarySha256: "d".repeat(64),
+        bridgeBinarySha256: "d".repeat(64),
+        daemonBinarySha256: "1".repeat(64),
         manifestSha256: "e".repeat(64),
+        schemaVersion: 2,
         signatureKeyId: "codegraph-linux-release-1",
         signerId: "codegraph-release-key-1",
       },
@@ -104,8 +110,114 @@ describe("Linux HostPath helper protocol v1", () => {
       expected,
     )).toEqual({ reason: "RESPONSE_SHAPE_INVALID", status: "rejected" });
     expect(validateLinuxHelperResponseEnvelopeV1(
-      { ...response, provenance: { ...response.provenance, binarySha256: "0".repeat(64) } },
+      {
+        ...response,
+        provenance: { ...response.provenance, bridgeBinarySha256: "0".repeat(64) },
+      },
       expected,
     )).toEqual({ reason: "RESPONSE_BINDING_MISMATCH", status: "rejected" });
+  });
+
+  it("只接受完整绑定的 authenticated failed envelope 并保留 retryable", () => {
+    const expected = {
+      batchDigest: digest,
+      bridgeBinarySha256: "d".repeat(64),
+      capabilityDigest: "b".repeat(64),
+      daemonEpoch: "epoch-1",
+      nonce: "nonce-1",
+      requestDigest: "c".repeat(64),
+      requestId: "request-1",
+      sequence: 7,
+      signerId: "codegraph-release-key-1",
+    } as const;
+    const failedResponse = {
+      abiVersion: LINUX_HELPER_ABI_VERSION,
+      batchDigest: expected.batchDigest,
+      capabilityDigest: expected.capabilityDigest,
+      daemonEpoch: expected.daemonEpoch,
+      error: {
+        class: "namespace-drift",
+        code: "ROOT_CHANGED_DURING_FIRST_PASS",
+        retryable: true,
+      },
+      items: [],
+      nonce: expected.nonce,
+      protocolVersion: LINUX_HELPER_PROTOCOL_VERSION,
+      provenance: {
+        bridgeBinarySha256: expected.bridgeBinarySha256,
+        daemonBinarySha256: "1".repeat(64),
+        manifestSha256: "e".repeat(64),
+        schemaVersion: 2,
+        signatureKeyId: "codegraph-linux-release-1",
+        signerId: expected.signerId,
+      },
+      requestDigest: expected.requestDigest,
+      requestId: expected.requestId,
+      rootObjectId: null,
+      sequence: expected.sequence,
+      snapshotFence: "btrfs:readonly:42",
+      snapshotView: "btrfs:subvolume:42@snapshot-7",
+      status: "failed",
+      transcriptMac: "f".repeat(64),
+      volumeId: null,
+    };
+
+    expect(validateLinuxHelperResponseEnvelopeV1(failedResponse, expected)).toEqual({
+      response: failedResponse,
+      status: "accepted",
+    });
+    expect(validateLinuxHelperResponseEnvelopeV1(
+      { ...failedResponse, requestId: "request-2" },
+      expected,
+    )).toEqual({ reason: "RESPONSE_BINDING_MISMATCH", status: "rejected" });
+    expect(validateLinuxHelperResponseEnvelopeV1(
+      { ...failedResponse, error: { ...failedResponse.error, retryable: "yes" } },
+      expected,
+    )).toEqual({ reason: "RESPONSE_SHAPE_INVALID", status: "rejected" });
+    expect(validateLinuxHelperResponseEnvelopeV1(
+      { ...failedResponse, error: { ...failedResponse.error, class: "unknown" } },
+      expected,
+    )).toEqual({ reason: "RESPONSE_SHAPE_INVALID", status: "rejected" });
+    expect(mapLinuxHelperBridgeResponseV1(
+      failedResponse,
+      {
+        abiVersion: 1,
+        candidates: [],
+        capabilityDigest: expected.capabilityDigest,
+        captureNonce: expected.nonce,
+        indexingRoot: "/workspace",
+        platform: "linux",
+        protocolVersion: 1,
+      },
+      {
+        abiVersion: LINUX_HELPER_ABI_VERSION,
+        batchDigest: expected.batchDigest,
+        candidates: [],
+        capabilityDigest: expected.capabilityDigest,
+        nonce: expected.nonce,
+        protocolVersion: LINUX_HELPER_PROTOCOL_VERSION,
+        requestDigest: "9".repeat(64),
+        requestId: expected.requestId,
+      },
+      {
+        bridgeBinarySha256: expected.bridgeBinarySha256,
+        bridgeExecutable: "/usr/libexec/codegraph-host-path-bridge",
+        deadlineMs: 30_000,
+        keyPath: "/etc/codegraph-host-path/client.key",
+        provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+        publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
+        signerId: expected.signerId,
+        socketPath: "/run/codegraph-host-path/helper.sock",
+      },
+    )).toEqual({
+      abiVersion: 1,
+      capabilityDigest: expected.capabilityDigest,
+      captureNonce: expected.nonce,
+      failClosedReason: "PROVIDER_ERROR",
+      platform: "linux",
+      protocolVersion: 1,
+      retryable: true,
+      status: "failed",
+    });
   });
 });
