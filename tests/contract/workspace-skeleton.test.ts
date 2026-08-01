@@ -20,6 +20,8 @@ const expectedWorkspaces = [
   "packages/service-client",
   "packages/adapters/analyzer-typescript",
   "packages/adapters/git-local",
+  /** 该适配器仅承载 POSIX capability/protocol 边界，不表示 native 强原语已实现。 */
+  "packages/adapters/host-path-posix-native",
   "packages/adapters/store-sqlite",
 ];
 
@@ -68,7 +70,7 @@ describe("workspace responsibility skeleton", () => {
       const adapterDependencies = dependencies.filter((name) => adapterNames.has(name));
 
       if (workspace.relativePath === "apps/graph-service") {
-        expect(adapterDependencies).toHaveLength(3);
+        expect(adapterDependencies).toHaveLength(4);
       } else {
         expect(adapterDependencies, workspace.relativePath).toEqual([]);
       }
