@@ -116,6 +116,38 @@ describe("Linux HostPath helper protocol v1 / ABI v2", () => {
       },
       expected,
     )).toEqual({ reason: "RESPONSE_BINDING_MISMATCH", status: "rejected" });
+    expect(() => mapLinuxHelperBridgeResponseV1(
+      response,
+      {
+        abiVersion: 1,
+        candidates: [],
+        capabilityDigest: expected.capabilityDigest,
+        captureNonce: expected.nonce,
+        indexingRoot: "/workspace",
+        platform: "linux",
+        protocolVersion: 1,
+      },
+      {
+        abiVersion: LINUX_HELPER_ABI_VERSION,
+        batchDigest: expected.batchDigest,
+        candidates: [],
+        capabilityDigest: expected.capabilityDigest,
+        nonce: expected.nonce,
+        protocolVersion: LINUX_HELPER_PROTOCOL_VERSION,
+        requestDigest: "9".repeat(64),
+        requestId: expected.requestId,
+      },
+      {
+        bridgeBinarySha256: expected.bridgeBinarySha256,
+        bridgeExecutable: "/usr/libexec/codegraph-host-path-bridge",
+        deadlineMs: 30_000,
+        keyPath: "/etc/codegraph-host-path/client.key",
+        provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+        publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
+        signerId: expected.signerId,
+        socketPath: "/run/codegraph-host-path/helper.sock",
+      },
+    )).toThrow("Linux helper bridge 响应非法。");
   });
 
   it("只接受完整绑定的 authenticated failed envelope 并保留 retryable", () => {
@@ -178,37 +210,47 @@ describe("Linux HostPath helper protocol v1 / ABI v2", () => {
       { ...failedResponse, error: { ...failedResponse.error, class: "unknown" } },
       expected,
     )).toEqual({ reason: "RESPONSE_SHAPE_INVALID", status: "rejected" });
+    const request = {
+      abiVersion: 1 as const,
+      candidates: [],
+      capabilityDigest: expected.capabilityDigest,
+      captureNonce: expected.nonce,
+      indexingRoot: "/workspace",
+      platform: "linux" as const,
+      protocolVersion: 1 as const,
+    };
+    const bridgeRequest = {
+      abiVersion: LINUX_HELPER_ABI_VERSION,
+      batchDigest: expected.batchDigest,
+      candidates: [],
+      capabilityDigest: expected.capabilityDigest,
+      nonce: expected.nonce,
+      protocolVersion: LINUX_HELPER_PROTOCOL_VERSION,
+      requestDigest: expected.requestDigest,
+      requestId: expected.requestId,
+    };
+    const options = {
+      bridgeBinarySha256: expected.bridgeBinarySha256,
+      bridgeExecutable: "/usr/libexec/codegraph-host-path-bridge",
+      deadlineMs: 30_000,
+      keyPath: "/etc/codegraph-host-path/client.key",
+      provenancePath: "/usr/share/codegraph-host-path/provenance.json",
+      publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
+      signerId: expected.signerId,
+      socketPath: "/run/codegraph-host-path/helper.sock",
+    };
+
+    expect(() => mapLinuxHelperBridgeResponseV1(
+      failedResponse,
+      request,
+      { ...bridgeRequest, requestDigest: "9".repeat(64) },
+      options,
+    )).toThrow("Linux helper bridge 响应非法。");
     expect(mapLinuxHelperBridgeResponseV1(
       failedResponse,
-      {
-        abiVersion: 1,
-        candidates: [],
-        capabilityDigest: expected.capabilityDigest,
-        captureNonce: expected.nonce,
-        indexingRoot: "/workspace",
-        platform: "linux",
-        protocolVersion: 1,
-      },
-      {
-        abiVersion: LINUX_HELPER_ABI_VERSION,
-        batchDigest: expected.batchDigest,
-        candidates: [],
-        capabilityDigest: expected.capabilityDigest,
-        nonce: expected.nonce,
-        protocolVersion: LINUX_HELPER_PROTOCOL_VERSION,
-        requestDigest: "9".repeat(64),
-        requestId: expected.requestId,
-      },
-      {
-        bridgeBinarySha256: expected.bridgeBinarySha256,
-        bridgeExecutable: "/usr/libexec/codegraph-host-path-bridge",
-        deadlineMs: 30_000,
-        keyPath: "/etc/codegraph-host-path/client.key",
-        provenancePath: "/usr/share/codegraph-host-path/provenance.json",
-        publicKeyPath: "/usr/share/codegraph-host-path/release.pub",
-        signerId: expected.signerId,
-        socketPath: "/run/codegraph-host-path/helper.sock",
-      },
+      request,
+      bridgeRequest,
+      options,
     )).toEqual({
       abiVersion: 1,
       capabilityDigest: expected.capabilityDigest,
@@ -219,5 +261,17 @@ describe("Linux HostPath helper protocol v1 / ABI v2", () => {
       retryable: true,
       status: "failed",
     });
+    for (const forgedError of [
+      { ...failedResponse.error, retryable: "yes" },
+      { ...failedResponse.error, class: "unknown" },
+      { class: "authentication", code: "TRANSCRIPT_MAC_INVALID", retryable: true },
+    ]) {
+      expect(() => mapLinuxHelperBridgeResponseV1(
+        { ...failedResponse, error: forgedError },
+        request,
+        bridgeRequest,
+        options,
+      )).toThrow("Linux helper bridge 响应非法。");
+    }
   });
 });

@@ -469,7 +469,7 @@ function runBridge(
   });
 }
 
-/** bridge 最终只暴露既有 adapter capture 联合，额外安全绑定停留在内部 ABI。 */
+/** bridge 最终只暴露既有 adapter capture 联合，Node 会再次绑定本次请求摘要与内部 ABI 安全字段。 */
 export function mapLinuxHelperBridgeResponseV1(
   value: unknown,
   request: HostPathPosixCaptureRequestV1,
@@ -481,6 +481,7 @@ export function mapLinuxHelperBridgeResponseV1(
     bridgeBinarySha256: options.bridgeBinarySha256,
     capabilityDigest: bridgeRequest.capabilityDigest,
     nonce: bridgeRequest.nonce,
+    requestDigest: bridgeRequest.requestDigest,
     requestId: bridgeRequest.requestId,
     signerId: options.signerId,
   });
