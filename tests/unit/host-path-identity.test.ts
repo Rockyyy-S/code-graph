@@ -6,6 +6,13 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+  HOST_PATH_POSIX_ABI_VERSION,
+  HOST_PATH_POSIX_PROTOCOL_VERSION,
+  type HostPathPosixCapabilityV1,
+  type HostPathPosixNativeProviderV1,
+  type HostPathPosixTrustedProvenanceV1,
+} from "../../packages/adapters/host-path-posix-native/src/index.js";
+import {
   createDefaultHostPathIdentitySnapshotProvider,
   HostPathIdentityBroker,
   MAX_HOST_PATH_CANDIDATES,
@@ -24,6 +31,7 @@ import {
   serializeHostPathIdentityEnvelope,
   validateCandidateSourceIdentity,
   validateHostPathIdentitySource,
+  validateHostPathPosixAdapterSources,
   validateMutationOracle,
 } from "../../scripts/ci/verify-host-path-identity-v1.mjs";
 import { runProcessWithDeadline } from "../../scripts/ci/run-process-with-deadline.mjs";
@@ -47,13 +55,53 @@ const supportedCapability: HostPathSnapshotCapabilityV1 = {
   snapshotFence: "non-delete-shared-handle-lease-v1",
 };
 
-const supportedPosixCapability: HostPathSnapshotCapabilityV1 = {
+const untrustedSelfReportedPosixCapability: HostPathSnapshotCapabilityV1 = {
   caseSensitiveFileNames: false,
   fileIdInfo: false,
   fileSystemType: "POSIX",
   fixedVolume: true,
   objectIdentityKind: "device-inode",
-  snapshotFence: "two-phase-device-inode-capture-v1",
+  snapshotFence: "validated-native-namespace-fence-v1",
+};
+
+const posixBinarySha256 = "a".repeat(64);
+const trustedPosixCapability: HostPathPosixCapabilityV1 = {
+  abiVersion: HOST_PATH_POSIX_ABI_VERSION,
+  authority: {
+    kind: "privileged-helper",
+    providerId: "codegraph-linux-freeze-helper",
+  },
+  failClosedReason: null,
+  fence: {
+    lifetime: "capture",
+    namespace: "complete",
+    strength: "strong",
+  },
+  platform: "darwin",
+  primitiveKind: "filesystem-snapshot",
+  protocolVersion: HOST_PATH_POSIX_PROTOCOL_VERSION,
+  provenance: {
+    binarySha256: posixBinarySha256,
+    entitlement: "macos-apfs-snapshot",
+    kind: "signed-privileged-helper",
+    signerId: "codegraph-release-key-1",
+  },
+  status: "available",
+  supportScope: {
+    candidateSet: "complete-request-batch",
+    root: "indexing-root",
+    volume: "native-fixed-volume",
+  },
+};
+const trustedPosixProvenance: HostPathPosixTrustedProvenanceV1 = {
+  authorityKind: "privileged-helper",
+  binarySha256: posixBinarySha256,
+  entitlement: "macos-apfs-snapshot",
+  platform: "darwin",
+  primitiveKind: "filesystem-snapshot",
+  providerId: "codegraph-linux-freeze-helper",
+  provenanceKind: "signed-privileged-helper",
+  signerId: "codegraph-release-key-1",
 };
 
 /** 构造显式 FILE_ID_INFO 与句柄租约能力的确定性原生边界。 */
@@ -623,11 +671,35 @@ describe("host path identity broker", () => {
       new URL("../../apps/graph-service/src/host-path-identity.ts", import.meta.url),
       "utf8",
     );
+    const posixAdapterSources = new Map([
+      [
+        "packages/adapters/host-path-posix-native/src/capability.ts",
+        readFileSync(new URL(
+          "../../packages/adapters/host-path-posix-native/src/capability.ts",
+          import.meta.url,
+        ), "utf8"),
+      ],
+      [
+        "packages/adapters/host-path-posix-native/src/index.ts",
+        readFileSync(new URL(
+          "../../packages/adapters/host-path-posix-native/src/index.ts",
+          import.meta.url,
+        ), "utf8"),
+      ],
+      [
+        "packages/adapters/host-path-posix-native/src/protocol.ts",
+        readFileSync(new URL(
+          "../../packages/adapters/host-path-posix-native/src/protocol.ts",
+          import.meta.url,
+        ), "utf8"),
+      ],
+    ]);
     expect(() => validateHostPathIdentitySource(
       source,
       "apps/graph-service/src/host-path-identity.ts",
     )).not.toThrow();
-    expect(() => validateMutationOracle(source)).not.toThrow();
+    expect(() => validateHostPathPosixAdapterSources(posixAdapterSources)).not.toThrow();
+    expect(() => validateMutationOracle(source, posixAdapterSources)).not.toThrow();
 
     for (const mutation of [
       `const member = ["to", "LowerCase"].join(""); export const folded = "A"[member]();`,
@@ -666,26 +738,35 @@ describe("host path identity broker", () => {
     )).toBe(true);
   });
 
-  it("selects the default POSIX object provider for a case-insensitive non-Win32 host", async () => {
+  it("consumes an injected POSIX provider only after capability and provenance validation", async () => {
     const captureWindows = vi.fn<HostPathIdentitySnapshotProvider["capture"]>();
-    const capturePosix = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => ({
-      capability: supportedPosixCapability,
+    const capturePosix = vi.fn<HostPathPosixNativeProviderV1["capture"]>(async (request) => ({
+      abiVersion: request.abiVersion,
+      capabilityDigest: request.capabilityDigest,
       captureNonce: request.captureNonce,
       items: request.candidates.map((candidate) => ({
         candidateIndex: candidate.candidateIndex,
         objectId: candidate.logicalPath === "alias.ts"
-          ? "0000000000000001:0000000000000010"
-          : "0000000000000001:0000000000000011",
+          ? "posix-object-00000010"
+          : "posix-object-00000011",
       })),
-      rootObjectId: "0000000000000001:0000000000000001",
+      platform: request.platform,
+      protocolVersion: request.protocolVersion,
+      rootObjectId: "posix-root-object-00000001",
       status: "complete",
-      volumeId: "0000000000000001:posix-local",
+      volumeId: "posix-volume-object-00000001",
     }));
     const provider = createDefaultHostPathIdentitySnapshotProvider({
-      capturePosix,
       captureWindows,
       caseSensitiveFileNames: false,
       platform: "darwin",
+      posixNative: {
+        provider: {
+          capture: capturePosix,
+          getCapability: vi.fn(async () => structuredClone(trustedPosixCapability)),
+        },
+        trustedProvenance: [trustedPosixProvenance],
+      },
     });
     const proof = await new HostPathIdentityBroker({
       indexingRoot: "/repo",
@@ -702,12 +783,10 @@ describe("host path identity broker", () => {
     expect(captureWindows).not.toHaveBeenCalled();
   });
 
-  it("fails closed when the default non-Win32 provider lacks case-insensitive capability", async () => {
-    const capturePosix = vi.fn<HostPathIdentitySnapshotProvider["capture"]>();
+  it("fails closed when the default non-Win32 provider lacks a native capability binding", async () => {
     const provider = createDefaultHostPathIdentitySnapshotProvider({
-      capturePosix,
       captureWindows: vi.fn<HostPathIdentitySnapshotProvider["capture"]>(),
-      caseSensitiveFileNames: true,
+      caseSensitiveFileNames: false,
       platform: "linux",
     });
     const proof = await new HostPathIdentityBroker({
@@ -720,11 +799,27 @@ describe("host path identity broker", () => {
 
     expect(proof.status).toBe("failed");
     expect(proof.entries[0]?.observation).toMatchObject({
+      code: "HOST_PATH_POSIX_CAPABILITY_MISSING",
+      retryable: false,
+      status: "unsupported",
+    });
+  });
+
+  it("rejects raw POSIX fixedVolume and fence self-reports without a validated token", async () => {
+    const fake = createFakeSnapshotProvider({
+      "/repo": { objectId: "root-object-0001" },
+      "/repo/a.ts": { objectId: "file-object-0010" },
+    }, untrustedSelfReportedPosixCapability);
+
+    await expect(observeHostPathIdentity("/repo/a.ts", {
+      indexingRoot: "/repo",
+      platform: "linux",
+      snapshotProvider: fake.provider,
+    })).resolves.toMatchObject({
       code: "HOST_PATH_IDENTITY_UNSUPPORTED",
       retryable: false,
       status: "unsupported",
     });
-    expect(capturePosix).not.toHaveBeenCalled();
   });
 
   it("accepts Win32 root, intermediate and leaf casing aliases after object proof", async () => {
@@ -975,7 +1070,7 @@ describe("host path identity broker", () => {
   it("covers 5000 sources, 1024 resolution metadata entries and bounded root metadata", async () => {
     expect(MAX_HOST_PATH_CANDIDATES).toBe(6_144);
     const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => ({
-      capability: supportedPosixCapability,
+      capability: supportedCapability,
       captureNonce: request.captureNonce,
       items: request.candidates.map((candidate) => ({
         candidateIndex: candidate.candidateIndex,

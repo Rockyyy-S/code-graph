@@ -22,6 +22,7 @@
   "dependencies": {
     "@codegraph/adapter-analyzer-typescript": "workspace:*",
     "@codegraph/adapter-git-local": "workspace:*",
+    "@codegraph/adapter-host-path-posix-native": "workspace:*",
     "@codegraph/adapter-store-sqlite": "workspace:*",
     "@codegraph/application": "workspace:*",
     "@codegraph/contracts": "workspace:*",

@@ -149,20 +149,30 @@
         "gateId": "host-path-identity-win32-v1",
         "checkId": "host-path-identity-win32-v1",
         "triggerPaths": [
+          "apps/graph-service/package.json",
           "apps/graph-service/src/analyzer-config.ts",
           "apps/graph-service/src/host-path-identity.ts",
           "apps/graph-service/src/index-job-runtime.ts",
           "apps/graph-service/src/index-read-set.ts",
           "apps/graph-service/src/index.ts",
           "apps/graph-service/src/workspace-scanner.ts",
+          "apps/graph-service/tsconfig.build.json",
           "ci/quality-gates.v1.yaml",
           "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
           "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
           "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
           "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+          "packages/adapters/host-path-posix-native/package.json",
+          "packages/adapters/host-path-posix-native/src/capability.ts",
+          "packages/adapters/host-path-posix-native/src/index.ts",
+          "packages/adapters/host-path-posix-native/src/protocol.ts",
+          "packages/adapters/host-path-posix-native/tsconfig.build.json",
+          "packages/adapters/host-path-posix-native/tsconfig.json",
           "packages/application/src/ports/analyzer-port.ts",
+          "pnpm-lock.yaml",
           "scripts/ci/verify-host-path-identity-v1.mjs",
           "tests/contract/host-path-identity-win32.test.ts",
+          "tests/contract/host-path-posix-capability.test.ts",
           "tests/contract/quality-gates-manifest.test.ts",
           "tests/unit/analyzer-config-capture.test.ts",
           "tests/unit/host-path-identity.test.ts",
@@ -177,7 +187,7 @@
         "blocking": true,
         "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@67b35a8c1516759c680c5835c1956cdd623f7476#host-path-identity-win32-v1"
       },
-      "gateDefinitionDigest": "f63e3f983bf8ed5a31278d0b801189829b7471e98d1f28e6227e58a89e0cc148"
+      "gateDefinitionDigest": "ebd6055ee3f408e1ae382de9050a30548c9c583b2593ae2025c57c3b2886cc05"
     },
     {
       "gateDefinition": {

@@ -12,26 +12,40 @@ import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const gateId = "host-path-identity-win32-v1";
 const sourcePath = "apps/graph-service/src/host-path-identity.ts";
+const posixAdapterCapabilityPath = "packages/adapters/host-path-posix-native/src/capability.ts";
+const posixAdapterIndexPath = "packages/adapters/host-path-posix-native/src/index.ts";
+const posixAdapterProtocolPath = "packages/adapters/host-path-posix-native/src/protocol.ts";
 const unitTestPath = "tests/unit/host-path-identity.test.ts";
 const contractTestPath = "tests/contract/host-path-identity-win32.test.ts";
+const posixCapabilityContractTestPath = "tests/contract/host-path-posix-capability.test.ts";
 const dedicatedContractConfigPath = "vitest.contract.win32.config.ts";
 const manifestTestPath = "tests/contract/quality-gates-manifest.test.ts";
 const verifierPath = "scripts/ci/verify-host-path-identity-v1.mjs";
 const triggerPaths = [
+  "apps/graph-service/package.json",
   "apps/graph-service/src/analyzer-config.ts",
   sourcePath,
   "apps/graph-service/src/index-job-runtime.ts",
   "apps/graph-service/src/index-read-set.ts",
   "apps/graph-service/src/index.ts",
   "apps/graph-service/src/workspace-scanner.ts",
+  "apps/graph-service/tsconfig.build.json",
   "ci/quality-gates.v1.yaml",
   "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
   "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
   "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
   "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+  "packages/adapters/host-path-posix-native/package.json",
+  posixAdapterCapabilityPath,
+  posixAdapterIndexPath,
+  posixAdapterProtocolPath,
+  "packages/adapters/host-path-posix-native/tsconfig.build.json",
+  "packages/adapters/host-path-posix-native/tsconfig.json",
   "packages/application/src/ports/analyzer-port.ts",
+  "pnpm-lock.yaml",
   verifierPath,
   contractTestPath,
+  posixCapabilityContractTestPath,
   manifestTestPath,
   "tests/unit/analyzer-config-capture.test.ts",
   unitTestPath,
@@ -42,13 +56,19 @@ const triggerPaths = [
   dedicatedContractConfigPath,
 ];
 const allowedProductionImports = new Set([
+  "@codegraph/adapter-host-path-posix-native",
   "node:child_process",
   "node:crypto",
   "node:fs/promises",
   "node:os",
   "node:path",
 ]);
-const expectedProductionSourceDigest = "b4b75125b60cd0775bbad0492dd4555a5b8e41e7ba1181fe00f9f1dc7e4b1d64";
+const expectedProductionSourceDigest = "925be0e3928f3ade44b032554726deb9089c0392dd617288445e06fcefc02595";
+const expectedPosixAdapterSourceDigests = new Map([
+  [posixAdapterCapabilityPath, "4e2f2746660aeb8fafab091af382192acd4ebb74a57029a02cda36d35ef8cb06"],
+  [posixAdapterIndexPath, "6527a99e366018dec0775f10bbfe2ac67e581ae7802f820b2c21da7de7230a99"],
+  [posixAdapterProtocolPath, "570165c6accc38c6ac20cfa545437d6eeeed914b5d9c9dc5862262cc4759ae47"],
+]);
 const expectedWindowsSnapshotScriptDigest = "67cea8cc0483baca6f2f226850a8c0b6b7cf0d2dac28047dbfe2fd13d226c863";
 const requiredProductionCalls = new Map([
   ["HostPathIdentityBroker.resolveCandidates", [
@@ -64,27 +84,17 @@ const requiredProductionCalls = new Map([
   ["createDefaultHostPathIdentitySnapshotProvider", [
     "createSnapshotFailure",
     "captureWindows",
-    "capturePosix",
+    "capturePosixNativeSnapshot",
   ]],
   ["prepareCandidates", ["validateAbsoluteHostPath", "createTrustedPath"]],
-  ["capturePosixDeviceInodeSnapshot", [
-    "capturePosixState",
+  ["capturePosixNativeSnapshot", [
+    "captureHostPathPosixNativeV1",
     "createSnapshotFailure",
-    "classifyNativeFailure",
-    "readErrorCode",
-    "digestJson",
+    "mapPosixProtocolRejection",
+    "mapPosixCaptureFailure",
   ]],
-  ["capturePosixState", [
-    "readPosixPathChain",
-    "statfs",
-    "createPosixObjectId",
-    "toUnsignedHex",
-    "containsPosixObject",
-    "samePosixObject",
-    "digestJson",
-  ]],
-  ["readPosixPathChain", ["createNativeCaptureError", "lstat"]],
-  ["createPosixObjectId", ["toUnsignedHex"]],
+  ["mapPosixCaptureFailure", ["createSnapshotFailure"]],
+  ["validateCompleteCapture", ["isValidatedHostPathPosixCapabilityV1"]],
   ["captureWindowsHandleSnapshot", [
     "mkdtemp",
     "writeFile",
@@ -106,8 +116,16 @@ const MAX_TRUSTED_WINDOWS_PREFLIGHT_BYTES = 32 * 1024;
 /** 独立校验完整生产闭包与固定原生脚本，执行 mutation oracle 后运行黑盒回归。 */
 export async function verifyHostPathIdentityV1() {
   const source = await readVerifiedCandidateSource();
+  const posixAdapterSources = new Map();
+  for (const [relativePath, expectedDigest] of expectedPosixAdapterSourceDigests) {
+    posixAdapterSources.set(relativePath, await readVerifiedCandidateSource({
+      expectedDigest,
+      relativePath,
+    }));
+  }
   validateHostPathIdentitySource(source, sourcePath);
-  validateMutationOracle(source);
+  validateHostPathPosixAdapterSources(posixAdapterSources);
+  validateMutationOracle(source, posixAdapterSources);
   await validateGateRegistration();
 
   const unitStatus = runVitest("vitest.config.ts", [unitTestPath]);
@@ -737,6 +755,24 @@ function hasReturnCall(root, callableName, argumentName = "request") {
   );
 }
 
+/** 判断子树是否包含指定静态调用目标。 */
+function hasCall(root, callableName) {
+  return hasAstNode(root, (node) =>
+    ts.isCallExpression(node) &&
+    ((ts.isIdentifier(node.expression) && node.expression.text === callableName) ||
+      (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === callableName))
+  );
+}
+
+/** 统计指定子树中的静态调用次数，用于锁定同名边界校验的完整数量。 */
+function countCalls(root, callableName) {
+  return collectAstNodes(root, (node) =>
+    ts.isCallExpression(node) &&
+    ((ts.isIdentifier(node.expression) && node.expression.text === callableName) ||
+      (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === callableName))
+  ).length;
+}
+
 /** 判断语句子树是否返回精确的 fail-closed HostPath failure。 */
 function hasSnapshotFailureReturn(root, status, code, retryable) {
   return hasAstNode(root, (node) =>
@@ -788,13 +824,6 @@ function validateProviderFactoryStructure(sourceFile, brokerConstructorBody, vio
     "captureWindows",
     "captureWindows",
     "captureWindowsHandleSnapshot",
-    violations,
-  );
-  validateNativeFallbackBinding(
-    factory,
-    "capturePosix",
-    "capturePosix",
-    "capturePosixDeviceInodeSnapshot",
     violations,
   );
 
@@ -878,45 +907,49 @@ function validateProviderFactoryStructure(sourceFile, brokerConstructorBody, vio
     violations.push("provider factory 的 Win32 原生 dispatch 或宿主保护不完整。");
   }
 
-  const posixFailureBranches = collectAstNodes(captureFunction.body, (node) =>
+  const posixUnsupportedBranches = collectAstNodes(captureFunction.body, (node) =>
     ts.isIfStatement(node) &&
     hasAstNode(node.expression, (entry) => accessPathEquals(entry, ["options", "caseSensitiveFileNames"])) &&
     hasAstNode(node.expression, (entry) => isBinaryAccessLiteralComparison(
       entry,
-      ["request", "platform"],
+      ["posixPlatform"],
       ts.SyntaxKind.ExclamationEqualsEqualsToken,
       "darwin",
     )) &&
     hasAstNode(node.expression, (entry) => isBinaryAccessLiteralComparison(
       entry,
-      ["request", "platform"],
+      ["posixPlatform"],
       ts.SyntaxKind.ExclamationEqualsEqualsToken,
       "linux",
-    )) &&
-    hasAstNode(node.expression, (entry) =>
-      ts.isPrefixUnaryExpression(entry) &&
-      entry.operator === ts.SyntaxKind.ExclamationToken &&
-      ts.isIdentifier(entry.operand) &&
-      entry.operand.text === "injectedPosix"
-    ) &&
-    hasAstNode(node.expression, (entry) => isBinaryAccessComparison(
-      entry,
-      ["process", "platform"],
-      ts.SyntaxKind.ExclamationEqualsEqualsToken,
-      ["request", "platform"],
     ))
   );
+  const missingBindingBranches = collectAstNodes(captureFunction.body, (node) =>
+    ts.isIfStatement(node) &&
+    isBinaryAccessIdentifierComparison(
+      node.expression,
+      ["options", "posixNative"],
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      "undefined",
+    )
+  );
   if (
-    posixFailureBranches.length !== 1 ||
+    posixUnsupportedBranches.length !== 1 ||
     !hasSnapshotFailureReturn(
-      posixFailureBranches[0].thenStatement,
+      posixUnsupportedBranches[0].thenStatement,
       "unsupported",
       "HOST_PATH_IDENTITY_UNSUPPORTED",
       false,
     ) ||
-    !hasReturnCall(captureFunction.body, "capturePosix")
+    missingBindingBranches.length !== 1 ||
+    !hasSnapshotFailureReturn(
+      missingBindingBranches[0].thenStatement,
+      "unsupported",
+      "HOST_PATH_POSIX_CAPABILITY_MISSING",
+      false,
+    ) ||
+    !hasCall(captureFunction.body, "capturePosixNativeSnapshot")
   ) {
-    violations.push("provider factory 的非 Win32 能力保护或 POSIX dispatch 不完整。");
+    violations.push("provider factory 的 POSIX capability 缺失保护或 adapter dispatch 不完整。");
   }
 
   if (brokerConstructorBody === undefined) {
@@ -948,16 +981,20 @@ function validateProviderFactoryStructure(sourceFile, brokerConstructorBody, vio
   const platformProperty = providerOptions === undefined
     ? undefined
     : findObjectProperty(providerOptions, "platform");
+  const posixNativeProperty = providerOptions === undefined
+    ? undefined
+    : findObjectProperty(providerOptions, "posixNative");
   if (
     providerFactoryCall === undefined ||
     caseSensitiveProperty === undefined ||
-    platformProperty === undefined
+    platformProperty === undefined ||
+    posixNativeProperty !== undefined
   ) {
-    violations.push("HostPathIdentityBroker 默认路径未调用 provider factory 并传递平台能力。");
+    violations.push("HostPathIdentityBroker 默认路径必须传递平台能力且不得伪造 POSIX native binding。");
   }
 }
 
-/** 校验 complete capture 只能接受固定 Win32 或大小写不敏感 POSIX 对象能力。 */
+/** 校验 complete capture 只能接受固定 Win32 或 adapter 签发的 POSIX capability token。 */
 function validateCapabilityDispatchStructure(sourceFile, violations) {
   const validators = collectAstNodes(sourceFile, (node) =>
     ts.isFunctionDeclaration(node) && node.name?.text === "validateCompleteCapture"
@@ -1012,7 +1049,13 @@ function validateCapabilityDispatchStructure(sourceFile, violations) {
     ["capture", "capability", "snapshotFence"],
     ts.SyntaxKind.EqualsEqualsEqualsToken,
     "POSIX_SNAPSHOT_FENCE",
-  ));
+  )) && hasCall(posix, "isValidatedHostPathPosixCapabilityV1") &&
+    hasAstNode(posix, (node) => isBinaryAccessComparison(
+      node,
+      ["capture", "capability", "posixNativeCapability", "capability", "platform"],
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      ["platform"],
+    ));
   const rejectionBranches = collectAstNodes(validator.body, (node) =>
     ts.isIfStatement(node) &&
     hasAstNode(node.expression, (entry) =>
@@ -1044,7 +1087,7 @@ function validateCapabilityDispatchStructure(sourceFile, violations) {
       literalEquals(node.expression.arguments[2], false)
     )
   ) {
-    violations.push("complete capture 未封闭校验 Win32/POSIX 能力与 fail-closed 分支。");
+    violations.push("complete capture 未封闭校验 Win32 能力或 adapter 签发的 POSIX token。");
   }
 }
 
@@ -1123,7 +1166,7 @@ function validateHostPathIdentitySourceInternal(source, modulePath, enforceSourc
   /** 遍历完整 AST，建立封闭依赖集合和生产调用图证据。 */
   function visit(node) {
     if (ts.isImportEqualsDeclaration(node)) {
-      violations.push("生产依赖闭包只允许五条固定静态 import。");
+      violations.push("生产依赖闭包只允许固定静态 import。");
     }
     if (ts.isImportDeclaration(node)) {
       if (!ts.isStringLiteral(node.moduleSpecifier)) {
@@ -1208,7 +1251,7 @@ function validateHostPathIdentitySourceInternal(source, modulePath, enforceSourc
     }
   }
   if (imports.size !== allowedProductionImports.size) {
-    violations.push("生产依赖闭包必须精确等于五个 Node 内建模块。");
+    violations.push("生产依赖闭包必须精确等于已审计的 Node 内建模块与 POSIX adapter。");
   }
   for (const [callableName, requiredCalls] of requiredProductionCalls) {
     const calls = observedProductionCalls.get(callableName);
@@ -1239,11 +1282,203 @@ function validateHostPathIdentitySourceInternal(source, modulePath, enforceSourc
   }
 }
 
+const requiredPosixAdapterCalls = new Map([
+  [posixAdapterCapabilityPath, new Map([
+    ["validateHostPathPosixCapabilityV1", [
+      "isRecord",
+      "rejectCapability",
+      "validateCapabilityShape",
+      "validateCapabilityVersions",
+      "validateCapabilityPlatform",
+      "validateCapabilityPrimitive",
+      "validateCapabilitySupportScope",
+      "validateCapabilityFence",
+      "validateCapabilityAuthority",
+      "validateCapabilityProvenance",
+      "validatePlatformPrimitiveAuthorityCombination",
+      "validateTrustedProvenance",
+      "freezeCapability",
+      "createHash",
+    ]],
+    ["validateCapabilityShape", ["hasExactKeys", "isRecord"]],
+    ["validateCapabilityPrimitive", ["has"]],
+    ["validateCapabilityAuthority", ["isStableToken"]],
+    ["validateCapabilityProvenance", ["isSha256", "isStableToken", "isKnownEntitlement"]],
+    ["validateTrustedProvenance", ["some"]],
+    ["isValidatedHostPathPosixCapabilityV1", ["has"]],
+  ])],
+  [posixAdapterIndexPath, new Map([
+    ["captureHostPathPosixNativeV1", [
+      "getCapability",
+      "validateHostPathPosixCapabilityV1",
+      "capture",
+      "validateHostPathPosixCaptureResponseV1",
+    ]],
+  ])],
+  [posixAdapterProtocolPath, new Map([
+    ["validateHostPathPosixCaptureResponseV1", [
+      "isRecord",
+      "validateCompleteCaptureResponse",
+      "validateFailedCaptureResponse",
+    ]],
+    ["validateCompleteCaptureResponse", [
+      "hasExactKeys",
+      "responseEnvelopeMatches",
+      "isStableToken",
+      "isRecord",
+    ]],
+    ["validateFailedCaptureResponse", [
+      "hasExactKeys",
+      "responseEnvelopeMatches",
+      "isCaptureFailureReason",
+    ]],
+  ])],
+]);
+
+const allowedPosixAdapterImports = new Map([
+  [posixAdapterCapabilityPath, new Set(["./protocol.js", "node:crypto"])],
+  [posixAdapterIndexPath, new Set(["./capability.js", "./protocol.js"])],
+  [posixAdapterProtocolPath, new Set()],
+]);
+
+const requiredPosixAdapterExactCallCounts = new Map([
+  [posixAdapterCapabilityPath, new Map([
+    ["validateCapabilityShape", new Map([["hasExactKeys", 5]])],
+  ])],
+  [posixAdapterProtocolPath, new Map([
+    ["validateCompleteCaptureResponse", new Map([
+      ["hasExactKeys", 2],
+      ["responseEnvelopeMatches", 1],
+    ])],
+    ["validateFailedCaptureResponse", new Map([
+      ["hasExactKeys", 1],
+      ["isCaptureFailureReason", 1],
+      ["responseEnvelopeMatches", 1],
+    ])],
+  ])],
+]);
+
+/** 校验新 adapter 的完整源码摘要、依赖闭包、正向调用图与强原语词汇。 */
+export function validateHostPathPosixAdapterSources(sources, enforceSourceDigest = true) {
+  const violations = [];
+  for (const [modulePath, expectedDigest] of expectedPosixAdapterSourceDigests) {
+    const source = sources.get(modulePath);
+    if (typeof source !== "string") {
+      violations.push(`${modulePath}: 缺少 adapter 源码。`);
+      continue;
+    }
+    const sourceFile = ts.createSourceFile(
+      modulePath,
+      source.replaceAll("\r\n", "\n"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const imports = new Set();
+    for (const declaration of collectAstNodes(sourceFile, (node) => ts.isImportDeclaration(node))) {
+      if (!ts.isStringLiteral(declaration.moduleSpecifier)) {
+        violations.push(`${modulePath}: import specifier 必须是静态字符串。`);
+      } else {
+        imports.add(declaration.moduleSpecifier.text);
+      }
+    }
+    const allowedImports = allowedPosixAdapterImports.get(modulePath) ?? new Set();
+    if (
+      imports.size !== allowedImports.size ||
+      [...imports].some((specifier) => !allowedImports.has(specifier))
+    ) {
+      violations.push(`${modulePath}: adapter import 闭包漂移。`);
+    }
+    if (collectAstNodes(sourceFile, (node) =>
+      ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
+    ).length > 0) {
+      violations.push(`${modulePath}: 禁止 dynamic import。`);
+    }
+    const requiredCalls = requiredPosixAdapterCalls.get(modulePath) ?? new Map();
+    for (const [callableName, callNames] of requiredCalls) {
+      const callables = collectAstNodes(sourceFile, (node) =>
+        ts.isFunctionDeclaration(node) && node.name?.text === callableName
+      );
+      const callable = callables.length === 1 ? callables[0] : undefined;
+      if (callable?.body === undefined) {
+        violations.push(`${modulePath}: 缺少唯一函数 '${callableName}'。`);
+        continue;
+      }
+      for (const callName of callNames) {
+        if (!hasCall(callable.body, callName)) {
+          violations.push(`${modulePath}: '${callableName}' 缺少 '${callName}' 校验调用。`);
+        }
+      }
+    }
+    const exactCallCounts = requiredPosixAdapterExactCallCounts.get(modulePath) ?? new Map();
+    for (const [callableName, callCounts] of exactCallCounts) {
+      const callables = collectAstNodes(sourceFile, (node) =>
+        ts.isFunctionDeclaration(node) && node.name?.text === callableName
+      );
+      const callable = callables.length === 1 ? callables[0] : undefined;
+      if (callable?.body === undefined) {
+        continue;
+      }
+      for (const [callName, expectedCount] of callCounts) {
+        const actualCount = countCalls(callable.body, callName);
+        if (actualCount !== expectedCount) {
+          violations.push(
+            `${modulePath}: '${callableName}' 必须精确调用 '${callName}' ${expectedCount} 次，实际 ${actualCount} 次。`,
+          );
+        }
+      }
+    }
+    const digest = createHash("sha256")
+      .update(source.replaceAll("\r\n", "\n"), "utf8")
+      .digest("hex");
+    if (enforceSourceDigest && digest !== expectedDigest) {
+      violations.push(`${modulePath}: 完整源码摘要漂移。`);
+    }
+  }
+
+  const capabilitySource = sources.get(posixAdapterCapabilityPath);
+  if (typeof capabilitySource === "string") {
+    const capabilityFile = ts.createSourceFile(
+      posixAdapterCapabilityPath,
+      capabilitySource,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const strongPrimitiveDeclarations = collectAstNodes(capabilityFile, (node) =>
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "STRONG_PRIMITIVE_KINDS"
+    );
+    const initializer = strongPrimitiveDeclarations.length === 1
+      ? strongPrimitiveDeclarations[0].initializer
+      : undefined;
+    const primitiveArray = initializer !== undefined && ts.isNewExpression(initializer) &&
+        initializer.arguments?.length === 1 && ts.isArrayLiteralExpression(initializer.arguments[0])
+      ? initializer.arguments[0]
+      : undefined;
+    const primitives = primitiveArray?.elements
+      .filter(ts.isStringLiteral)
+      .map((literal) => literal.text);
+    if (JSON.stringify(primitives) !== JSON.stringify([
+      "complete-namespace-interposition",
+      "filesystem-freeze",
+      "filesystem-snapshot",
+    ])) {
+      violations.push(`${posixAdapterCapabilityPath}: 强原语 allowlist 必须精确为 snapshot/freeze/complete interposition。`);
+    }
+  }
+
+  if (violations.length > 0) {
+    throw new Error(`POSIX capability adapter 正向合同失败。\n${[...new Set(violations)].join("\n")}`);
+  }
+}
+
 /**
  * 固定变异集同时验证完整源码摘要和 provider factory/platform/capability 结构合同。
  * 结构变异通过 AST 精确定位目标节点，并在关闭摘要后仍必须被正向调用图拒绝。
  */
-export function validateMutationOracle(source) {
+export function validateMutationOracle(source, posixAdapterSources) {
   const mutations = [
     `const mutationMember=["to","LowerCase"].join(""); export const mutationValue="A"[mutationMember]();`,
     `import { createRequire as mutationCreateRequire } from "node:module"; mutationCreateRequire(import.meta.url)("./helper.cjs");`,
@@ -1277,19 +1512,10 @@ export function validateMutationOracle(source) {
     },
     {
       label: "win32-native-binding",
-      replacement: "options.captureWindows ?? capturePosixDeviceInodeSnapshot",
+      replacement: "options.captureWindows ?? capturePosixNativeSnapshot",
       select: (node) => ts.isVariableDeclaration(node) &&
         ts.isIdentifier(node.name) &&
         node.name.text === "captureWindows" &&
-        node.initializer !== undefined,
-      target: (node) => node.initializer,
-    },
-    {
-      label: "posix-native-binding",
-      replacement: "options.capturePosix ?? captureWindowsHandleSnapshot",
-      select: (node) => ts.isVariableDeclaration(node) &&
-        ts.isIdentifier(node.name) &&
-        node.name.text === "capturePosix" &&
         node.initializer !== undefined,
       target: (node) => node.initializer,
     },
@@ -1312,30 +1538,44 @@ export function validateMutationOracle(source) {
         ) &&
         hasAstNode(node.expression, (entry) => isBinaryAccessLiteralComparison(
           entry,
-          ["request", "platform"],
+          ["posixPlatform"],
           ts.SyntaxKind.ExclamationEqualsEqualsToken,
           "darwin",
         )),
       target: (node) => node.expression,
     },
     {
-      label: "posix-platform-dispatch",
+      label: "posix-capability-missing-fail-closed",
+      replacement: "false",
+      select: (node) => isBinaryAccessIdentifierComparison(
+        node,
+        ["options", "posixNative"],
+        ts.SyntaxKind.EqualsEqualsEqualsToken,
+        "undefined",
+      ),
+    },
+    {
+      label: "posix-adapter-dispatch",
       replacement: "captureWindows(request)",
       select: (node) => ts.isCallExpression(node) &&
         ts.isIdentifier(node.expression) &&
-        node.expression.text === "capturePosix" &&
-        node.arguments.length === 1 &&
-        ts.isIdentifier(node.arguments[0]) &&
-        node.arguments[0].text === "request",
+        node.expression.text === "capturePosixNativeSnapshot",
     },
     {
-      label: "posix-capability-fail-closed",
-      replacement: "capture.capability.caseSensitiveFileNames === true",
-      select: (node) => isBinaryAccessLiteralComparison(
+      label: "posix-validated-token-fail-closed",
+      replacement: "true",
+      select: (node) => ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "isValidatedHostPathPosixCapabilityV1",
+    },
+    {
+      label: "posix-platform-token-binding",
+      replacement: "capture.capability.posixNativeCapability.capability.platform === 'linux'",
+      select: (node) => isBinaryAccessComparison(
         node,
-        ["capture", "capability", "caseSensitiveFileNames"],
+        ["capture", "capability", "posixNativeCapability", "capability", "platform"],
         ts.SyntaxKind.EqualsEqualsEqualsToken,
-        false,
+        ["platform"],
       ),
     },
   ];
@@ -1357,9 +1597,85 @@ export function validateMutationOracle(source) {
       );
     }
   }
+  validatePosixAdapterMutationOracle(posixAdapterSources);
 }
 
-/** Gate 必须阻断、固定执行本 verifier，并精确覆盖 producer、consumer 与 dedicated 配置的二十二条路径。 */
+/** 删除任一关键 capability/protocol 校验调用时，关闭摘要后的结构门禁仍必须拒绝。 */
+function validatePosixAdapterMutationOracle(sources) {
+  if (!(sources instanceof Map)) {
+    throw new Error("POSIX adapter mutation oracle 缺少源码集合。");
+  }
+  const mutations = [
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityShape"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityVersions"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityPlatform"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityPrimitive"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilitySupportScope"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityFence"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityAuthority"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateCapabilityProvenance"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validatePlatformPrimitiveAuthorityCombination"],
+    [posixAdapterCapabilityPath, "validateHostPathPosixCapabilityV1", "validateTrustedProvenance"],
+    [posixAdapterIndexPath, "captureHostPathPosixNativeV1", "validateHostPathPosixCapabilityV1"],
+    [posixAdapterIndexPath, "captureHostPathPosixNativeV1", "validateHostPathPosixCaptureResponseV1"],
+    [posixAdapterProtocolPath, "validateHostPathPosixCaptureResponseV1", "validateCompleteCaptureResponse"],
+    [posixAdapterProtocolPath, "validateHostPathPosixCaptureResponseV1", "validateFailedCaptureResponse"],
+    [posixAdapterCapabilityPath, "validateCapabilityShape", "hasExactKeys", ["value"]],
+    [posixAdapterCapabilityPath, "validateCapabilityShape", "hasExactKeys", ["value", "authority"]],
+    [posixAdapterCapabilityPath, "validateCapabilityShape", "hasExactKeys", ["value", "provenance"]],
+    [posixAdapterCapabilityPath, "validateCapabilityShape", "hasExactKeys", ["value", "supportScope"]],
+    [posixAdapterCapabilityPath, "validateCapabilityShape", "hasExactKeys", ["value", "fence"]],
+    [posixAdapterProtocolPath, "validateCompleteCaptureResponse", "hasExactKeys", ["value"]],
+    [posixAdapterProtocolPath, "validateCompleteCaptureResponse", "hasExactKeys", ["item"]],
+    [posixAdapterProtocolPath, "validateCompleteCaptureResponse", "responseEnvelopeMatches"],
+    [posixAdapterProtocolPath, "validateFailedCaptureResponse", "hasExactKeys", ["value"]],
+    [posixAdapterProtocolPath, "validateFailedCaptureResponse", "responseEnvelopeMatches"],
+    [posixAdapterProtocolPath, "validateFailedCaptureResponse", "isCaptureFailureReason"],
+  ];
+  for (const [index, [modulePath, ownerName, callableName, firstArgumentPath]] of mutations.entries()) {
+    const source = sources.get(modulePath);
+    if (typeof source !== "string") {
+      throw new Error(`posix-adapter-mutation-${index}: 缺少 ${modulePath}。`);
+    }
+    const mutated = applySingleAstMutation(source, {
+      label: `${modulePath}:${callableName}`,
+      replacement: "null",
+      select: (node) => ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === callableName &&
+        (firstArgumentPath === undefined ||
+          (node.arguments.length > 0 && accessPathEquals(node.arguments[0], firstArgumentPath))) &&
+        isInsideNamedFunction(node, ownerName),
+    });
+    const mutatedSources = new Map(sources);
+    mutatedSources.set(modulePath, mutated);
+    let rejected = false;
+    try {
+      validateHostPathPosixAdapterSources(mutatedSources, false);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) {
+      throw new Error(
+        `posix-adapter-mutation-${index}:${callableName}: verifier 未拒绝删除关键校验的变异。`,
+      );
+    }
+  }
+}
+
+/** mutation target 必须位于指定函数内，避免同名校验调用被模糊选择。 */
+function isInsideNamedFunction(node, functionName) {
+  let current = node.parent;
+  while (current !== undefined) {
+    if (ts.isFunctionDeclaration(current)) {
+      return current.name?.text === functionName;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+/** Gate 必须阻断、固定执行本 verifier，并精确覆盖 producer、consumer 与 dedicated 配置的三十二条路径。 */
 async function validateGateRegistration() {
   const loaded = await loadQualityGateRegistry(repositoryRoot);
   const matching = loaded.registry.gates.filter(
@@ -1377,7 +1693,7 @@ async function validateGateRegistration() {
     JSON.stringify(definition.triggerPaths) !== JSON.stringify(triggerPaths)
   ) {
     throw new Error(
-      `ci/quality-gates.v1.yaml: ${gateId} 定义漂移。Fix: 恢复 blocking、固定 argv 与二十二条 triggerPaths。`,
+      `ci/quality-gates.v1.yaml: ${gateId} 定义漂移。Fix: 恢复 blocking、固定 argv 与三十二条 triggerPaths。`,
     );
   }
 }

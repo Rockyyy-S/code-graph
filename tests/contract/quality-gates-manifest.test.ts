@@ -68,7 +68,7 @@ const expectedGates = [
     "qa",
   ],
   /**
-   * 第 24 个 gate 精确覆盖 producer、Story consumer 与 dedicated Win32 配置的二十二条影响路径；
+   * 第 24 个 gate 精确覆盖 producer、Story consumer、POSIX capability adapter 与 dedicated Win32 配置的三十二条影响路径；
    * triggerPaths 只描述影响面，本地 architecture-required 仍必须始终执行该 blocking gate。
    */
   [
@@ -76,20 +76,30 @@ const expectedGates = [
     ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
     "qa",
     [
+      "apps/graph-service/package.json",
       "apps/graph-service/src/analyzer-config.ts",
       "apps/graph-service/src/host-path-identity.ts",
       "apps/graph-service/src/index-job-runtime.ts",
       "apps/graph-service/src/index-read-set.ts",
       "apps/graph-service/src/index.ts",
       "apps/graph-service/src/workspace-scanner.ts",
+      "apps/graph-service/tsconfig.build.json",
       "ci/quality-gates.v1.yaml",
       "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
       "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
       "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
       "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+      "packages/adapters/host-path-posix-native/package.json",
+      "packages/adapters/host-path-posix-native/src/capability.ts",
+      "packages/adapters/host-path-posix-native/src/index.ts",
+      "packages/adapters/host-path-posix-native/src/protocol.ts",
+      "packages/adapters/host-path-posix-native/tsconfig.build.json",
+      "packages/adapters/host-path-posix-native/tsconfig.json",
       "packages/application/src/ports/analyzer-port.ts",
+      "pnpm-lock.yaml",
       "scripts/ci/verify-host-path-identity-v1.mjs",
       "tests/contract/host-path-identity-win32.test.ts",
+      "tests/contract/host-path-posix-capability.test.ts",
       "tests/contract/quality-gates-manifest.test.ts",
       "tests/unit/analyzer-config-capture.test.ts",
       "tests/unit/host-path-identity.test.ts",
