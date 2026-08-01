@@ -20,7 +20,7 @@ const expectedWorkspaces = [
   "packages/service-client",
   "packages/adapters/analyzer-typescript",
   "packages/adapters/git-local",
-  /** 该适配器仅承载 POSIX capability/protocol 边界，不表示 native 强原语已实现。 */
+  /** 该适配器含 Linux snapshot-only helper 子路径；其他 POSIX 强原语仍必须显式注入且 fail closed。 */
   "packages/adapters/host-path-posix-native",
   "packages/adapters/store-sqlite",
 ];

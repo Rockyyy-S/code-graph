@@ -1,0 +1,37 @@
+name: host-path-posix-linux
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "packages/adapters/host-path-posix-native/**"
+      - "packaging/linux/**"
+      - "scripts/ci/verify-host-path-posix-helper-v1.mjs"
+      - "tests/contract/host-path-posix-helper-protocol.test.ts"
+      - "tests/platform/linux-host-path-helper/**"
+      - "tests/unit/host-path-posix-capability.test.ts"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot-helper-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install fixed Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      - name: Enable repository pnpm
+        run: corepack enable
+      - name: Install locked Node dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify snapshot-only helper core
+        env:
+          RUST_BACKTRACE: "1"
+          SOURCE_DATE_EPOCH: "0"
+        run: node scripts/ci/verify-host-path-posix-helper-v1.mjs

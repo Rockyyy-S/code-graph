@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {"group":"root","mode":"0755","owner":"root","path":"/usr/libexec/codegraph-host-path-bridge","source":"target/release/codegraph-host-path-bridge"},
+    {"group":"root","mode":"0755","owner":"root","path":"/usr/libexec/codegraph-host-path-daemon","source":"target/release/codegraph-host-path-daemon"},
+    {"group":"root","mode":"0644","owner":"root","path":"/usr/lib/systemd/system/codegraph-host-path-helper.service","source":"packaging/linux/systemd/codegraph-host-path-helper.service"},
+    {"group":"root","mode":"0644","owner":"root","path":"/usr/lib/systemd/system/codegraph-host-path-helper.socket","source":"packaging/linux/systemd/codegraph-host-path-helper.socket"},
+    {"group":"codegraph-host-path","mode":"0640","owner":"root","path":"/etc/codegraph-host-path/client.key","source":"INSTALL_TIME_GENERATED_32_BYTE_KEY"},
+    {"group":"root","mode":"0644","owner":"root","path":"/usr/share/codegraph-host-path/provenance.json","source":"RELEASE_SIGNED_PROVENANCE"},
+    {"group":"root","mode":"0644","owner":"root","path":"/usr/share/codegraph-host-path/release.pub","source":"RELEASE_ED25519_PUBLIC_KEY"}
+  ],
+  "forbiddenInstallMechanisms": ["setuid", "npm-lifecycle", "polkit-shell", "shell-command-concatenation"],
+  "nodeProcessCapabilities": [],
+  "serviceCapabilities": ["CAP_SYS_ADMIN"]
+}

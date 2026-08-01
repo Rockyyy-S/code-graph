@@ -191,6 +191,31 @@
     },
     {
       "gateDefinition": {
+        "gateId": "host-path-posix-helper-v1",
+        "checkId": "host-path-posix-helper-v1",
+        "triggerPaths": [
+          ".github/workflows/host-path-posix-linux.yml",
+          "Cargo.lock",
+          "Cargo.toml",
+          "ci/quality-gates.v1.yaml",
+          "packages/adapters/host-path-posix-native/**",
+          "packaging/linux/**",
+          "rust-toolchain.toml",
+          "scripts/ci/verify-host-path-posix-helper-v1.mjs",
+          "tests/contract/host-path-posix-helper-protocol.test.ts",
+          "tests/contract/quality-gates-manifest.test.ts",
+          "tests/platform/linux-host-path-helper/**",
+          "tests/unit/host-path-posix-capability.test.ts"
+        ],
+        "command": ["node", "scripts/ci/verify-host-path-posix-helper-v1.mjs"],
+        "capabilityOwner": "security",
+        "blocking": true,
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@67b35a8c1516759c680c5835c1956cdd623f7476#host-path-posix-helper-v1"
+      },
+      "gateDefinitionDigest": "edcfd1e8aa7d2a50c15f4c26d16b2ab98fd77789ac0c64cf4856053ea6482ae4"
+    },
+    {
+      "gateDefinition": {
         "gateId": "lint",
         "checkId": "lint",
         "command": ["pnpm", "lint"],

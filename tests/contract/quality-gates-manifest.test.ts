@@ -68,7 +68,7 @@ const expectedGates = [
     "qa",
   ],
   /**
-   * 第 24 个 gate 精确覆盖 producer、Story consumer、POSIX capability adapter 与 dedicated Win32 配置的三十二条影响路径；
+   * Win32 gate 精确覆盖 producer、Story consumer、POSIX capability adapter 与 dedicated Win32 配置的三十二条影响路径；
    * triggerPaths 只描述影响面，本地 architecture-required 仍必须始终执行该 blocking gate。
    */
   [
@@ -108,6 +108,28 @@ const expectedGates = [
       "tests/unit/typescript-analyzer-worker.test.ts",
       "tests/unit/typescript-module-resolution.test.ts",
       "vitest.contract.win32.config.ts",
+    ],
+  ],
+  /**
+   * Linux helper gate 锁定 Rust/TS ABI、权限分离打包、负向测试与固定 Linux workflow；本地仍始终执行静态/focused 边界。
+   */
+  [
+    "host-path-posix-helper-v1",
+    ["node", "scripts/ci/verify-host-path-posix-helper-v1.mjs"],
+    "security",
+    [
+      ".github/workflows/host-path-posix-linux.yml",
+      "Cargo.lock",
+      "Cargo.toml",
+      "ci/quality-gates.v1.yaml",
+      "packages/adapters/host-path-posix-native/**",
+      "packaging/linux/**",
+      "rust-toolchain.toml",
+      "scripts/ci/verify-host-path-posix-helper-v1.mjs",
+      "tests/contract/host-path-posix-helper-protocol.test.ts",
+      "tests/contract/quality-gates-manifest.test.ts",
+      "tests/platform/linux-host-path-helper/**",
+      "tests/unit/host-path-posix-capability.test.ts",
     ],
   ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
@@ -241,7 +263,7 @@ describe("quality-gates.v1 registry", () => {
     }
   });
 
-  it("登记唯一、升序且由本地 runner 始终执行的二十五项 blocking gate", async () => {
+  it("登记唯一、升序且由本地 runner 始终执行的二十六项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
     const expectedGateIds = expectedGates.map(([gateId]) => gateId);
     const workflowShas = new Set<string>(loaded.registry.gates.map(({

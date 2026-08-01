@@ -1,0 +1,15 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:${RELEASE_UUID}",
+  "version": 1,
+  "metadata": {
+    "timestamp": "${SOURCE_DATE_EPOCH_ISO8601}",
+    "component": {
+      "type": "application",
+      "name": "codegraph-host-path-helper",
+      "version": "${VERSION}"
+    }
+  },
+  "components": []
+}
