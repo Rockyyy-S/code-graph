@@ -237,9 +237,15 @@ async function validateStaticClosure() {
     "node-version: 24.18.0",
     "version: 11.12.0",
     "rustup toolchain install 1.88.0 --profile minimal --no-self-update",
+    "cargo fetch --locked",
     "pnpm install --frozen-lockfile",
     "verify-host-path-posix-helper-v1.mjs",
   ], "Linux workflow");
+  assertOrderedFragments(workflow, [
+    "rustup toolchain install 1.88.0 --profile minimal --no-self-update",
+    "cargo fetch --locked",
+    "node scripts/ci/verify-host-path-posix-helper-v1.mjs",
+  ], "Linux workflow Rust bootstrap");
   if (/\bsudo\b|\bsystemctl\b|\b(?:mount|umount|fsfreeze)\s/u.test(workflow)) {
     throw new Error("普通 hosted workflow 禁止 snapshot/mount/freeze/systemd 安装或提权。 ");
   }
@@ -277,15 +283,15 @@ async function validateGateRegistration() {
 }
 
 function runLinuxRustValidation() {
-  runCargo(["test", "--locked", "--workspace", "--all-targets"]);
+  runCargo(["test", "--locked", "--offline", "--workspace", "--all-targets"]);
   runCargo([
-    "check", "--locked", "--workspace", "--all-targets",
+    "check", "--locked", "--offline", "--workspace", "--all-targets",
     "--target", "x86_64-unknown-linux-gnu",
   ]);
   const componentProbe = runRustup(["component", "list", "--installed"], false);
   if (componentProbe.stdout.includes("clippy")) {
     runCargo([
-      "clippy", "--locked", "--workspace", "--all-targets", "--all-features",
+      "clippy", "--locked", "--offline", "--workspace", "--all-targets", "--all-features",
       "--", "-D", "warnings",
     ]);
     return "test-check-clippy";
@@ -299,6 +305,7 @@ function runPnpm(args) {
 }
 
 function runCargo(args, suppressStdout = false) {
+  assertLockedOfflineCargoValidation(args);
   runProcess(resolveTool("CARGO", "CARGO_HOME", "cargo"), args, false, true, suppressStdout);
 }
 
@@ -374,6 +381,35 @@ function assertIncludes(source, fragments, label) {
     if (!source.includes(fragment)) {
       throw new Error(`${label}: 缺少 '${fragment}'。`);
     }
+  }
+}
+
+/**
+ * 校验关键片段按声明顺序出现，防止联网 bootstrap 被移动到离线 verifier 之后。
+ *
+ * @param {string} source 待校验文本。
+ * @param {readonly string[]} fragments 必须依次出现的片段。
+ * @param {string} label 错误上下文标签。
+ */
+function assertOrderedFragments(source, fragments, label) {
+  let previousIndex = -1;
+  for (const fragment of fragments) {
+    const currentIndex = source.indexOf(fragment);
+    if (currentIndex <= previousIndex) {
+      throw new Error(`${label}: '${fragment}' 未按要求排序。`);
+    }
+    previousIndex = currentIndex;
+  }
+}
+
+/**
+ * 强制 Cargo 验证只消费已 bootstrap 的锁定缓存，禁止验证阶段隐式联网。
+ *
+ * @param {readonly string[]} args Cargo 参数。
+ */
+function assertLockedOfflineCargoValidation(args) {
+  if (!args.includes("--locked") || !args.includes("--offline")) {
+    throw new Error(`cargo ${args[0] ?? "validation"}: 必须使用 --locked --offline。`);
   }
 }
 
