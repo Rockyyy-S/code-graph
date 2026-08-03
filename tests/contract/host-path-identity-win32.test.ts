@@ -11,7 +11,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HostPathIdentityBroker } from "../../apps/graph-service/src/host-path-identity.js";
+import {
+  createDefaultHostPathIdentitySnapshotProvider,
+  HostPathIdentityBroker,
+} from "../../apps/graph-service/src/host-path-identity.js";
+import {
+  createServiceScopedWin32HostPathIdentityHelper,
+  type ServiceScopedWin32HostPathIdentityHelper,
+} from "../../apps/graph-service/src/index.js";
 import {
   createAnalyzerSemanticContextCapture,
 } from "../../apps/graph-service/src/analyzer-config.js";
@@ -26,9 +33,11 @@ import {
 } from "../../packages/adapters/analyzer-typescript/src/worker-analysis.js";
 
 const temporaryRoots: string[] = [];
+const hostPathIdentityHelpers: ServiceScopedWin32HostPathIdentityHelper[] = [];
 
 /** 仅删除本测试通过 mkdtemp 创建并登记的隔离目录。 */
 afterEach(async () => {
+  await Promise.all(hostPathIdentityHelpers.splice(0).map((helper) => helper.close()));
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
   );
@@ -57,7 +66,28 @@ function invertAsciiCase(input: string): string {
 
 /** 为真实测试根创建只绑定该 indexing root 的 broker。 */
 function createBroker(indexingRoot: string): HostPathIdentityBroker {
-  return new HostPathIdentityBroker({ indexingRoot, platform: "win32" });
+  return createBrokerFixture(indexingRoot).broker;
+}
+
+/** 同时返回 helper 诊断端口，用于证明多次 capture 未重复冷启动 PowerShell。 */
+function createBrokerFixture(indexingRoot: string): {
+  broker: HostPathIdentityBroker;
+  helper: ServiceScopedWin32HostPathIdentityHelper;
+} {
+  const helper = createServiceScopedWin32HostPathIdentityHelper();
+  hostPathIdentityHelpers.push(helper);
+  return {
+    broker: new HostPathIdentityBroker({
+      indexingRoot,
+      platform: "win32",
+      snapshotProvider: createDefaultHostPathIdentitySnapshotProvider({
+        caseSensitiveFileNames: false,
+        captureWindows: helper.capture,
+        platform: "win32",
+      }),
+    }),
+    helper,
+  };
 }
 
 describe("Windows host path identity contract", () => {
@@ -194,7 +224,7 @@ describe("Windows host path identity contract", () => {
 
   it("limits identity to one capture across rename and real unlink plus replacement", async () => {
     const root = await createWindowsRoot();
-    const broker = createBroker(root);
+    const { broker, helper } = createBrokerFixture(root);
     const beforePath = path.join(root, "before.ts");
     const afterPath = path.join(root, "after.ts");
     await writeFile(beforePath, "export const value = 1;\n", { flag: "wx" });
@@ -222,6 +252,11 @@ describe("Windows host path identity contract", () => {
     expect(replacement.observation.identityLifetime).toBe("snapshot");
     expect(replacement.observation.identity).not.toBe(renamed.observation.identity);
     expect(replacement.snapshotIdentity).not.toBe(renamed.snapshotIdentity);
+    expect(helper.readDiagnostics()).toMatchObject({
+      pendingRequests: 0,
+      processRunning: true,
+      processStarts: 1,
+    });
     expect(JSON.stringify([before, renamed, replacement])).not.toContain(root);
   }, 30_000);
 

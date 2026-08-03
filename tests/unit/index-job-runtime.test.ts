@@ -1775,4 +1775,27 @@ describe("index job runtime", () => {
     expect(outcome).toMatchObject({ message: expect.stringMatching(/超时/u) });
     await expect(runtime.close()).resolves.toBeUndefined();
   });
+
+  it("includes the service-scoped host identity helper in runtime shutdown", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const helperClose = vi.fn(async () => undefined);
+    const runtime = createIndexJobRuntime({
+      closeHostPathIdentityHelper: helperClose,
+      hostPathIdentityBroker: runtimeHostPathIdentityBroker,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-host-helper-close",
+      statusEpoch: "epoch-host-helper-close",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    await runtime.close();
+
+    expect(helperClose).toHaveBeenCalledTimes(1);
+  });
 });

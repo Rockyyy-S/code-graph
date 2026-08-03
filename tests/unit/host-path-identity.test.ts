@@ -24,6 +24,9 @@ import {
   type HostPathSnapshotCandidateV1,
 } from "../../apps/graph-service/src/host-path-identity.js";
 import {
+  createServiceScopedWin32HostPathIdentityHelper,
+} from "../../apps/graph-service/src/index.js";
+import {
   classifyDedicatedVitestResult,
   createHostPathIdentityPnpmInvocation,
   runHostPathIdentityPnpm,
@@ -736,6 +739,170 @@ describe("host path identity broker", () => {
     expect(proof.entries.every(({ observation }) =>
       observation.status === "present" && observation.identityLifetime === "snapshot"
     )).toBe(true);
+  });
+
+  it("reuses one service-scoped Windows helper while every capture keeps a fresh snapshot", async () => {
+    const captures: string[] = [];
+    const child = new EventEmitter() as EventEmitter & {
+      kill: ReturnType<typeof vi.fn<() => boolean>>;
+      stderr: PassThrough;
+      stdin: PassThrough;
+      stdout: PassThrough;
+    };
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.kill = vi.fn(() => {
+      queueMicrotask(() => child.emit("close", 0, null));
+      return true;
+    });
+    let input = "";
+    child.stdin.on("data", (chunk: Buffer) => {
+      input += chunk.toString("utf8");
+      while (input.includes("\n")) {
+        const newlineIndex = input.indexOf("\n");
+        const line = input.slice(0, newlineIndex);
+        input = input.slice(newlineIndex + 1);
+        const envelope = JSON.parse(line) as {
+          request: {
+            candidates: HostPathSnapshotCandidateV1[];
+            captureNonce: string;
+          };
+          requestId: string;
+        };
+        captures.push(envelope.request.captureNonce);
+        child.stdout.write(`${JSON.stringify({
+          capture: {
+            capability: supportedCapability,
+            captureNonce: envelope.request.captureNonce,
+            items: envelope.request.candidates.map((candidate) => ({
+              candidateIndex: candidate.candidateIndex,
+              objectId: "file-object-0010",
+            })),
+            rootObjectId: "root-object-0001",
+            status: "complete",
+            volumeId: "volume-win32-0001",
+          },
+          requestId: envelope.requestId,
+        })}\n`);
+      }
+    });
+    const spawnProcess = vi.fn(() => child as never);
+    const helper = createServiceScopedWin32HostPathIdentityHelper({ spawnProcess });
+    const provider = createDefaultHostPathIdentitySnapshotProvider({
+      caseSensitiveFileNames: false,
+      captureWindows: helper.capture,
+      platform: "win32",
+    });
+    const broker = new HostPathIdentityBroker({
+      indexingRoot: "C:\\repo",
+      platform: "win32",
+      snapshotProvider: provider,
+    });
+
+    const first = await broker.resolveCandidates([
+      { absolutePath: "C:\\repo\\a.ts", logicalPath: "a.ts" },
+    ]);
+    const second = await broker.resolveCandidates([
+      { absolutePath: "C:\\repo\\a.ts", logicalPath: "a.ts" },
+    ]);
+    const diagnostics = helper.readDiagnostics();
+    await helper.close();
+
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual({
+      pendingRequests: 0,
+      processRunning: true,
+      processStarts: 1,
+    });
+    expect(new Set(captures).size).toBe(2);
+    expect(first.status).toBe("complete");
+    expect(second.status).toBe("complete");
+    expect(first.snapshotIdentity).not.toBe(second.snapshotIdentity);
+    expect(first.proofDigest).not.toBe(second.proofDigest);
+  });
+
+  it("fails closed on an out-of-order helper response and rebuilds for the next request", async () => {
+    /** 创建可被协议测试精确控制 close 时机的内存子进程。 */
+    const createChild = () => {
+      const child = new EventEmitter() as EventEmitter & {
+        kill: ReturnType<typeof vi.fn<() => boolean>>;
+        stderr: PassThrough;
+        stdin: PassThrough;
+        stdout: PassThrough;
+      };
+      child.stderr = new PassThrough();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.kill = vi.fn(() => {
+        queueMicrotask(() => child.emit("close", 1, null));
+        return true;
+      });
+      return child;
+    };
+    const firstChild = createChild();
+    const secondChild = createChild();
+    const spawnProcess = vi.fn()
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    const helper = createServiceScopedWin32HostPathIdentityHelper({ spawnProcess });
+    const candidates: HostPathSnapshotCandidateV1[] = [{
+      absolutePath: "C:\\repo\\a.ts",
+      candidateIndex: 0,
+      logicalPath: "a.ts",
+      trustedPath: "C:\\repo\\a.ts",
+    }];
+    firstChild.stdin.once("data", (chunk: Buffer) => {
+      const envelope = JSON.parse(chunk.toString("utf8")) as { requestId: string };
+      firstChild.stdout.write(`${JSON.stringify({
+        capture: {
+          capability: supportedCapability,
+          captureNonce: "capture-nonce-0001",
+          items: [{ candidateIndex: 0, objectId: "file-object-0010" }],
+          rootObjectId: "root-object-0001",
+          status: "complete",
+          volumeId: "volume-win32-0001",
+        },
+        requestId: `${envelope.requestId}-out-of-order`,
+      })}\n`);
+    });
+
+    await expect(helper.capture({
+      candidates,
+      captureNonce: "capture-nonce-0001",
+      indexingRoot: "C:\\repo",
+      platform: "win32",
+    })).rejects.toMatchObject({ code: "HOST_PATH_CAPTURE_PROTOCOL_INVALID" });
+
+    secondChild.stdin.once("data", (chunk: Buffer) => {
+      const envelope = JSON.parse(chunk.toString("utf8")) as { requestId: string };
+      secondChild.stdout.write(`${JSON.stringify({
+        capture: {
+          capability: supportedCapability,
+          captureNonce: "capture-nonce-0002",
+          items: [{ candidateIndex: 0, objectId: "file-object-0010" }],
+          rootObjectId: "root-object-0001",
+          status: "complete",
+          volumeId: "volume-win32-0001",
+        },
+        requestId: envelope.requestId,
+      })}\n`);
+    });
+    await expect(helper.capture({
+      candidates,
+      captureNonce: "capture-nonce-0002",
+      indexingRoot: "C:\\repo",
+      platform: "win32",
+    })).resolves.toMatchObject({
+      captureNonce: "capture-nonce-0002",
+      status: "complete",
+    });
+    expect(helper.readDiagnostics().processStarts).toBe(2);
+    await helper.close();
+
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    expect(firstChild.kill).toHaveBeenCalledTimes(1);
+    expect(secondChild.kill).toHaveBeenCalledTimes(1);
   });
 
   it("consumes an injected POSIX provider only after capability and provenance validation", async () => {

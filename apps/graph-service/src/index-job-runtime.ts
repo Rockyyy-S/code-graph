@@ -72,6 +72,8 @@ export interface GraphServiceRuntime {
 export interface CreateIndexJobRuntimeOptions {
   analyzer?: AnalyzerPort;
   captureAnalyzerSemanticContext?: CaptureAnalyzerSemanticContext;
+  /** service-instance helper 的独立关闭边界，不把生命周期职责泄漏给 broker。 */
+  closeHostPathIdentityHelper?: () => Promise<void> | void;
   closeTimeoutMs?: number;
   createJobId?: () => string;
   digestPort?: CanonicalDigestPort;
@@ -196,6 +198,7 @@ export async function createVerifiedIndexJobRuntime(
     return createIndexJobRuntime({ ...effectiveOptions, readSetProvider });
   } catch (error) {
     readSetProvider.close?.();
+    await effectiveOptions.closeHostPathIdentityHelper?.();
     throw error;
   }
 }
@@ -241,13 +244,24 @@ export function createIndexJobRuntime(
   let closing = false;
   let currentRun: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
+  let hostPathClosePromise: Promise<void> | null = null;
   let storeClosed = false;
   let runAbortController: AbortController | null = null;
+
+  /** helper close 只启动一次，并允许 beginShutdown 立即中断在途 capture。 */
+  const closeHostPathIdentity = (): Promise<void> => {
+    if (hostPathClosePromise === null) {
+      hostPathClosePromise = Promise.resolve()
+        .then(() => options.closeHostPathIdentityHelper?.());
+    }
+    return hostPathClosePromise;
+  };
 
   /** 在返回 shutdown accepted 前同步关闭 Job 接收门禁。 */
   const beginShutdown = (): void => {
     closing = true;
     runAbortController?.abort();
+    void closeHostPathIdentity().catch(() => undefined);
   };
 
   /** 执行同一 logical Job 的完整 read-set、patch、复核、CAS 与有界重排。 */
@@ -444,9 +458,10 @@ export function createIndexJobRuntime(
       readSetProvider.close?.();
       closePromise = (async () => {
         const analyzerClose = Promise.resolve().then(() => options.analyzer?.close());
+        const hostPathClose = closeHostPathIdentity();
         const shutdownTasks = activeRun === null
-          ? analyzerClose
-          : Promise.all([activeRun, analyzerClose]).then(() => undefined);
+          ? Promise.all([analyzerClose, hostPathClose]).then(() => undefined)
+          : Promise.all([activeRun, analyzerClose, hostPathClose]).then(() => undefined);
         await waitForRunWithinLimit(shutdownTasks, closeTimeoutMs);
         options.store.close();
         storeClosed = true;
