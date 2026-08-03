@@ -246,21 +246,31 @@ describe("Linux HostPath helper protocol v1 / ABI v2", () => {
       { ...bridgeRequest, requestDigest: "9".repeat(64) },
       options,
     )).toThrow("Linux helper bridge 响应非法。");
-    expect(mapLinuxHelperBridgeResponseV1(
-      failedResponse,
-      request,
-      bridgeRequest,
-      options,
-    )).toEqual({
-      abiVersion: 1,
-      capabilityDigest: expected.capabilityDigest,
-      captureNonce: expected.nonce,
-      failClosedReason: "PROVIDER_ERROR",
-      platform: "linux",
-      protocolVersion: 1,
-      retryable: true,
-      status: "failed",
-    });
+    for (const [error, failClosedReason] of [
+      [failedResponse.error, "CAPTURE_CHANGED"],
+      [{ class: "volume-drift", code: "VOLUME_BINDING_DRIFT", retryable: true }, "VOLUME_MISMATCH"],
+      [{ class: "path-boundary", code: "PATH_MISSING", retryable: false }, "PATH_MISSING"],
+      [{ class: "path-boundary", code: "PATH_UNREADABLE", retryable: false }, "PATH_UNREADABLE"],
+      [{ class: "path-boundary", code: "LOGICAL_MAPPING_MISMATCH", retryable: false }, "LOGICAL_MAPPING_MISMATCH"],
+      [{ class: "path-boundary", code: "PATH_CROSSES_MOUNT", retryable: false }, "PATH_OUTSIDE_ROOT"],
+      [{ class: "snapshot", code: "COMMAND_NONZERO", retryable: true }, "PROVIDER_ERROR"],
+    ] as const) {
+      expect(mapLinuxHelperBridgeResponseV1(
+        { ...failedResponse, error },
+        request,
+        bridgeRequest,
+        options,
+      )).toEqual({
+        abiVersion: 1,
+        capabilityDigest: expected.capabilityDigest,
+        captureNonce: expected.nonce,
+        failClosedReason,
+        platform: "linux",
+        protocolVersion: 1,
+        retryable: error.retryable,
+        status: "failed",
+      });
+    }
     for (const forgedError of [
       { ...failedResponse.error, retryable: "yes" },
       { ...failedResponse.error, class: "unknown" },

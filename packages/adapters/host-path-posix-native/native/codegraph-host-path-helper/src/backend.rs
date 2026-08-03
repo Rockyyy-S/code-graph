@@ -24,6 +24,7 @@ const COMMAND_TIMEOUT_MS: u64 = 20_000;
 pub struct SnapshotPlanV1 {
     pub cleanup: Vec<CleanupStepV1>,
     pub create: Vec<PlanStepV1>,
+    pub mount_root: PathBuf,
     pub postflight: Vec<PlanStepV1>,
     pub request_root: PathBuf,
     pub view_root: PathBuf,
@@ -94,7 +95,6 @@ pub fn plan_snapshot(request: &AuthenticatedRequestV1) -> Result<SnapshotPlanV1,
     }
     let request_directory = hex::encode(Sha256::digest(request.request_id.as_bytes()));
     let request_root = Path::new(SNAPSHOT_ROOT).join(&request_directory[..32]);
-    let view_root = request_root.join("view");
     match &request.volume_identity {
         VolumeIdentityV1::Btrfs {
             device,
@@ -108,13 +108,27 @@ pub fn plan_snapshot(request: &AuthenticatedRequestV1) -> Result<SnapshotPlanV1,
             filesystem_uuid,
             *subvolume_id,
         ),
-        VolumeIdentityV1::Zfs { dataset, dataset_guid, mount_id: _, pool } => {
-            plan_zfs(request, request_root, view_root, dataset, dataset_guid, pool)
+        VolumeIdentityV1::Zfs {
+            dataset,
+            dataset_guid,
+            indexing_root_offset,
+            mount_id: _,
+            pool,
+        } => {
+            plan_zfs(
+                request,
+                request_root,
+                dataset,
+                dataset_guid,
+                indexing_root_offset,
+                pool,
+            )
         }
         VolumeIdentityV1::Lvm {
             device,
             device_major_minor,
             filesystem,
+            indexing_root_offset,
             mount_id: _,
             origin_lv,
             origin_lv_uuid,
@@ -123,10 +137,10 @@ pub fn plan_snapshot(request: &AuthenticatedRequestV1) -> Result<SnapshotPlanV1,
         } => plan_lvm(
             request,
             request_root,
-            view_root,
             device,
             device_major_minor,
             *filesystem,
+            indexing_root_offset,
             origin_lv,
             origin_lv_uuid,
             vg_name,
@@ -266,6 +280,7 @@ fn plan_btrfs(
                 )?,
             },
         ],
+        mount_root: request_root.clone(),
         postflight: vec![],
         request_root,
         view_root,
@@ -275,9 +290,9 @@ fn plan_btrfs(
 fn plan_zfs(
     request: &AuthenticatedRequestV1,
     request_root: PathBuf,
-    view_root: PathBuf,
     dataset: &str,
     dataset_guid: &str,
+    indexing_root_offset: &str,
     pool: &str,
 ) -> Result<SnapshotPlanV1, HelperError> {
     if request.snapshot.backend != SnapshotBackendKindV1::Zfs ||
@@ -293,13 +308,18 @@ fn plan_zfs(
         return Err(HelperError::unsupported("ZFS_CLOSURE_UNSUPPORTED"));
     }
     let snapshot_name = format!("{}@cg-{}", dataset, short_request_id(request));
+    let mount_root = request_root.join("volume");
+    let view_root = crate::path_boundary::project_snapshot_view_root(
+        &mount_root,
+        indexing_root_offset,
+    )?;
     Ok(SnapshotPlanV1 {
         cleanup: vec![
             CleanupStepV1 {
                 required_mutation: MutationV1::ZfsMount,
                 spec: CommandSpec::fixed(
                     "/usr/bin/umount",
-                    vec!["--".into(), view_root_string(&view_root)?],
+                    vec!["--".into(), view_root_string(&mount_root)?],
                     COMMAND_TIMEOUT_MS,
                 )?,
             },
@@ -354,12 +374,13 @@ fn plan_zfs(
                         "ro,nosuid,nodev,noexec".into(),
                         "--".into(),
                         snapshot_name,
-                        view_root_string(&view_root)?,
+                        view_root_string(&mount_root)?,
                     ],
                     COMMAND_TIMEOUT_MS,
                 )?,
             },
         ],
+        mount_root,
         postflight: vec![],
         request_root,
         view_root,
@@ -369,10 +390,10 @@ fn plan_zfs(
 fn plan_lvm(
     request: &AuthenticatedRequestV1,
     request_root: PathBuf,
-    view_root: PathBuf,
     device: &str,
     device_major_minor: &str,
     filesystem: LvmFilesystemV1,
+    indexing_root_offset: &str,
     origin_lv: &str,
     origin_lv_uuid: &str,
     vg_name: &str,
@@ -394,6 +415,11 @@ fn plan_lvm(
     }
     let snapshot_lv = format!("cg_{}", short_request_id(request).replace('-', "_"));
     let snapshot_device = format!("/dev/{vg_name}/{snapshot_lv}");
+    let mount_root = request_root.join("volume");
+    let view_root = crate::path_boundary::project_snapshot_view_root(
+        &mount_root,
+        indexing_root_offset,
+    )?;
     let (filesystem_name, mount_options) = match filesystem {
         LvmFilesystemV1::Ext4 => ("ext4", "ro,noload,nosuid,nodev,noexec"),
         LvmFilesystemV1::Xfs => ("xfs", "ro,norecovery,nouuid,nosuid,nodev,noexec"),
@@ -428,7 +454,7 @@ fn plan_lvm(
                 required_mutation: MutationV1::LvmMount,
                 spec: CommandSpec::fixed(
                     "/usr/bin/umount",
-                    vec!["--".into(), view_root_string(&view_root)?],
+                    vec!["--".into(), view_root_string(&mount_root)?],
                     COMMAND_TIMEOUT_MS,
                 )?,
             },
@@ -481,12 +507,13 @@ fn plan_lvm(
                         mount_options.into(),
                         "--".into(),
                         snapshot_device,
-                        view_root_string(&view_root)?,
+                        view_root_string(&mount_root)?,
                     ],
                     COMMAND_TIMEOUT_MS,
                 )?,
             },
         ],
+        mount_root,
         // 固定 batch 完成后再次读取 thin pool/snapshot 状态；空间异常使 fence 立即失效。
         postflight: vec![PlanStepV1 {
             expectation: snapshot_health,
@@ -523,7 +550,7 @@ impl<E: CommandExecutor> SnapshotBackend for LinuxSnapshotBackend<E> {
             fs::set_permissions(&plan.request_root, fs::Permissions::from_mode(0o700))
                 .map_err(|_| HelperError::snapshot("SNAPSHOT_DIRECTORY_MODE", false))?;
             if request.snapshot.backend != SnapshotBackendKindV1::Btrfs {
-                fs::create_dir(&plan.view_root)
+                fs::create_dir(&plan.mount_root)
                     .map_err(|_| HelperError::snapshot("VIEW_DIRECTORY_CREATE", false))?;
             }
             // fd 3 保留给 systemd socket activation；收到的 root FD 只复制到固定 slot 9。
@@ -535,15 +562,13 @@ impl<E: CommandExecutor> SnapshotBackend for LinuxSnapshotBackend<E> {
             let capture_result = (|| {
                 let mut snapshot_id = None;
                 for step in &plan.create {
-                    let output = execute_with_request_deadline(
+                    let candidate_snapshot_id = execute_plan_step(
                         &mut self.executor,
-                        &step.spec,
+                        step,
                         request.deadline_unix_ms,
+                        &mut completed_mutations,
                     )?;
-                    bind_snapshot_id(&mut snapshot_id, validate_output(&step.expectation, &output)?)?;
-                    if let Some(mutation) = step.mutation {
-                        completed_mutations.insert(mutation);
-                    }
+                    bind_snapshot_id(&mut snapshot_id, candidate_snapshot_id)?;
                 }
                 ensure_request_deadline(request.deadline_unix_ms)?;
                 let view = crate::path_boundary::open_directory(&plan.view_root)?;
@@ -554,12 +579,13 @@ impl<E: CommandExecutor> SnapshotBackend for LinuxSnapshotBackend<E> {
                 )?;
                 ensure_request_deadline(request.deadline_unix_ms)?;
                 for step in &plan.postflight {
-                    let output = execute_with_request_deadline(
+                    let candidate_snapshot_id = execute_plan_step(
                         &mut self.executor,
-                        &step.spec,
+                        step,
                         request.deadline_unix_ms,
+                        &mut completed_mutations,
                     )?;
-                    bind_snapshot_id(&mut snapshot_id, validate_output(&step.expectation, &output)?)?;
+                    bind_snapshot_id(&mut snapshot_id, candidate_snapshot_id)?;
                 }
                 Ok(BackendCaptureV1 {
                     items,
@@ -580,17 +606,22 @@ impl<E: CommandExecutor> SnapshotBackend for LinuxSnapshotBackend<E> {
     }
 }
 
-fn execute_with_request_deadline<E: CommandExecutor>(
+fn execute_plan_step<E: CommandExecutor>(
     executor: &mut E,
-    spec: &CommandSpec,
+    step: &PlanStepV1,
     deadline_unix_ms: u64,
-) -> Result<CommandOutput, HelperError> {
+    completed_mutations: &mut BTreeSet<MutationV1>,
+) -> Result<Option<String>, HelperError> {
     let remaining = remaining_request_ms(deadline_unix_ms)?;
-    let mut bounded = spec.clone();
+    let mut bounded = step.spec.clone();
     bounded.timeout_ms = bounded.timeout_ms.min(remaining);
+    // ownership 必须在命令启动前建立；超时、部分成功或输出解析失败都仍进入 rollback。
+    if let Some(mutation) = step.mutation {
+        completed_mutations.insert(mutation);
+    }
     let output = executor.execute(&bounded)?;
     ensure_request_deadline(deadline_unix_ms)?;
-    Ok(output)
+    validate_output(&step.expectation, &output)
 }
 
 fn ensure_request_deadline(deadline_unix_ms: u64) -> Result<(), HelperError> {
@@ -616,7 +647,7 @@ fn cleanup_runtime_directories(
     use std::fs;
 
     // 绝不递归删除 mount target；若卸载失败，remove_dir 只会安全地失败并保留证据。
-    if backend != SnapshotBackendKindV1::Btrfs && fs::remove_dir(&plan.view_root).is_err() {
+    if backend != SnapshotBackendKindV1::Btrfs && fs::remove_dir(&plan.mount_root).is_err() {
         return Err(HelperError::cleanup("VIEW_DIRECTORY_CLEANUP_FAILED"));
     }
     fs::remove_dir(&plan.request_root)
@@ -631,7 +662,7 @@ fn cleanup_plan<E: CommandExecutor>(
     let mut failed = false;
     for cleanup in &plan.cleanup {
         if completed_mutations.contains(&cleanup.required_mutation) &&
-            executor.execute(&cleanup.spec).is_err()
+            executor.execute_cleanup(&cleanup.spec).is_err()
         {
             failed = true;
         }
@@ -988,6 +1019,7 @@ mod tests {
                 VolumeIdentityV1::Zfs {
                     dataset: "tank/repo".into(),
                     dataset_guid: "123456789".into(),
+                    indexing_root_offset: "packages/app".into(),
                     mount_id: 11,
                     pool: "tank".into(),
                 },
@@ -998,6 +1030,7 @@ mod tests {
                     device: "/dev/vg/repo".into(),
                     device_major_minor: "8:1".into(),
                     filesystem: LvmFilesystemV1::Ext4,
+                    indexing_root_offset: "packages/app".into(),
                     mount_id: 11,
                     origin_lv: "repo".into(),
                     origin_lv_uuid: "A".repeat(32),
@@ -1046,6 +1079,7 @@ mod tests {
             VolumeIdentityV1::Zfs {
                 dataset: "tank/repo".into(),
                 dataset_guid: "123456789".into(),
+                indexing_root_offset: "packages/app".into(),
                 mount_id: 11,
                 pool: "tank".into(),
             },
@@ -1072,6 +1106,7 @@ mod tests {
                 device: "/dev/vg/repo".into(),
                 device_major_minor: "8:1".into(),
                 filesystem: LvmFilesystemV1::Xfs,
+                indexing_root_offset: "packages/app".into(),
                 mount_id: 11,
                 origin_lv: "repo".into(),
                 origin_lv_uuid: "O".repeat(32),
@@ -1081,6 +1116,7 @@ mod tests {
             SnapshotBackendKindV1::Lvm,
         )).expect("lvm plan");
         assert_eq!(plan.postflight.len(), 1);
+        assert_eq!(plan.view_root, plan.mount_root.join("packages/app"));
         assert_eq!(plan.postflight[0].spec.executable, "/usr/sbin/lvs");
         assert!(!plan.create.iter().any(|step| {
             step.spec.executable == "/usr/sbin/lvcreate" &&
@@ -1092,6 +1128,109 @@ mod tests {
                     arg == "ro,norecovery,nouuid,nosuid,nodev,noexec"
                 })
         }));
+    }
+
+    #[test]
+    fn zfs_and_lvm_mount_volume_root_but_capture_projected_indexing_root() {
+        let fixtures = [
+            request(
+                VolumeIdentityV1::Zfs {
+                    dataset: "tank/repo".into(),
+                    dataset_guid: "123456789".into(),
+                    indexing_root_offset: "nested/indexing-root".into(),
+                    mount_id: 11,
+                    pool: "tank".into(),
+                },
+                SnapshotBackendKindV1::Zfs,
+            ),
+            request(
+                VolumeIdentityV1::Lvm {
+                    device: "/dev/vg/repo".into(),
+                    device_major_minor: "8:1".into(),
+                    filesystem: LvmFilesystemV1::Ext4,
+                    indexing_root_offset: "nested/indexing-root".into(),
+                    mount_id: 11,
+                    origin_lv: "repo".into(),
+                    origin_lv_uuid: "O".repeat(32),
+                    vg_name: "vg".into(),
+                    vg_uuid: "V".repeat(32),
+                },
+                SnapshotBackendKindV1::Lvm,
+            ),
+        ];
+        for fixture in fixtures {
+            let plan = plan_snapshot(&fixture).expect("plan");
+            assert_eq!(plan.view_root, plan.mount_root.join("nested/indexing-root"));
+            let mount = plan.create.iter().find(|step| {
+                step.spec.executable == "/usr/bin/mount"
+            }).expect("mount");
+            assert_eq!(
+                mount.spec.args.last().map(String::as_str),
+                plan.mount_root.to_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn mutation_ownership_precedes_timeout_parse_failure_and_idempotent_rollback() {
+        let plan = plan_snapshot(&request(
+            VolumeIdentityV1::Zfs {
+                dataset: "tank/repo".into(),
+                dataset_guid: "123456789".into(),
+                indexing_root_offset: "packages/app".into(),
+                mount_id: 11,
+                pool: "tank".into(),
+            },
+            SnapshotBackendKindV1::Zfs,
+        )).expect("plan");
+        let mutation = plan.create.iter().find(|step| {
+            step.mutation == Some(MutationV1::ZfsSnapshot)
+        }).expect("snapshot mutation");
+
+        let mut timed_out = FakeCommandExecutor::default();
+        timed_out.results.push_back(Err(crate::protocol::HelperError::deadline("COMMAND_TIMEOUT")));
+        let mut completed_mutations = BTreeSet::new();
+        assert!(super::execute_plan_step(
+            &mut timed_out,
+            mutation,
+            u64::MAX,
+            &mut completed_mutations,
+        ).is_err());
+        assert!(completed_mutations.contains(&MutationV1::ZfsSnapshot));
+
+        let mut partial_success = FakeCommandExecutor::default();
+        partial_success.results.push_back(Err(crate::protocol::HelperError::snapshot(
+            "COMMAND_NONZERO",
+            true,
+        )));
+        let mut completed_after_partial_success = BTreeSet::new();
+        assert!(super::execute_plan_step(
+            &mut partial_success,
+            mutation,
+            u64::MAX,
+            &mut completed_after_partial_success,
+        ).is_err());
+        assert!(completed_after_partial_success.contains(&MutationV1::ZfsSnapshot));
+
+        let mut parse_failure = FakeCommandExecutor::default();
+        parse_failure.results.push_back(Ok(CommandOutput {
+            stderr: vec![],
+            stdout: vec![0xff],
+        }));
+        let mut completed_after_parse = BTreeSet::new();
+        assert!(super::execute_plan_step(
+            &mut parse_failure,
+            mutation,
+            u64::MAX,
+            &mut completed_after_parse,
+        ).is_err());
+        assert!(completed_after_parse.contains(&MutationV1::ZfsSnapshot));
+
+        let mut cleanup = FakeCommandExecutor::default();
+        cleanup_plan(&mut cleanup, &plan, &completed_mutations).expect("first rollback");
+        cleanup_plan(&mut cleanup, &plan, &completed_mutations).expect("idempotent rollback");
+        assert_eq!(cleanup.calls.len(), 2);
+        assert!(cleanup.calls.iter().all(|call| call.executable == "/usr/sbin/zfs"));
     }
 
     #[test]

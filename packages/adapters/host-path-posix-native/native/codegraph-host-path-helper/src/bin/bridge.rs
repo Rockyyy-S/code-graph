@@ -13,7 +13,7 @@ mod linux {
     use codegraph_host_path_helper::{
         canonical::{canonical_json, canonical_sha256, decode_frame, encode_frame},
         command::{CommandExecutor, CommandSpec, SystemCommandExecutor},
-        path_boundary::stat_identity_fd,
+        path_boundary::{project_indexing_root_offset, stat_identity_fd},
         protocol::{
             ABI_VERSION, AuthenticatedRequestEnvelopeV1, AuthenticatedRequestV1,
             AuthenticatedResponseEnvelopeV1, BridgeCaptureRequestV1, CaptureItemV1,
@@ -450,6 +450,7 @@ mod linux {
                 Ok(VolumeIdentityV1::Zfs {
                     dataset: source,
                     dataset_guid,
+                    indexing_root_offset: discover_indexing_root_offset(fields[3], fields[4])?,
                     mount_id: root.mount_id,
                     pool,
                 })
@@ -458,8 +459,18 @@ mod linux {
             "nfs" | "nfs4" | "cifs" | "fuse" | "fuseblk" => {
                 Err(HelperError::unsupported("NETWORK_OR_FUSE_UNSUPPORTED"))
             }
-            "ext4" => discover_lvm(root, source, LvmFilesystemV1::Ext4),
-            "xfs" => discover_lvm(root, source, LvmFilesystemV1::Xfs),
+            "ext4" => discover_lvm(
+                root,
+                source,
+                LvmFilesystemV1::Ext4,
+                discover_indexing_root_offset(fields[3], fields[4])?,
+            ),
+            "xfs" => discover_lvm(
+                root,
+                source,
+                LvmFilesystemV1::Xfs,
+                discover_indexing_root_offset(fields[3], fields[4])?,
+            ),
             _ => Err(HelperError::unsupported("FILESYSTEM_UNSUPPORTED")),
         }
     }
@@ -521,6 +532,7 @@ mod linux {
         root: &codegraph_host_path_helper::path_boundary::ObjectIdentityV1,
         source: String,
         filesystem: LvmFilesystemV1,
+        indexing_root_offset: String,
     ) -> Result<VolumeIdentityV1, HelperError> {
         let sys = Path::new("/sys/dev/block").join(format!("{}:{}", root.device_major, root.device_minor));
         let dm_uuid = fs::read_to_string(sys.join("dm/uuid"))
@@ -538,12 +550,26 @@ mod linux {
             device: source,
             device_major_minor: format!("{}:{}", root.device_major, root.device_minor),
             filesystem,
+            indexing_root_offset,
             mount_id: root.mount_id,
             origin_lv,
             origin_lv_uuid,
             vg_name,
             vg_uuid,
         })
+    }
+
+    fn discover_indexing_root_offset(
+        mount_root_field: &str,
+        mount_point_field: &str,
+    ) -> Result<String, HelperError> {
+        let mount_root = unescape_mountinfo(mount_root_field)?;
+        let mount_point = unescape_mountinfo(mount_point_field)?;
+        let indexing_root = fs::read_link(format!("/proc/self/fd/{ROOT_FD}"))
+            .map_err(|_| HelperError::namespace("INDEXING_ROOT_PATH_UNREADABLE"))?;
+        let indexing_root = indexing_root.to_str()
+            .ok_or_else(|| HelperError::namespace("INDEXING_ROOT_PATH_ENCODING"))?;
+        project_indexing_root_offset(&mount_root, &mount_point, indexing_root)
     }
 
     fn split_dm_name(value: &str) -> Result<(String, String), HelperError> {

@@ -53,12 +53,34 @@ pub struct CommandOutput {
 
 pub trait CommandExecutor {
     fn execute(&mut self, spec: &CommandSpec) -> Result<CommandOutput, HelperError>;
+
+    /// cleanup 可重复执行；仅把固定命令的“目标已不存在”视为成功，其他失败继续 fail closed。
+    fn execute_cleanup(&mut self, spec: &CommandSpec) -> Result<CommandOutput, HelperError> {
+        self.execute(spec)
+    }
 }
 
 pub struct SystemCommandExecutor;
 
 impl CommandExecutor for SystemCommandExecutor {
     fn execute(&mut self, spec: &CommandSpec) -> Result<CommandOutput, HelperError> {
+        let (output, success) = execute_system_command(spec)?;
+        if !success {
+            return Err(HelperError::snapshot("COMMAND_NONZERO", true));
+        }
+        Ok(output)
+    }
+
+    fn execute_cleanup(&mut self, spec: &CommandSpec) -> Result<CommandOutput, HelperError> {
+        let (output, success) = execute_system_command(spec)?;
+        if success || cleanup_target_is_absent(spec, &output.stderr) {
+            return Ok(output);
+        }
+        Err(HelperError::snapshot("COMMAND_NONZERO", true))
+    }
+}
+
+fn execute_system_command(spec: &CommandSpec) -> Result<(CommandOutput, bool), HelperError> {
         let mut environment = BTreeMap::new();
         environment.insert("LANG", "C");
         environment.insert("LC_ALL", "C");
@@ -108,10 +130,18 @@ impl CommandExecutor for SystemCommandExecutor {
         if stdout.len() > spec.output_limit || stderr.len() > spec.output_limit {
             return Err(HelperError::budget("COMMAND_OUTPUT_LIMIT"));
         }
-        if !status.success() {
-            return Err(HelperError::snapshot("COMMAND_NONZERO", true));
-        }
-        Ok(CommandOutput { stderr, stdout })
+        Ok((CommandOutput { stderr, stdout }, status.success()))
+}
+
+fn cleanup_target_is_absent(spec: &CommandSpec, stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr);
+    match (spec.executable.as_str(), spec.args.first().map(String::as_str)) {
+        ("/usr/bin/umount", Some("--")) =>
+            stderr.contains("not mounted") || stderr.contains("no mount point specified"),
+        ("/usr/sbin/zfs", Some("destroy")) => stderr.contains("dataset does not exist"),
+        ("/usr/sbin/lvremove", Some("--yes")) => stderr.contains("Failed to find logical volume"),
+        ("/usr/bin/btrfs", Some("subvolume")) => stderr.contains("No such file or directory"),
+        _ => false,
     }
 }
 
@@ -165,5 +195,32 @@ pub mod testing {
                 stdout: Vec::new(),
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommandSpec, cleanup_target_is_absent};
+
+    #[test]
+    fn cleanup_only_accepts_command_specific_absent_evidence() {
+        let zfs = CommandSpec::fixed(
+            "/usr/sbin/zfs",
+            vec!["destroy".into(), "--".into(), "tank/repo@snapshot".into()],
+            1_000,
+        ).expect("zfs cleanup");
+        assert!(cleanup_target_is_absent(
+            &zfs,
+            b"cannot open 'tank/repo@snapshot': dataset does not exist",
+        ));
+        assert!(!cleanup_target_is_absent(&zfs, b"permission denied"));
+
+        let mount = CommandSpec::fixed(
+            "/usr/bin/umount",
+            vec!["--".into(), "/run/codegraph-host-path/snapshots/view".into()],
+            1_000,
+        ).expect("mount cleanup");
+        assert!(cleanup_target_is_absent(&mount, b"target is not mounted"));
+        assert!(!cleanup_target_is_absent(&mount, b"target is busy"));
     }
 }

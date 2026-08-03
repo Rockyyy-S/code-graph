@@ -1,4 +1,5 @@
 use crate::protocol::HelperError;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectIdentityV1 {
@@ -11,6 +12,87 @@ pub struct ObjectIdentityV1 {
 impl ObjectIdentityV1 {
     pub fn opaque_id(&self) -> String {
         format!("{}:{}:{}:{}", self.device_major, self.device_minor, self.mount_id, self.inode)
+    }
+}
+
+/// 将 indexing root 在当前 mount 中的位置还原为卷根相对偏移，避免 snapshot 根下同名路径被误读。
+pub fn project_indexing_root_offset(
+    mount_root: &str,
+    mount_point: &str,
+    indexing_root: &str,
+) -> Result<String, HelperError> {
+    let mount_root = canonical_absolute_components(mount_root)?;
+    let mount_point = canonical_absolute_components(mount_point)?;
+    let indexing_root = canonical_absolute_components(indexing_root)?;
+    if !indexing_root.starts_with(&mount_point) {
+        return Err(HelperError::namespace("INDEXING_ROOT_MOUNT_DRIFT"));
+    }
+    Ok(mount_root.into_iter()
+        .chain(indexing_root.into_iter().skip(mount_point.len()))
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+/// 只允许 canonical 卷根相对路径参与 snapshot 投影，禁止绝对路径或 `..` 替换挂载根。
+pub fn project_snapshot_view_root(
+    snapshot_mount_root: &Path,
+    indexing_root_offset: &str,
+) -> Result<PathBuf, HelperError> {
+    if indexing_root_offset.is_empty() {
+        return Ok(snapshot_mount_root.to_path_buf());
+    }
+    if indexing_root_offset.starts_with('/') ||
+        indexing_root_offset.as_bytes().contains(&0) ||
+        indexing_root_offset.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(HelperError::path("INDEXING_ROOT_OFFSET_INVALID"));
+    }
+    Ok(snapshot_mount_root.join(indexing_root_offset))
+}
+
+fn canonical_absolute_components(value: &str) -> Result<Vec<&str>, HelperError> {
+    if !value.starts_with('/') || value.as_bytes().contains(&0) {
+        return Err(HelperError::namespace("MOUNT_PATH_INVALID"));
+    }
+    if value == "/" {
+        return Ok(Vec::new());
+    }
+    let components = value[1..].split('/').collect::<Vec<_>>();
+    if components.iter().any(|component| component.is_empty() || *component == "." || *component == "..") {
+        return Err(HelperError::namespace("MOUNT_PATH_INVALID"));
+    }
+    Ok(components)
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use std::path::Path;
+
+    use super::{project_indexing_root_offset, project_snapshot_view_root};
+
+    #[test]
+    fn projects_mount_root_and_nested_indexing_root_into_snapshot() {
+        let offset = project_indexing_root_offset(
+            "/datasets/repository",
+            "/workspace",
+            "/workspace/packages/app",
+        ).expect("offset");
+        assert_eq!(offset, "datasets/repository/packages/app");
+        assert_eq!(
+            project_snapshot_view_root(Path::new("/snapshot"), &offset).expect("view"),
+            Path::new("/snapshot/datasets/repository/packages/app"),
+        );
+    }
+
+    #[test]
+    fn rejects_indexing_root_outside_observed_mount() {
+        assert_eq!(
+            project_indexing_root_offset("/", "/workspace", "/other/repository")
+                .expect_err("mount drift")
+                .code,
+            "INDEXING_ROOT_MOUNT_DRIFT",
+        );
+        assert!(project_snapshot_view_root(Path::new("/snapshot"), "../foreign").is_err());
     }
 }
 

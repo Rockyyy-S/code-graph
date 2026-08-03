@@ -10,6 +10,7 @@ import {
   isSha256,
   isStableToken,
   type HostPathPosixCapabilityV1,
+  type HostPathPosixCaptureFailureReasonV1,
   type HostPathPosixCaptureRequestV1,
   type HostPathPosixCaptureResponseV1,
   type HostPathPosixNativeProviderV1,
@@ -495,7 +496,7 @@ export function mapLinuxHelperBridgeResponseV1(
       abiVersion: request.abiVersion,
       capabilityDigest: request.capabilityDigest,
       captureNonce: request.captureNonce,
-      failClosedReason: "PROVIDER_ERROR",
+      failClosedReason: mapLinuxHelperError(error),
       platform: "linux",
       protocolVersion: request.protocolVersion,
       retryable: error.retryable as boolean,
@@ -513,6 +514,36 @@ export function mapLinuxHelperBridgeResponseV1(
     status: "complete",
     volumeId: response.volumeId as string,
   };
+}
+
+/** 把 Rust 的封闭错误类别保留到 adapter 失败联合；未知细节继续降级为 fail-closed provider error。 */
+function mapLinuxHelperError(
+  error: Record<string, unknown>,
+): HostPathPosixCaptureFailureReasonV1 {
+  if (error.class === "namespace-drift") {
+    return "CAPTURE_CHANGED";
+  }
+  if (error.class === "volume-drift") {
+    return "VOLUME_MISMATCH";
+  }
+  if (error.class !== "path-boundary") {
+    return "PROVIDER_ERROR";
+  }
+  switch (error.code) {
+    case "PATH_MISSING":
+      return "PATH_MISSING";
+    case "PATH_UNREADABLE":
+      return "PATH_UNREADABLE";
+    case "LOGICAL_MAPPING_MISMATCH":
+      return "LOGICAL_MAPPING_MISMATCH";
+    case "INDEXING_ROOT_OFFSET_INVALID":
+    case "PATH_CROSSES_MOUNT":
+    case "PATH_MAGICLINK_OR_SYMLINK":
+    case "PATH_NOT_BENEATH":
+      return "PATH_OUTSIDE_ROOT";
+    default:
+      return "PROVIDER_ERROR";
+  }
 }
 
 /** failed error 只接受 Rust 协议的封闭 class，且永久 class 不得伪造为 retryable。 */

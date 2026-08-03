@@ -125,6 +125,7 @@ pub enum VolumeIdentityV1 {
         device: String,
         device_major_minor: String,
         filesystem: LvmFilesystemV1,
+        indexing_root_offset: String,
         mount_id: u64,
         origin_lv: String,
         origin_lv_uuid: String,
@@ -134,6 +135,7 @@ pub enum VolumeIdentityV1 {
     Zfs {
         dataset: String,
         dataset_guid: String,
+        indexing_root_offset: String,
         mount_id: u64,
         pool: String,
     },
