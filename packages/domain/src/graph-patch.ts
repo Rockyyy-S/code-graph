@@ -1,4 +1,9 @@
 import type { HierarchyEdge, HierarchyNode } from "./hierarchy.js";
+import type {
+  GraphEdgeV1,
+  GraphNodeV1,
+  ModuleEvidenceV1,
+} from "./module-dependency.js";
 
 /** hierarchy producer 在提交边界允许表达的覆盖状态。 */
 export type FactCoverageV1 = "complete" | "failed" | "partial";
@@ -24,6 +29,7 @@ export interface EffectiveIgnoreReadSetV1 {
 
 /** hierarchy Job 捕获的完整 read-set；generation/revision 只承担并发栅栏职责。 */
 export interface HierarchyReadSetV1 {
+  analyzerConfigSnapshot?: unknown;
   baseGraphRevision: number | null;
   bootstrapGeneration: number;
   configDigest: string;
@@ -70,12 +76,72 @@ export interface GraphPatchV1 {
   readSet: HierarchyReadSetV1;
 }
 
-/** 计算 patch 时可观察的已提交 ownership slice。 */
+/** composite patch 中单个 ownership slice 的完整 replacement mutation。 */
+export interface GraphSliceMutationV1 {
+  edgeDeletes: readonly string[];
+  edgeUpserts: readonly GraphEdgeV1[];
+  evidenceDeletes: readonly string[];
+  evidenceUpserts: readonly ModuleEvidenceV1[];
+  nodeDeletes: readonly string[];
+  nodeUpserts: readonly GraphNodeV1[];
+  ownershipSliceId: string;
+}
+
+/** composite patch 在 persisted read-set 中附加目标语义图摘要。 */
+export interface CompositeGraphReadSetV1 extends HierarchyReadSetV1 {
+  targetGraphDigest: string;
+}
+
+/**
+ * hierarchy 与全部 source slices 共用 base revision、read-set、digest 和一次提交。
+ *
+ * shared facts 不伪装成 source slice 独占；source slice 仅拥有 Evidence。
+ */
+export interface CompositeGraphPatchV1 {
+  baseGraphRevision: number | null;
+  coverage: "complete";
+  inputDigest: string;
+  patchDigest: string;
+  readSet: CompositeGraphReadSetV1;
+  sharedEdgeDeletes: readonly string[];
+  sharedEdgeUpserts: readonly GraphEdgeV1[];
+  sharedNodeDeletes: readonly string[];
+  sharedNodeUpserts: readonly GraphNodeV1[];
+  slices: readonly GraphSliceMutationV1[];
+  targetEdgeCount: number;
+  targetNodeCount: number;
+  version: 1;
+}
+
+/** GraphStorePort 兼容旧 hierarchy patch 与 Story 1.5 composite patch。 */
+export type AnyGraphPatchV1 = CompositeGraphPatchV1 | GraphPatchV1;
+
+/** 已提交单个 ownership slice 的可观察事实。 */
+export interface CommittedOwnershipSliceV1 {
+  ownedEdges: readonly GraphEdgeV1[];
+  ownedEvidence: readonly ModuleEvidenceV1[];
+  ownedNodes: readonly GraphNodeV1[];
+  ownershipSliceId: string;
+}
+
+/** 计算 hierarchy patch 时可观察的基础已提交快照。 */
 export interface CommittedGraphSnapshotV1 {
+  allEdges?: readonly GraphEdgeV1[];
+  allEvidence?: readonly ModuleEvidenceV1[];
+  allNodes?: readonly GraphNodeV1[];
   committedReadSet: CommittedReadSetV1 | null;
   graphRevision: number | null;
   ownedEdges: readonly HierarchyEdge[];
   ownedNodes: readonly HierarchyNode[];
+  ownedSlices?: readonly CommittedOwnershipSliceV1[];
   ownershipSliceId: string;
   patchDigest: string | null;
+}
+
+/** composite rebuild 必须消费完整全图与 ownership slices，禁止 hierarchy-only 快照降级。 */
+export interface CommittedCompositeGraphSnapshotV1 extends CommittedGraphSnapshotV1 {
+  allEdges: readonly GraphEdgeV1[];
+  allEvidence: readonly ModuleEvidenceV1[];
+  allNodes: readonly GraphNodeV1[];
+  ownedSlices: readonly CommittedOwnershipSliceV1[];
 }

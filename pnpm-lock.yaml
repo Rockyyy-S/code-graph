@@ -66,6 +66,9 @@ importers:
       '@codegraph/adapter-git-local':
         specifier: workspace:*
         version: link:../../packages/adapters/git-local
+      '@codegraph/adapter-host-path-posix-native':
+        specifier: workspace:*
+        version: link:../../packages/adapters/host-path-posix-native
       '@codegraph/adapter-store-sqlite':
         specifier: workspace:*
         version: link:../../packages/adapters/store-sqlite
@@ -93,6 +96,9 @@ importers:
       '@codegraph/domain':
         specifier: workspace:*
         version: link:../../domain
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/adapters/git-local:
     dependencies:
@@ -102,6 +108,8 @@ importers:
       '@codegraph/domain':
         specifier: workspace:*
         version: link:../../domain
+
+  packages/adapters/host-path-posix-native: {}
 
   packages/adapters/store-sqlite:
     dependencies:

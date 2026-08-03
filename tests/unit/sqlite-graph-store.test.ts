@@ -20,6 +20,7 @@ import {
 import {
   applyBootstrapMigration,
   applyDeterministicCommitMigration,
+  groupOwnershipRows,
   SQLITE_BUSY_TIMEOUT_MS,
   SqliteGraphStore,
   openSqliteGraphStore as openSqliteGraphStoreWithDigest,
@@ -158,6 +159,33 @@ function commitHierarchy(
 }
 
 describe("sqlite graph store", () => {
+  it("groups ownership rows in one linear pass", () => {
+    let propertyReads = 0;
+    const rows = Array.from({ length: 300 }, (_, index) => {
+      const values = {
+        fact_id: `fact-${index}`,
+        fact_kind: (["node", "edge", "evidence"] as const)[index % 3]!,
+        owner_key: `owner-${Math.floor(index / 3)}`,
+      };
+      return Object.defineProperties({}, {
+        fact_id: { enumerable: true, get: () => { propertyReads += 1; return values.fact_id; } },
+        fact_kind: { enumerable: true, get: () => { propertyReads += 1; return values.fact_kind; } },
+        owner_key: { enumerable: true, get: () => { propertyReads += 1; return values.owner_key; } },
+      }) as typeof values;
+    });
+
+    const grouped = groupOwnershipRows(rows);
+
+    expect(grouped).toHaveLength(100);
+    expect(grouped[0]).toEqual({
+      edgeIds: ["fact-1"],
+      evidenceIds: ["fact-2"],
+      nodeIds: ["fact-0"],
+      ownerKey: "owner-0",
+    });
+    expect(propertyReads).toBeLessThanOrEqual(rows.length * 4);
+  });
+
   it("retries the native close after an initial close failure", () => {
     const close = vi.fn()
       .mockImplementationOnce(() => {
@@ -1749,14 +1777,10 @@ describe("sqlite graph store", () => {
     "holds an immediate writer lock while validating a %s migration",
     async (schemaVersion) => {
       const databasePath = await createDatabasePath();
-      const workspaceKey = sha256CanonicalJson({ migration: `locked-${schemaVersion}` });
-      if (schemaVersion === "v2") {
-        const store = await openSqliteGraphStore({ databasePath, workspaceKey });
-        store.close();
-      }
       const migrationDatabase = new RawSqlite(databasePath);
-      if (schemaVersion === "v1") {
-        applyBootstrapMigration(migrationDatabase as never);
+      applyBootstrapMigration(migrationDatabase as never);
+      if (schemaVersion === "v2") {
+        applyDeterministicCommitMigration(migrationDatabase as never);
       }
       migrationDatabase.pragma("foreign_keys = ON");
       const competingDatabase = new RawSqlite(databasePath);
@@ -2268,8 +2292,19 @@ describe("sqlite graph store", () => {
       AFTER UPDATE OF graph_revision ON workspace
       WHEN NEW.graph_revision IS NOT NULL
       BEGIN
-        INSERT INTO evidence(id, workspace_key, source_kind, payload_json)
-        VALUES ('trigger-commit-evidence', NEW.workspace_key, 'test', '{}');
+        INSERT INTO evidence(
+          id, workspace_key, edge_id, provenance, analyzer_version, source_file_id,
+          range_start, range_end, evidence_kind, confidence, language, detected_at, payload_json
+        )
+        SELECT
+          'trigger-commit-evidence', NEW.workspace_key, edge.id,
+          'typescript-compiler-api', '6.0.3', file.id,
+          0, 1, 'module-dependency', 'high', 'typescript',
+          '2026-07-25T00:00:02.000Z', '{}'
+        FROM edges AS edge
+        JOIN nodes AS file ON file.workspace_key = NEW.workspace_key AND file.kind = 'file'
+        WHERE edge.workspace_key = NEW.workspace_key
+        LIMIT 1;
       END;
     `);
     try {
@@ -2463,8 +2498,8 @@ describe("sqlite graph store", () => {
       AFTER UPDATE OF state ON jobs
       WHEN NEW.state = 'failed'
       BEGIN
-        INSERT INTO evidence(id, workspace_key, source_kind, payload_json)
-        VALUES ('trigger-recovery-evidence', NEW.workspace_key, 'test', '{}');
+        INSERT INTO meta(key, value)
+        VALUES ('trigger-recovery-authority', NEW.workspace_key);
       END;
     `);
     rawDatabase.close();
@@ -2478,6 +2513,8 @@ describe("sqlite graph store", () => {
         .get("job-recovery-cross-table")).toEqual({ state: "running" });
       expect(rawDatabase.prepare("SELECT COUNT(*) AS count FROM evidence").get())
         .toEqual({ count: 0 });
+      expect(rawDatabase.prepare("SELECT value FROM meta WHERE key = 'trigger-recovery-authority'")
+        .get()).toBeUndefined();
     } finally {
       rawDatabase.exec("DROP TRIGGER inject_evidence_during_recovery");
       rawDatabase.close();
@@ -3086,7 +3123,7 @@ describe("sqlite graph store", () => {
         applied_at TEXT NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at)
-      VALUES (3, '2026-07-25T00:00:00.000Z');
+      VALUES (4, '2026-07-25T00:00:00.000Z');
     `);
     expect(String(rawDatabase.pragma("journal_mode", { simple: true })).toLowerCase()).toBe("delete");
     rawDatabase.close();
@@ -3105,7 +3142,7 @@ describe("sqlite graph store", () => {
         .toBe("delete");
       expect(preservedDatabase.prepare(
         "SELECT MAX(version) AS version FROM schema_migrations",
-      ).get()).toEqual({ version: 3 });
+      ).get()).toEqual({ version: 4 });
     } finally {
       preservedDatabase.close();
     }
@@ -3123,7 +3160,7 @@ describe("sqlite graph store", () => {
         applied_at TEXT NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at)
-      VALUES (3, '2026-07-25T00:00:00.000Z');
+      VALUES (4, '2026-07-25T00:00:00.000Z');
     `);
     try {
       for (let attempt = 0; attempt < 5; attempt += 1) {

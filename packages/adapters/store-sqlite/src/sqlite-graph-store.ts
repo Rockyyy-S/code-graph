@@ -10,6 +10,7 @@ import {
   HIERARCHY_PRODUCER_VERSION,
   type AtomicGraphCommitResult,
   type AtomicGraphUpdate,
+  type AnalyzerConfigSnapshotV1,
   type CanonicalDigestPort,
   type CreateStoredIndexJobInput,
   type GraphStoreBootstrapState,
@@ -19,18 +20,29 @@ import {
 } from "@codegraph/application";
 import {
   buildGraphEntityId,
+  createExternalPackageNode,
+  createNodeBuiltinNode,
+  createUnresolvedExternalPackageNode,
+  type AnyGraphPatchV1,
+  type CommittedCompositeGraphSnapshotV1,
   type CommittedGraphSnapshotV1,
   type CommittedReadSetV1,
+  type CompositeGraphReadSetV1,
+  type CompositeGraphPatchV1,
+  type GraphEdgeV1,
   type GraphPatchV1,
+  type GraphNodeV1,
   type HierarchyEdge,
   type HierarchyNode,
   type HierarchyReadSetV1,
+  type ModuleEvidenceV1,
 } from "@codegraph/domain";
 import {
-  assertDeterministicSchemaSupported,
-  applyDeterministicCommitMigration,
-  DETERMINISTIC_COMMIT_TABLE_NAMES,
-} from "./migrations/002-deterministic-commit.js";
+  assertModuleDependencySchemaSupported,
+  assertModuleDependencySchemaIntegrity,
+  applyModuleDependencyMigration,
+  MODULE_DEPENDENCY_TABLE_NAMES,
+} from "./migrations/003-module-dependencies.js";
 
 /** SQLite 锁竞争等待的固定上限。 */
 export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
@@ -64,7 +76,7 @@ const PERSISTED_INDEX_JOB_ERROR_CODES = new Set([
 /** 首次事务故障注入上下文，仅用于真实回滚测试。 */
 export interface SqliteGraphStoreFaultContext {
   entityIndex: number;
-  stage: "edge" | "job" | "metadata" | "node" | "ownership";
+  stage: "edge" | "evidence" | "job" | "metadata" | "node" | "ownership";
 }
 
 /** SQLite 适配器构造参数。 */
@@ -573,13 +585,13 @@ export class SqliteGraphStore implements GraphStorePort {
   }
 
   /** 读取 application 计算 patch 所需的当前 revision、read-set 与 ownership slice。 */
-  public readCommittedSnapshot(): CommittedGraphSnapshotV1 {
+  public readCommittedSnapshot(): CommittedCompositeGraphSnapshotV1 {
     this.#ensureOpen();
     return this.#database.transaction(() => this.#readCommittedSnapshot())();
   }
 
   /** 同一只读事务内取得 revision、read-set 与完整 ownership slice。 */
-  #readCommittedSnapshot(): CommittedGraphSnapshotV1 {
+  #readCommittedSnapshot(): CommittedCompositeGraphSnapshotV1 {
     const workspace = this.#database.prepare(`
       SELECT graph_revision, manifest_digest, input_digest, config_digest,
              effective_ignore_digest, patch_digest
@@ -589,10 +601,14 @@ export class SqliteGraphStore implements GraphStorePort {
     const ownershipSliceId = hierarchyOwnershipSliceId(this.#workspaceKey);
     if (workspace === undefined || workspace.graph_revision === null) {
       return Object.freeze({
+        allEdges: Object.freeze([]),
+        allEvidence: Object.freeze([]),
+        allNodes: Object.freeze([]),
         committedReadSet: null,
         graphRevision: null,
         ownedEdges: Object.freeze([]),
         ownedNodes: Object.freeze([]),
+        ownedSlices: Object.freeze([]),
         ownershipSliceId,
         patchDigest: null,
       });
@@ -613,11 +629,60 @@ export class SqliteGraphStore implements GraphStorePort {
         AND ownership.fact_kind = 'edge'
       ORDER BY edge.id
     `).all(this.#workspaceKey, ownershipSliceId) as EdgeRow[];
+    const allNodeRows = this.#database.prepare(`
+      SELECT id, kind, relative_path, payload_json
+      FROM nodes
+      WHERE workspace_key = ?
+      ORDER BY id
+    `).all(this.#workspaceKey) as GraphNodeRow[];
+    const allEdgeRows = this.#database.prepare(`
+      SELECT id, from_id, relation_type, to_id, qualifier
+      FROM edges
+      WHERE workspace_key = ?
+      ORDER BY id
+    `).all(this.#workspaceKey) as GraphEdgeRow[];
+    const allEvidenceRows = this.#database.prepare(`
+      SELECT id, edge_id, provenance, analyzer_version, source_file_id,
+             range_start, range_end, evidence_kind, confidence, language, detected_at,
+             payload_json
+      FROM evidence
+      WHERE workspace_key = ?
+      ORDER BY id
+    `).all(this.#workspaceKey) as EvidenceRow[];
+    const allNodes = allNodeRows.map(mapGraphNode);
+    const allEdges = allEdgeRows.map(mapGraphEdge);
+    const allEvidence = allEvidenceRows.map(mapModuleEvidence);
+    const nodeById = new Map(allNodes.map((node) => [node.id, node]));
+    const edgeById = new Map(allEdges.map((edge) => [edge.id, edge]));
+    const evidenceById = new Map(allEvidence.map((item) => [item.id, item]));
+    const ownershipRows = this.#database.prepare(`
+      SELECT fact_id, fact_kind, owner_key
+      FROM facts_ownership
+      WHERE workspace_key = ?
+      ORDER BY owner_key, fact_kind, fact_id
+    `).all(this.#workspaceKey) as OwnershipRow[];
+    const ownedSlices = groupOwnershipRows(ownershipRows)
+      .map((group) => Object.freeze({
+        ownedEdges: Object.freeze(group.edgeIds
+          .map((factId) => edgeById.get(factId)!)
+          .filter((value) => value !== undefined)),
+        ownedEvidence: Object.freeze(group.evidenceIds
+          .map((factId) => evidenceById.get(factId)!)
+          .filter((value) => value !== undefined)),
+        ownedNodes: Object.freeze(group.nodeIds
+          .map((factId) => nodeById.get(factId)!)
+          .filter((value) => value !== undefined)),
+        ownershipSliceId: group.ownerKey,
+      }));
     return Object.freeze({
+      allEdges: Object.freeze(allEdges),
+      allEvidence: Object.freeze(allEvidence),
+      allNodes: Object.freeze(allNodes),
       committedReadSet: mapCommittedReadSet(workspace),
       graphRevision: workspace.graph_revision,
       ownedEdges: Object.freeze(ownedEdges.map(mapHierarchyEdge)),
       ownedNodes: Object.freeze(ownedNodes.map(mapHierarchyNode)),
+      ownedSlices: Object.freeze(ownedSlices),
       ownershipSliceId,
       patchDigest: workspace.patch_digest,
     });
@@ -658,14 +723,18 @@ export class SqliteGraphStore implements GraphStorePort {
     const rows = this.#database.prepare(`
       SELECT relative_path
       FROM nodes
-      WHERE workspace_key = ?
+      WHERE workspace_key = ? AND relative_path IS NOT NULL
       ORDER BY relative_path
     `).all(this.#workspaceKey) as { relative_path: string }[];
     return rows.map((row) => row.relative_path);
   }
 
   /** 测试原子提交与幂等重放时读取稳定排序的 ownership。 */
-  public listOwnership(): readonly { factId: string; factKind: "edge" | "node"; ownerKey: string }[] {
+  public listOwnership(): readonly {
+    factId: string;
+    factKind: "edge" | "evidence" | "node";
+    ownerKey: string;
+  }[] {
     this.#ensureOpen();
     return (this.#database.prepare(`
       SELECT fact_id, fact_kind, owner_key
@@ -885,14 +954,20 @@ export class SqliteGraphStore implements GraphStorePort {
     let expectedChanges = 0;
 
     const patch = input.patch;
-    const hasOperations = patch.nodeUpserts.length > 0 ||
-      patch.nodeDeletes.length > 0 ||
-      patch.edgeUpserts.length > 0 ||
-      patch.edgeDeletes.length > 0;
+    const hasOperations = isCompositeGraphPatch(patch)
+      ? hasCompositeOperations(patch)
+      : patch.nodeUpserts.length > 0 ||
+        patch.nodeDeletes.length > 0 ||
+        patch.edgeUpserts.length > 0 ||
+        patch.edgeDeletes.length > 0;
     const graphChanged = hasOperations;
     if (graphChanged) {
-      expectedChanges += this.#applyPatchDeletes(patch);
-      expectedChanges += this.#applyPatchUpserts(patch);
+      if (isCompositeGraphPatch(patch)) {
+        expectedChanges += this.#applyCompositePatch(patch);
+      } else {
+        expectedChanges += this.#applyPatchDeletes(patch);
+        expectedChanges += this.#applyPatchUpserts(patch);
+      }
     }
 
     const nextRevision = graphChanged
@@ -1024,6 +1099,8 @@ export class SqliteGraphStore implements GraphStorePort {
       expectedChanges,
       "原子提交触发了未声明的旁路表变更。",
     );
+    // 提交公开前独立验证 module edge/Evidence 拓扑与精确 v3 Schema。
+    assertModuleDependencySchemaIntegrity(this.#database);
     // 最终公开前复用启动屏障，校验 topology、ownership、摘要及完整 read-set 绑定。
     this.readBootstrapState();
 
@@ -1036,6 +1113,276 @@ export class SqliteGraphStore implements GraphStorePort {
       kind: graphChanged ? "committed" : "noop",
       summary,
     };
+  }
+
+  /** 一次同步事务中应用全部 hierarchy/source slices 与共享模块事实。 */
+  #applyCompositePatch(patch: CompositeGraphPatchV1): number {
+    let changes = 0;
+    const deleteOwnership = this.#database.prepare(`
+      DELETE FROM facts_ownership
+      WHERE workspace_key = ? AND owner_key = ? AND fact_kind = ? AND fact_id = ?
+    `);
+    const deleteUnownedEvidence = this.#database.prepare(`
+      DELETE FROM evidence
+      WHERE workspace_key = ? AND id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM facts_ownership
+          WHERE workspace_key = ? AND fact_kind = 'evidence' AND fact_id = ?
+        )
+    `);
+    for (const slice of patch.slices) {
+      slice.evidenceDeletes.forEach((factId, entityIndex) => {
+        this.#faultInjector?.({ entityIndex, stage: "ownership" });
+        changes += deleteOwnership.run(
+          this.#workspaceKey,
+          slice.ownershipSliceId,
+          "evidence",
+          factId,
+        ).changes;
+        changes += deleteUnownedEvidence.run(
+          this.#workspaceKey,
+          factId,
+          this.#workspaceKey,
+          factId,
+        ).changes;
+      });
+    }
+    const deleteSharedEdge = this.#database.prepare(`
+      DELETE FROM edges
+      WHERE workspace_key = ? AND id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM facts_ownership
+          WHERE workspace_key = ? AND fact_kind = 'edge' AND fact_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM evidence
+          WHERE workspace_key = ? AND edge_id = ?
+        )
+    `);
+    patch.sharedEdgeDeletes.forEach((factId, entityIndex) => {
+      this.#faultInjector?.({ entityIndex, stage: "edge" });
+      changes += deleteSharedEdge.run(
+        this.#workspaceKey,
+        factId,
+        this.#workspaceKey,
+        factId,
+        this.#workspaceKey,
+        factId,
+      ).changes;
+    });
+    const deleteUnownedEdge = this.#database.prepare(`
+      DELETE FROM edges
+      WHERE workspace_key = ? AND id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM facts_ownership
+          WHERE workspace_key = ? AND fact_kind = 'edge' AND fact_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM evidence
+          WHERE workspace_key = ? AND edge_id = ?
+        )
+    `);
+    for (const slice of patch.slices) {
+      slice.edgeDeletes.forEach((factId, entityIndex) => {
+        this.#faultInjector?.({ entityIndex, stage: "ownership" });
+        changes += deleteOwnership.run(
+          this.#workspaceKey,
+          slice.ownershipSliceId,
+          "edge",
+          factId,
+        ).changes;
+        changes += deleteUnownedEdge.run(
+          this.#workspaceKey,
+          factId,
+          this.#workspaceKey,
+          factId,
+          this.#workspaceKey,
+          factId,
+        ).changes;
+      });
+    }
+    const deleteSharedNode = this.#database.prepare(`
+      DELETE FROM nodes
+      WHERE workspace_key = ? AND id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM facts_ownership
+          WHERE workspace_key = ? AND fact_kind = 'node' AND fact_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM edges
+          WHERE workspace_key = ? AND (from_id = ? OR to_id = ?)
+        )
+    `);
+    patch.sharedNodeDeletes.forEach((factId, entityIndex) => {
+      this.#faultInjector?.({ entityIndex, stage: "node" });
+      changes += deleteSharedNode.run(
+        this.#workspaceKey,
+        factId,
+        this.#workspaceKey,
+        factId,
+        this.#workspaceKey,
+        factId,
+        factId,
+      ).changes;
+    });
+    const deleteUnownedNode = this.#database.prepare(`
+      DELETE FROM nodes
+      WHERE workspace_key = ? AND id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM facts_ownership
+          WHERE workspace_key = ? AND fact_kind = 'node' AND fact_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM edges
+          WHERE workspace_key = ? AND (from_id = ? OR to_id = ?)
+        )
+    `);
+    for (const slice of patch.slices) {
+      slice.nodeDeletes.forEach((factId, entityIndex) => {
+        this.#faultInjector?.({ entityIndex, stage: "ownership" });
+        changes += deleteOwnership.run(
+          this.#workspaceKey,
+          slice.ownershipSliceId,
+          "node",
+          factId,
+        ).changes;
+        changes += deleteUnownedNode.run(
+          this.#workspaceKey,
+          factId,
+          this.#workspaceKey,
+          factId,
+          this.#workspaceKey,
+          factId,
+          factId,
+        ).changes;
+      });
+    }
+
+    const upsertNode = this.#database.prepare(`
+      INSERT INTO nodes(id, workspace_key, kind, relative_path, payload_json)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        workspace_key = excluded.workspace_key,
+        kind = excluded.kind,
+        relative_path = excluded.relative_path,
+        payload_json = excluded.payload_json
+    `);
+    const upsertOwnership = this.#database.prepare(`
+      INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(fact_kind, fact_id, owner_key) DO NOTHING
+    `);
+    const upsertNodes = (
+      nodes: readonly GraphNodeV1[],
+      ownershipSliceId?: string,
+    ): void => {
+      nodes.forEach((node, entityIndex) => {
+        this.#faultInjector?.({ entityIndex, stage: "node" });
+        changes += upsertNode.run(
+          node.id,
+          this.#workspaceKey,
+          node.kind,
+          "relativePath" in node ? node.relativePath : null,
+          serializeNodePayload(node),
+        ).changes;
+        if (ownershipSliceId !== undefined) {
+          this.#faultInjector?.({ entityIndex, stage: "ownership" });
+          changes += upsertOwnership.run(
+            "node",
+            node.id,
+            ownershipSliceId,
+            this.#workspaceKey,
+          ).changes;
+        }
+      });
+    };
+    upsertNodes(patch.sharedNodeUpserts);
+    for (const slice of patch.slices) {upsertNodes(slice.nodeUpserts, slice.ownershipSliceId);}
+
+    const upsertEdge = this.#database.prepare(`
+      INSERT INTO edges(id, workspace_key, from_id, relation_type, to_id, qualifier)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        workspace_key = excluded.workspace_key,
+        from_id = excluded.from_id,
+        relation_type = excluded.relation_type,
+        to_id = excluded.to_id,
+        qualifier = excluded.qualifier
+    `);
+    const upsertEdges = (
+      edges: readonly GraphEdgeV1[],
+      ownershipSliceId?: string,
+    ): void => {
+      edges.forEach((edge, entityIndex) => {
+        this.#faultInjector?.({ entityIndex, stage: "edge" });
+        changes += upsertEdge.run(
+          edge.id,
+          this.#workspaceKey,
+          edge.fromId,
+          edge.relationType,
+          edge.toId,
+          edge.qualifier,
+        ).changes;
+        if (ownershipSliceId !== undefined) {
+          this.#faultInjector?.({ entityIndex, stage: "ownership" });
+          changes += upsertOwnership.run(
+            "edge",
+            edge.id,
+            ownershipSliceId,
+            this.#workspaceKey,
+          ).changes;
+        }
+      });
+    };
+    upsertEdges(patch.sharedEdgeUpserts);
+    for (const slice of patch.slices) {upsertEdges(slice.edgeUpserts, slice.ownershipSliceId);}
+
+    const upsertEvidence = this.#database.prepare(`
+      INSERT INTO evidence(
+        id, workspace_key, edge_id, provenance, analyzer_version, source_file_id,
+        range_start, range_end, evidence_kind, confidence, language, detected_at, payload_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+      ON CONFLICT(id) DO UPDATE SET
+        workspace_key = excluded.workspace_key,
+        edge_id = excluded.edge_id,
+        provenance = excluded.provenance,
+        analyzer_version = excluded.analyzer_version,
+        source_file_id = excluded.source_file_id,
+        range_start = excluded.range_start,
+        range_end = excluded.range_end,
+        evidence_kind = excluded.evidence_kind,
+        confidence = excluded.confidence,
+        language = excluded.language,
+        detected_at = excluded.detected_at,
+        payload_json = excluded.payload_json
+    `);
+    for (const slice of patch.slices) {
+      slice.evidenceUpserts.forEach((item, entityIndex) => {
+        this.#faultInjector?.({ entityIndex, stage: "evidence" });
+        changes += upsertEvidence.run(
+          item.id,
+          this.#workspaceKey,
+          item.edgeId,
+          item.provenance,
+          item.analyzerVersion,
+          item.sourceFileId,
+          item.normalizedRange.start,
+          item.normalizedRange.end,
+          item.evidenceKind,
+          item.confidence,
+          item.language,
+          item.detectedAt,
+        ).changes;
+        this.#faultInjector?.({ entityIndex, stage: "ownership" });
+        changes += upsertOwnership.run(
+          "evidence",
+          item.id,
+          slice.ownershipSliceId,
+          this.#workspaceKey,
+        ).changes;
+      });
+    }
+    return changes;
   }
 
   /** 按外键安全顺序移除 slice ownership，并只删除已无 owner 的事实。 */
@@ -1238,9 +1585,9 @@ export async function openSqliteGraphStore(
   try {
     database = new Database(options.databasePath, { timeout: SQLITE_BUSY_TIMEOUT_MS });
     /** 未知未来 Schema 必须在 WAL 等持久设置前只读拒绝。 */
-    assertDeterministicSchemaSupported(database);
+    assertModuleDependencySchemaSupported(database);
     configurePragmas(database);
-    applyDeterministicCommitMigration(database);
+    applyModuleDependencyMigration(database);
     database.prepare(`
       INSERT INTO workspace(workspace_key, completeness)
       VALUES (?, 'empty')
@@ -1249,7 +1596,7 @@ export async function openSqliteGraphStore(
     readAndValidatePragmas(database);
     if (
       JSON.stringify(readTableNames(database)) !==
-      JSON.stringify(DETERMINISTIC_COMMIT_TABLE_NAMES)
+      JSON.stringify(MODULE_DEPENDENCY_TABLE_NAMES)
     ) {
       throw new Error("SQLite migration 未保持精确八表。");
     }
@@ -1413,18 +1760,73 @@ async function pruneFailureBackups(databasePath: string): Promise<void> {
 /** 校验原子更新只接受 hierarchy complete patch 与一致的摘要/read-set。 */
 function validateAtomicGraphUpdate(input: AtomicGraphUpdate, workspaceKey: string): void {
   const patch = input.patch;
-  if (
-    patch.coverage !== "complete" ||
-    patch.ownershipSliceId !== hierarchyOwnershipSliceId(workspaceKey) ||
-    patch.ownershipSliceId !== input.expectedSnapshot.ownershipSliceId ||
+  if (isCompositeGraphPatch(patch)) {
+    validateCompositeEvidenceOwnership(patch);
+  }
+  const commonInvalid = patch.coverage !== "complete" ||
     patch.baseGraphRevision !== input.expectedSnapshot.graphRevision ||
     patch.baseGraphRevision !== patch.readSet.baseGraphRevision ||
     input.completedAt !== input.summary.generatedAt ||
     typeof input.finalReadSetFence !== "function" ||
-    !/^[a-f0-9]{64}$/u.test(patch.patchDigest)
-  ) {
-    throw new TypeError("原子 GraphPatch 输入与 hierarchy 提交合同不一致。");
+    !/^[a-f0-9]{64}$/u.test(patch.patchDigest);
+  const shapeInvalid = isCompositeGraphPatch(patch)
+    ? patch.version !== 1 ||
+      !/^[a-f0-9]{64}$/u.test(patch.readSet.targetGraphDigest) ||
+      !patch.slices.some((slice) =>
+        slice.ownershipSliceId === hierarchyOwnershipSliceId(workspaceKey)) ||
+      patch.slices.some((slice, index) =>
+        index > 0 && patch.slices[index - 1]!.ownershipSliceId >= slice.ownershipSliceId)
+    : patch.ownershipSliceId !== hierarchyOwnershipSliceId(workspaceKey) ||
+      patch.ownershipSliceId !== input.expectedSnapshot.ownershipSliceId;
+  if (commonInvalid || shapeInvalid) {
+    throw new TypeError("原子 GraphPatch 输入与 composite 提交合同不一致。");
   }
+}
+
+/** 每条 Evidence 在提交入口只能出现一次，且唯一 owner 必须绑定其 sourceFileId。 */
+function validateCompositeEvidenceOwnership(patch: CompositeGraphPatchV1): void {
+  const ownerByEvidenceId = new Map<string, string>();
+  for (const slice of patch.slices) {
+    for (const evidence of slice.evidenceUpserts) {
+      const expectedOwner = `source:typescript:${evidence.sourceFileId}`;
+      if (slice.ownershipSliceId !== expectedOwner || ownerByEvidenceId.has(evidence.id)) {
+        throw new TypeError("Composite GraphPatch Evidence ownership 必须唯一绑定 source slice。");
+      }
+      ownerByEvidenceId.set(evidence.id, slice.ownershipSliceId);
+    }
+  }
+}
+
+/** 通过 version+slices 判定 Story 1.5 composite patch。 */
+function isCompositeGraphPatch(patch: AnyGraphPatchV1): patch is CompositeGraphPatchV1 {
+  return "version" in patch && patch.version === 1 && "slices" in patch;
+}
+
+/** composite 任一 slice/shared mutation 非空即表示语义图变化。 */
+function hasCompositeOperations(patch: CompositeGraphPatchV1): boolean {
+  return patch.sharedNodeUpserts.length > 0 ||
+    patch.sharedNodeDeletes.length > 0 ||
+    patch.sharedEdgeUpserts.length > 0 ||
+    patch.sharedEdgeDeletes.length > 0 ||
+    patch.slices.some((slice) =>
+      slice.nodeUpserts.length > 0 || slice.nodeDeletes.length > 0 ||
+      slice.edgeUpserts.length > 0 || slice.edgeDeletes.length > 0 ||
+      slice.evidenceUpserts.length > 0 || slice.evidenceDeletes.length > 0);
+}
+
+/** 外部节点字段只进入结构化 payload，不伪造 relative_path。 */
+function serializeNodePayload(node: GraphNodeV1): string {
+  if (node.kind === "external-package") {
+    return JSON.stringify({
+      packageName: node.packageName,
+      packageVersion: node.packageVersion,
+      versionState: node.versionState,
+    });
+  }
+  if (node.kind === "node-builtin") {
+    return JSON.stringify({ moduleName: node.moduleName });
+  }
+  return "{}";
 }
 
 /** SQLite UPDATE 必须精确命中一个预期状态行。 */
@@ -1520,6 +1922,13 @@ interface NodeRow {
   relative_path: string;
 }
 
+interface GraphNodeRow {
+  id: string;
+  kind: GraphNodeV1["kind"];
+  payload_json: string;
+  relative_path: string | null;
+}
+
 interface EdgeRow {
   from_id: string;
   id: string;
@@ -1528,19 +1937,90 @@ interface EdgeRow {
   to_id: string;
 }
 
+interface GraphEdgeRow {
+  from_id: string;
+  id: string;
+  qualifier: string;
+  relation_type: GraphEdgeV1["relationType"];
+  to_id: string;
+}
+
+interface EvidenceRow {
+  analyzer_version: string;
+  confidence: ModuleEvidenceV1["confidence"];
+  detected_at: string;
+  edge_id: string;
+  evidence_kind: ModuleEvidenceV1["evidenceKind"];
+  id: string;
+  language: ModuleEvidenceV1["language"];
+  payload_json: string;
+  provenance: ModuleEvidenceV1["provenance"];
+  range_end: number;
+  range_start: number;
+  source_file_id: string;
+}
+
 interface OwnershipRow {
   fact_id: string;
-  fact_kind: "edge" | "node";
+  fact_kind: "edge" | "evidence" | "node";
   owner_key: string;
+}
+
+/** ownership 行一次分组后的事实 ID，供快照映射复用 O(1) 索引。 */
+export interface GroupedOwnershipIds {
+  edgeIds: readonly string[];
+  evidenceIds: readonly string[];
+  nodeIds: readonly string[];
+  ownerKey: string;
+}
+
+/** 单次线性遍历构建 owner→fact IDs，禁止每个 owner 重新 filter 全量行。 */
+export function groupOwnershipRows(
+  rows: readonly {
+    fact_id: string;
+    fact_kind: "edge" | "evidence" | "node";
+    owner_key: string;
+  }[],
+): readonly GroupedOwnershipIds[] {
+  const groups = new Map<string, {
+    edgeIds: string[];
+    evidenceIds: string[];
+    nodeIds: string[];
+    ownerKey: string;
+  }>();
+  for (const row of rows) {
+    const ownerKey = row.owner_key;
+    const group = groups.get(ownerKey) ?? {
+      edgeIds: [],
+      evidenceIds: [],
+      nodeIds: [],
+      ownerKey,
+    };
+    const factKind = row.fact_kind;
+    const factId = row.fact_id;
+    if (factKind === "edge") {group.edgeIds.push(factId);}
+    else if (factKind === "evidence") {group.evidenceIds.push(factId);}
+    else {group.nodeIds.push(factId);}
+    groups.set(ownerKey, group);
+  }
+  return Object.freeze([...groups.values()].map((group) => Object.freeze({
+    edgeIds: Object.freeze(group.edgeIds),
+    evidenceIds: Object.freeze(group.evidenceIds),
+    nodeIds: Object.freeze(group.nodeIds),
+    ownerKey: group.ownerKey,
+  })));
 }
 
 interface PersistedGraphCounts {
   edgeCount: number;
+  evidenceCount: number;
   fileCount: number;
   hierarchyOwnedEdgeCount: number;
   hierarchyOwnedNodeCount: number;
   invalidOwnershipCount: number;
+  invalidOwnershipShapeCount: number;
   nodeCount: number;
+  sourceOwnedEvidenceCount: number;
   unknownOwnershipCount: number;
 }
 
@@ -1636,11 +2116,11 @@ function validatePersistedSucceededAttempt(
   if (!isSha256Digest(row.patch_digest!)) {
     throw new Error("历史 succeeded Job 的 patch digest 不合法。");
   }
-  const readSet = parsePersistedHierarchyReadSet(row.read_set_json!);
+  const readSet = parsePersistedGraphReadSet(row.read_set_json!);
   if (digestPort === undefined) {
     throw new Error("历史 succeeded Job 的完整证据校验缺少规范 digest 实现。");
   }
-  const derivedEvidence = deriveHierarchyEvidenceDigests(workspaceKey, readSet, digestPort);
+  const derivedEvidence = derivePersistedEvidenceDigests(workspaceKey, readSet, digestPort);
   if (
     derivedEvidence.manifestDigest !== readSet.manifestDigest ||
     derivedEvidence.inputDigest !== readSet.inputDigest ||
@@ -1683,6 +2163,11 @@ function readPersistedGraphCounts(
     FROM edges
     WHERE workspace_key = ?
   `).get(workspaceKey) as { edge_count: number };
+  const evidence = database.prepare(`
+    SELECT COUNT(*) AS evidence_count
+    FROM evidence
+    WHERE workspace_key = ?
+  `).get(workspaceKey) as { evidence_count: number };
   const ownershipSliceId = hierarchyOwnershipSliceId(workspaceKey);
   const hierarchyOwnership = database.prepare(`
     SELECT
@@ -1691,6 +2176,12 @@ function readPersistedGraphCounts(
     FROM facts_ownership
     WHERE workspace_key = ? AND owner_key = ?
   `).get(workspaceKey, ownershipSliceId) as { edge_count: number; node_count: number };
+  const sourceOwnership = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM facts_ownership
+    WHERE workspace_key = ? AND fact_kind = 'evidence'
+      AND owner_key LIKE 'source:typescript:%'
+  `).get(workspaceKey) as { count: number };
   const invalidOwnership = database.prepare(`
     SELECT COUNT(*) AS count
     FROM facts_ownership AS ownership
@@ -1702,6 +2193,10 @@ function readPersistedGraphCounts(
       (ownership.fact_kind = 'edge' AND NOT EXISTS (
         SELECT 1 FROM edges
         WHERE workspace_key = ownership.workspace_key AND id = ownership.fact_id
+      )) OR
+      (ownership.fact_kind = 'evidence' AND NOT EXISTS (
+        SELECT 1 FROM evidence
+        WHERE workspace_key = ownership.workspace_key AND id = ownership.fact_id
       ))
     )
   `).get(workspaceKey) as { count: number };
@@ -1709,14 +2204,53 @@ function readPersistedGraphCounts(
     SELECT COUNT(*) AS count
     FROM facts_ownership
     WHERE workspace_key = ? AND owner_key <> ?
+      AND owner_key NOT LIKE 'source:typescript:%'
   `).get(workspaceKey, ownershipSliceId) as { count: number };
+  const invalidOwnershipShape = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT 1
+      FROM facts_ownership AS ownership
+      LEFT JOIN evidence ON evidence.workspace_key = ownership.workspace_key
+        AND evidence.id = ownership.fact_id
+      WHERE ownership.workspace_key = ? AND (
+        (ownership.owner_key = ? AND ownership.fact_kind NOT IN ('node', 'edge')) OR
+        (ownership.owner_key LIKE 'source:typescript:%' AND (
+          ownership.fact_kind <> 'evidence' OR evidence.id IS NULL OR
+          ownership.owner_key <> 'source:typescript:' || evidence.source_file_id
+        ))
+      )
+      UNION ALL
+      SELECT 1
+      FROM evidence
+      WHERE evidence.workspace_key = ? AND (
+        (
+          SELECT COUNT(*)
+          FROM facts_ownership AS ownership
+          WHERE ownership.workspace_key = evidence.workspace_key
+            AND ownership.fact_kind = 'evidence'
+            AND ownership.fact_id = evidence.id
+        ) <> 1 OR NOT EXISTS (
+          SELECT 1
+          FROM facts_ownership AS ownership
+          WHERE ownership.workspace_key = evidence.workspace_key
+            AND ownership.fact_kind = 'evidence'
+            AND ownership.fact_id = evidence.id
+            AND ownership.owner_key = 'source:typescript:' || evidence.source_file_id
+        )
+      )
+    )
+  `).get(workspaceKey, ownershipSliceId, workspaceKey) as { count: number };
   return {
     edgeCount: edges.edge_count,
+    evidenceCount: evidence.evidence_count,
     fileCount: nodes.file_count,
     hierarchyOwnedEdgeCount: hierarchyOwnership.edge_count,
     hierarchyOwnedNodeCount: hierarchyOwnership.node_count,
     invalidOwnershipCount: invalidOwnership.count,
+    invalidOwnershipShapeCount: invalidOwnershipShape.count,
     nodeCount: nodes.node_count,
+    sourceOwnedEvidenceCount: sourceOwnership.count,
     unknownOwnershipCount: unknownOwnership.count,
   };
 }
@@ -1738,6 +2272,9 @@ function validateBootstrapState(
       counts.hierarchyOwnedNodeCount !== 0 ||
       counts.hierarchyOwnedEdgeCount !== 0 ||
       counts.invalidOwnershipCount !== 0 ||
+      counts.invalidOwnershipShapeCount !== 0 ||
+      counts.evidenceCount !== 0 ||
+      counts.sourceOwnedEvidenceCount !== 0 ||
       counts.unknownOwnershipCount !== 0
     ) {
       throw new Error("无提交基线时不允许残留 hierarchy 行。");
@@ -1760,13 +2297,16 @@ function validateBootstrapState(
       !Number.isSafeInteger(summary.graphRevision) ||
       summary.graphRevision < 1 ||
       summary.nodeCount < summary.indexedFileCount + 1 ||
-      summary.edgeCount !== summary.nodeCount - 1 ||
       summary.nodeCount !== counts.nodeCount ||
       summary.edgeCount !== counts.edgeCount ||
       summary.indexedFileCount !== counts.fileCount ||
-      counts.hierarchyOwnedNodeCount !== counts.nodeCount ||
-      counts.hierarchyOwnedEdgeCount !== counts.edgeCount ||
+      counts.hierarchyOwnedNodeCount < summary.indexedFileCount + 1 ||
+      counts.hierarchyOwnedEdgeCount !== counts.hierarchyOwnedNodeCount - 1 ||
+      counts.hierarchyOwnedNodeCount > counts.nodeCount ||
+      counts.hierarchyOwnedEdgeCount > counts.edgeCount ||
+      counts.sourceOwnedEvidenceCount !== counts.evidenceCount ||
       counts.invalidOwnershipCount !== 0 ||
+      counts.invalidOwnershipShapeCount !== 0 ||
       counts.unknownOwnershipCount !== 0 ||
       !isCanonicalUtcTimestamp(summary.generatedAt)
     ) {
@@ -2080,7 +2620,7 @@ function validateCommittedJobEvidence(
   ) {
     throw new Error("持久提交与 succeeded Job 的 patch 证据不一致。");
   }
-  const readSet = parsePersistedHierarchyReadSet(committedJob.read_set_json);
+  const readSet = parsePersistedGraphReadSet(committedJob.read_set_json);
   if (
     readSet.manifestDigest !== committedReadSet.manifestDigest ||
     readSet.inputDigest !== committedReadSet.inputDigest ||
@@ -2116,7 +2656,7 @@ function validateCommittedJobEvidence(
     workspaceKey,
     readSet.manifest.map((entry) => entry.path),
   );
-  const derivedEvidence = deriveHierarchyEvidenceDigests(workspaceKey, readSet, digestPort);
+  const derivedEvidence = derivePersistedEvidenceDigests(workspaceKey, readSet, digestPort);
   if (
     derivedEvidence.manifestDigest !== readSet.manifestDigest ||
     derivedEvidence.inputDigest !== readSet.inputDigest ||
@@ -2126,6 +2666,51 @@ function validateCommittedJobEvidence(
     throw new Error("持久提交的 read-set 或 patch digest 无法从规范语义重新派生。");
   }
   validatePersistedHierarchyTopology(database, workspaceKey, expectedGraph);
+  if (isCompositeGraphReadSet(readSet)) {
+    validatePersistedCompositeGraphDigest(
+      database,
+      workspaceKey,
+      readSet.targetGraphDigest,
+      digestPort,
+    );
+  } else if (countsModuleFacts(database, workspaceKey)) {
+    throw new Error("hierarchy read-set 不得恢复出未绑定 composite 摘要的模块事实。");
+  }
+}
+
+/** 按持久 read-set 版本重新派生 hierarchy 或 composite 的全部语义摘要。 */
+function derivePersistedEvidenceDigests(
+  workspaceKey: string,
+  readSet: HierarchyReadSetV1 | CompositeGraphReadSetV1,
+  digestPort: CanonicalDigestPort,
+): {
+  configDigest: string;
+  inputDigest: string;
+  manifestDigest: string;
+  patchDigest: string;
+} {
+  if (!isCompositeGraphReadSet(readSet)) {
+    return deriveHierarchyEvidenceDigests(workspaceKey, readSet, digestPort);
+  }
+  const configDigest = digestPort.digest(readSet.analyzerConfigSnapshot);
+  const inputDigest = digestPort.digest({
+    analyzerKind: readSet.analyzerConfigSnapshot.analyzerKind,
+    configDigest: readSet.configDigest,
+    inputs: readSet.manifest,
+    version: 1,
+  });
+  return {
+    configDigest,
+    inputDigest,
+    manifestDigest: digestPort.digest(readSet.manifest),
+    patchDigest: digestPort.digest({
+      configDigest: readSet.configDigest,
+      inputDigest: readSet.inputDigest,
+      manifestDigest: readSet.manifestDigest,
+      targetGraphDigest: readSet.targetGraphDigest,
+      version: 1,
+    }),
+  };
 }
 
 /** 从 succeeded Job 的完整 read-set 独立重建全部语义摘要，不依赖当前 workspace 行。 */
@@ -2184,23 +2769,29 @@ function validatePersistedHierarchyTopology(
   expected: ReturnType<typeof buildHierarchyGraph>,
 ): void {
   const actualNodes = database.prepare(`
-    SELECT id, kind, relative_path
-    FROM nodes
-    WHERE workspace_key = ?
-    ORDER BY id
-  `).all(workspaceKey) as NodeRow[];
+    SELECT node.id, node.kind, node.relative_path
+    FROM facts_ownership AS ownership
+    JOIN nodes AS node ON node.workspace_key = ownership.workspace_key
+      AND node.id = ownership.fact_id
+    WHERE ownership.workspace_key = ? AND ownership.owner_key = ?
+      AND ownership.fact_kind = 'node'
+    ORDER BY node.id
+  `).all(workspaceKey, hierarchyOwnershipSliceId(workspaceKey)) as NodeRow[];
   const actualEdges = database.prepare(`
-    SELECT id, from_id, relation_type, to_id, qualifier
-    FROM edges
-    WHERE workspace_key = ?
-    ORDER BY id
-  `).all(workspaceKey) as EdgeRow[];
+    SELECT edge.id, edge.from_id, edge.relation_type, edge.to_id, edge.qualifier
+    FROM facts_ownership AS ownership
+    JOIN edges AS edge ON edge.workspace_key = ownership.workspace_key
+      AND edge.id = ownership.fact_id
+    WHERE ownership.workspace_key = ? AND ownership.owner_key = ?
+      AND ownership.fact_kind = 'edge'
+    ORDER BY edge.id
+  `).all(workspaceKey, hierarchyOwnershipSliceId(workspaceKey)) as EdgeRow[];
   const actualOwnership = database.prepare(`
     SELECT fact_id, fact_kind, owner_key
     FROM facts_ownership
-    WHERE workspace_key = ?
+    WHERE workspace_key = ? AND owner_key = ?
     ORDER BY fact_kind, fact_id, owner_key
-  `).all(workspaceKey) as OwnershipRow[];
+  `).all(workspaceKey, hierarchyOwnershipSliceId(workspaceKey)) as OwnershipRow[];
   const expectedNodes = [...expected.nodes]
     .sort((left, right) => compareCanonicalGraphText(left.id, right.id))
     .map((node) => ({ id: node.id, kind: node.kind, relative_path: node.relativePath }));
@@ -2239,7 +2830,9 @@ function validatePersistedHierarchyTopology(
 }
 
 /** 解析私有审计 JSON，并拒绝不完整 digest、未排序 manifest 或非法 generation。 */
-function parsePersistedHierarchyReadSet(serialized: string): HierarchyReadSetV1 {
+function parsePersistedGraphReadSet(
+  serialized: string,
+): HierarchyReadSetV1 | CompositeGraphReadSetV1 {
   let value: unknown;
   try {
     value = JSON.parse(serialized);
@@ -2286,7 +2879,186 @@ function parsePersistedHierarchyReadSet(serialized: string): HierarchyReadSetV1 
     }
     previousPath = entry.path;
   }
-  return value as unknown as HierarchyReadSetV1;
+  const hasCompositeDigest = "targetGraphDigest" in value;
+  const hasAnalyzerSnapshot = "analyzerConfigSnapshot" in value;
+  if (hasCompositeDigest !== hasAnalyzerSnapshot) {
+    throw new Error("持久化 composite read-set 缺少 Analyzer 或目标图摘要。");
+  }
+  if (hasCompositeDigest) {
+    if (!isSha256Digest(value.targetGraphDigest)) {
+      throw new Error("持久化 composite 目标图摘要不合法。");
+    }
+    validatePersistedAnalyzerConfigSnapshot(
+      value.analyzerConfigSnapshot,
+      ignore.effectiveDigest as string,
+    );
+  }
+  return value as unknown as HierarchyReadSetV1 | CompositeGraphReadSetV1;
+}
+
+/** 持久 Analyzer 快照必须保持封闭字段、规范排序与 ignore 绑定。 */
+function validatePersistedAnalyzerConfigSnapshot(
+  snapshot: unknown,
+  effectiveIgnoreDigest: string,
+): asserts snapshot is AnalyzerConfigSnapshotV1 {
+  if (
+    !isRecord(snapshot) || snapshot.version !== 1 || snapshot.analyzerKind !== "typescript" ||
+    typeof snapshot.analyzerVersion !== "string" || snapshot.analyzerVersion.length === 0 ||
+    !isRecord(snapshot.effectiveCompilerOptions) || !isRecord(snapshot.effectiveIgnore) ||
+    snapshot.effectiveIgnore.version !== 1 ||
+    snapshot.effectiveIgnore.effectiveDigest !== effectiveIgnoreDigest ||
+    !Array.isArray(snapshot.consultedFiles) || !Array.isArray(snapshot.workspacePackages)
+  ) {
+    throw new Error("持久化 AnalyzerConfigSnapshotV1 形状不合法。");
+  }
+  assertSortedDigestPaths(snapshot.consultedFiles, "consultedFiles");
+  const existingPaths = new Set(snapshot.consultedFiles.map((entry) =>
+    (entry as { path: string }).path));
+  if (snapshot.blockedResolutionFiles !== undefined) {
+    if (!Array.isArray(snapshot.blockedResolutionFiles)) {
+      throw new Error("持久化 Analyzer blockedResolutionFiles 形状不合法。");
+    }
+    assertSortedDigestPaths(snapshot.blockedResolutionFiles, "blockedResolutionFiles");
+    for (const entry of snapshot.blockedResolutionFiles) {
+      const blockedPath = (entry as { path: string }).path;
+      if (existingPaths.has(blockedPath)) {
+        throw new Error("持久化 Analyzer existing/blocked 路径集合不互斥。");
+      }
+      existingPaths.add(blockedPath);
+    }
+  }
+  const absentPaths = new Set<string>();
+  for (const [label, value] of [
+    ["absentFiles", snapshot.absentFiles],
+    ["absentResolutionFiles", snapshot.absentResolutionFiles],
+  ] as const) {
+    if (value === undefined) {continue;}
+    if (!Array.isArray(value)) {
+      throw new Error(`持久化 Analyzer ${label} 形状不合法。`);
+    }
+    let previousAbsentPath: string | null = null;
+    for (const absentPath of value) {
+      if (
+        typeof absentPath !== "string" || absentPath.length === 0 ||
+        (previousAbsentPath !== null && previousAbsentPath >= absentPath) ||
+        existingPaths.has(absentPath) || absentPaths.has(absentPath)
+      ) {
+        throw new Error(`持久化 Analyzer ${label} 未按规范路径唯一排序。`);
+      }
+      absentPaths.add(absentPath);
+      previousAbsentPath = absentPath;
+    }
+  }
+  let previousRoot: string | null = null;
+  for (const entry of snapshot.workspacePackages) {
+    if (
+      !isRecord(entry) || typeof entry.root !== "string" || entry.root.length === 0 ||
+      (previousRoot !== null && previousRoot >= entry.root)
+    ) {
+      throw new Error("持久化 workspacePackages 未按规范 root 唯一排序。");
+    }
+    previousRoot = entry.root;
+  }
+}
+
+/** 配置文件集合必须按 path 唯一排序并携带 SHA-256。 */
+function assertSortedDigestPaths(entries: readonly unknown[], label: string): void {
+  let previousPath: string | null = null;
+  for (const entry of entries) {
+    if (
+      !isRecord(entry) || typeof entry.path !== "string" || entry.path.length === 0 ||
+      !isSha256Digest(entry.contentHash) ||
+      (previousPath !== null && previousPath >= entry.path)
+    ) {
+      throw new Error(`持久化 ${label} 未按规范 path 唯一排序。`);
+    }
+    previousPath = entry.path;
+  }
+}
+
+/** targetGraphDigest 必须由当前完整节点、边、Evidence 与 ownership 独立重算。 */
+function validatePersistedCompositeGraphDigest(
+  database: Database.Database,
+  workspaceKey: string,
+  expectedDigest: string,
+  digestPort: CanonicalDigestPort,
+): void {
+  const nodes = (database.prepare(`
+    SELECT id, kind, relative_path, payload_json
+    FROM nodes WHERE workspace_key = ?
+  `).all(workspaceKey) as GraphNodeRow[])
+    .map(mapGraphNode)
+    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
+  const edges = (database.prepare(`
+    SELECT id, from_id, relation_type, to_id, qualifier
+    FROM edges WHERE workspace_key = ?
+  `).all(workspaceKey) as GraphEdgeRow[])
+    .map(mapGraphEdge)
+    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
+  const evidence = (database.prepare(`
+    SELECT id, edge_id, provenance, analyzer_version, source_file_id,
+           range_start, range_end, evidence_kind, confidence, language, detected_at,
+           payload_json
+    FROM evidence WHERE workspace_key = ?
+  `).all(workspaceKey) as EvidenceRow[])
+    .map(mapModuleEvidence)
+    .sort((left, right) => compareCanonicalGraphText(left.id, right.id))
+    .map(withoutDetectedAt);
+  const ownership = (database.prepare(`
+    SELECT fact_id, fact_kind, owner_key
+    FROM facts_ownership WHERE workspace_key = ?
+  `).all(workspaceKey) as OwnershipRow[])
+    .map((row) => ({
+      factId: row.fact_id,
+      factKind: row.fact_kind,
+      ownerKey: row.owner_key,
+    }))
+    .sort(comparePersistedOwnership);
+  const actualDigest = digestPort.digest({ edges, evidence, nodes, ownership, version: 1 });
+  if (actualDigest !== expectedDigest) {
+    throw new Error("持久化 composite 目标图摘要与真实事实不一致。");
+  }
+}
+
+/** 非 composite read-set 打开时禁止混入模块事实。 */
+function countsModuleFacts(database: Database.Database, workspaceKey: string): boolean {
+  const row = database.prepare(`
+    SELECT
+      EXISTS(SELECT 1 FROM nodes WHERE workspace_key = ?
+        AND kind IN ('external-package', 'node-builtin')) AS has_module_node,
+      EXISTS(SELECT 1 FROM edges WHERE workspace_key = ?
+        AND relation_type IN ('imports', 'exports')) AS has_module_edge,
+      EXISTS(SELECT 1 FROM evidence WHERE workspace_key = ?) AS has_evidence
+  `).get(workspaceKey, workspaceKey, workspaceKey) as {
+    has_evidence: number;
+    has_module_edge: number;
+    has_module_node: number;
+  };
+  return row.has_module_node !== 0 || row.has_module_edge !== 0 || row.has_evidence !== 0;
+}
+
+/** 运行时与恢复验证共享 CompositeGraphReadSetV1 判定。 */
+function isCompositeGraphReadSet(
+  readSet: HierarchyReadSetV1 | CompositeGraphReadSetV1,
+): readSet is CompositeGraphReadSetV1 & { analyzerConfigSnapshot: AnalyzerConfigSnapshotV1 } {
+  return "targetGraphDigest" in readSet && "analyzerConfigSnapshot" in readSet;
+}
+
+/** Evidence 观察时间不进入目标语义图摘要。 */
+function withoutDetectedAt(value: ModuleEvidenceV1): Omit<ModuleEvidenceV1, "detectedAt"> {
+  const { detectedAt: _detectedAt, ...semantic } = value;
+  void _detectedAt;
+  return semantic;
+}
+
+/** ownership 摘要使用与 application builder 完全一致的规范序。 */
+function comparePersistedOwnership(
+  left: { factId: string; factKind: string; ownerKey: string },
+  right: { factId: string; factKind: string; ownerKey: string },
+): number {
+  return compareCanonicalGraphText(left.factKind, right.factKind) ||
+    compareCanonicalGraphText(left.factId, right.factId) ||
+    compareCanonicalGraphText(left.ownerKey, right.ownerKey);
 }
 
 /** SQLite 私有 JSON 只接受普通非空对象。 */
@@ -2310,7 +3082,7 @@ function matchesExpectedSnapshot(
 }
 
 /** 当前 Job 的语义 read-set 会成为下一次 CAS 的持久基线。 */
-function toCommittedReadSet(patch: GraphPatchV1): CommittedReadSetV1 {
+function toCommittedReadSet(patch: AnyGraphPatchV1): CommittedReadSetV1 {
   return {
     configDigest: patch.readSet.configDigest,
     effectiveIgnoreDigest: patch.readSet.effectiveIgnoreSnapshot.effectiveDigest,
@@ -2337,6 +3109,70 @@ function mapHierarchyEdge(row: EdgeRow): HierarchyEdge {
     qualifier: row.qualifier,
     relationType: row.relation_type,
     toId: row.to_id,
+  });
+}
+
+/** SQLite v3 node 行恢复为封闭领域联合。 */
+function mapGraphNode(row: GraphNodeRow): GraphNodeV1 {
+  if (row.kind === "workspace" || row.kind === "directory" || row.kind === "file") {
+    if (row.relative_path === null || row.payload_json !== "{}") {
+      throw new Error("hierarchy node relative_path 或 payload_json 不规范。");
+    }
+    return Object.freeze({ id: row.id, kind: row.kind, relativePath: row.relative_path });
+  }
+  const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  if (row.kind === "external-package") {
+    if (typeof payload.packageName !== "string" ||
+      (payload.versionState !== "resolved" && payload.versionState !== "unresolved") ||
+      (payload.versionState === "resolved" && typeof payload.packageVersion !== "string") ||
+      (payload.versionState === "unresolved" && payload.packageVersion !== null)) {
+      throw new Error("external-package payload 不完整。");
+    }
+    const node = payload.versionState === "resolved"
+      ? createExternalPackageNode(payload.packageName, payload.packageVersion as string)
+      : createUnresolvedExternalPackageNode(payload.packageName);
+    if (node.id !== row.id || serializeNodePayload(node) !== row.payload_json) {
+      throw new Error("external-package payload_json 不是唯一规范表示。");
+    }
+    return node;
+  }
+  if (typeof payload.moduleName !== "string") {
+    throw new Error("node-builtin payload 不完整。");
+  }
+  const node = createNodeBuiltinNode(payload.moduleName);
+  if (node.id !== row.id || serializeNodePayload(node) !== row.payload_json) {
+    throw new Error("node-builtin payload_json 不是唯一规范表示。");
+  }
+  return node;
+}
+
+/** SQLite v3 edge 行恢复为 contains/imports/exports 联合。 */
+function mapGraphEdge(row: GraphEdgeRow): GraphEdgeV1 {
+  return Object.freeze({
+    fromId: row.from_id,
+    id: row.id,
+    qualifier: row.qualifier,
+    relationType: row.relation_type,
+    toId: row.to_id,
+  }) as GraphEdgeV1;
+}
+
+/** SQLite v3 Evidence 行恢复为版本化模块证据。 */
+function mapModuleEvidence(row: EvidenceRow): ModuleEvidenceV1 {
+  if (row.payload_json !== "{}") {
+    throw new Error("Evidence payload_json 必须是唯一规范空对象。");
+  }
+  return Object.freeze({
+    analyzerVersion: row.analyzer_version,
+    confidence: row.confidence,
+    detectedAt: row.detected_at,
+    edgeId: row.edge_id,
+    evidenceKind: row.evidence_kind,
+    id: row.id,
+    language: row.language,
+    normalizedRange: Object.freeze({ end: row.range_end, start: row.range_start }),
+    provenance: row.provenance,
+    sourceFileId: row.source_file_id,
   });
 }
 

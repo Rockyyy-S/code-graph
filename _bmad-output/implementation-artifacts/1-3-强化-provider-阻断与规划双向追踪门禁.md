@@ -302,6 +302,10 @@ so that 地基完成后才能并行开发功能，后续能力和规划引用也
 - [x] [Review][Patch] [High] 能力专属测试可对 fixture 做无关断言；现 binding 声明 `assertionTarget`，正负回调必须断言该真实导出的调用结果，且 Contracts 源码整体进入 Harness 实现摘要 [scripts/contracts/validate-public-capability-gates.mjs:474]
 - [x] [Review][Patch] [High] 最终 producer `c01e7c05…`、十四项 registry 与精确候选 `22f6796…` 已由 sequence 17 proposal 批准；Hosted run `30144361628` attempt 2、attestation `37060591` 与 Controller App check `89644207243` 同 SHA 成功 [.github/workflows/architecture-required.yml:23]
 
+#### Controller lease 可用性补丁 2026-07-27
+
+- [x] [Review][Patch] [High] GitHub 五分钟 cron 实际出现 30～210 分钟完成间隔，导致 15 分钟 monitor lease 按设计耗尽；现保留 15 分钟硬过期、每分钟/50 分钟 guardian 与独立 Monitor App，由 Controller 在可信 success 满 6 分钟且无同仓库/path/main/trusted SHA 的 active run 时，使用本仓库最小 `actions: write` 无输入 dispatch 固定 `drift-monitor.yml@main`。未过期证据遇 dispatch 失败仅记录，过期证据即使 dispatch 成功仍 fail closed；补充进程内六分钟冷却、失败 dispatch 退避、active 状态/时效边界、main 服务端过滤及同秒 run ID/attempt 排序，避免快速失败重试环、API 最终一致性重复触发和旧结果误选 [../code-graph-gate-controller/bin/run-controller.mjs, ../code-graph-gate-controller/lib/controller-policy.mjs]
+
 ## Dev Notes
 
 ### Developer Context

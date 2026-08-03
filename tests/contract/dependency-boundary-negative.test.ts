@@ -60,7 +60,7 @@ async function expectRule(root: string, rule: string): Promise<void> {
 }
 
 describe("dependency boundary negative paths", () => {
-  it("allows only the architecture-approved Story 1.2 and 1.4 external dependencies", async () => {
+  it("allows only architecture-approved role and workspace external dependencies", async () => {
     const root = await createRepository();
     await addWorkspace(
       root,
@@ -97,6 +97,14 @@ describe("dependency boundary negative paths", () => {
       },
       'import "better-sqlite3";\n',
     );
+    await addWorkspace(
+      root,
+      "packages/adapters/analyzer-typescript",
+      "@codegraph/adapter-analyzer-typescript",
+      "adapter",
+      { typescript: "6.0.3" },
+      'import "typescript";\n',
+    );
 
     await expect(checkDependencyBoundaries(root)).resolves.toEqual([]);
   });
@@ -107,6 +115,7 @@ describe("dependency boundary negative paths", () => {
     ["apps/graph-service", "@codegraph/graph-service", "composition-root", "ajv"],
     ["packages/contracts", "@codegraph/contracts", "contracts", "better-sqlite3"],
     ["apps/graph-service", "@codegraph/graph-service", "composition-root", "@types/better-sqlite3"],
+    ["packages/adapters/git-local", "@codegraph/adapter-git-local", "adapter", "typescript"],
   ])(
     "rejects architecture-approved dependencies assigned to the wrong role",
     async (relativePath, name, role, dependency) => {

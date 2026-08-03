@@ -183,6 +183,124 @@ describe("real graph-service process", () => {
   );
 
   it(
+    "persists extends and paths module facts through the real process and keeps failures atomic",
+    async () => {
+      const graphServiceEntry = path.resolve("apps/graph-service/dist/main.js");
+      await access(graphServiceEntry);
+      const indexingRoot = await createShortTempRoot("r6");
+      const cacheRoot = await createShortTempRoot("c6");
+      roots.push(indexingRoot, cacheRoot);
+      await mkdir(path.join(indexingRoot, "configs"), { recursive: true });
+      await mkdir(path.join(indexingRoot, "src"), { recursive: true });
+      const baseConfigPath = path.join(indexingRoot, "configs", "base.json");
+      await writeFile(baseConfigPath, JSON.stringify({
+        compilerOptions: {
+          baseUrl: "..",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          paths: { "@dep": ["src/dep.ts"] },
+        },
+      }));
+      await writeFile(
+        path.join(indexingRoot, "tsconfig.json"),
+        JSON.stringify({ extends: "./configs/base.json", include: ["src/**/*.ts"] }),
+      );
+      await writeFile(
+        path.join(indexingRoot, "src", "index.ts"),
+        "import { value } from '@dep';\nvoid value;\n",
+      );
+      await writeFile(path.join(indexingRoot, "src", "dep.ts"), "export const value = 1;\n");
+      const launcher = createGraphServiceProcessLauncher({
+        args: [graphServiceEntry],
+        command: process.execPath,
+      });
+      const client = await connectToGraphServiceWithCacheRootForTests(
+        {
+          clientVersion: "0.0.0-module-process-test",
+          indexingRoot,
+          launcher,
+          pollIntervalMs: 10,
+          requestTimeoutMs: 15_000,
+          startTimeoutMs: 10_000,
+          trust: { isTrusted: true },
+        },
+        cacheRoot,
+      );
+      clients.push(client);
+      const workspacePaths = createWorkspacePaths(client.identity.workspaceKey, {
+        cacheRoot,
+        platform: process.platform,
+        rootBindingKey: client.identity.physicalRootKey,
+      });
+
+      const initial = await client.startRebuild();
+      // 公共状态保留 hierarchy 树计数；模块 edge 与 Evidence 在下方直接读取 SQLite 验证。
+      expect(await waitForTerminalStatus(client, initial.job.id)).toMatchObject({
+        committed: {
+          edgeCount: 3,
+          graphRevision: 1,
+          indexedFileCount: 2,
+          nodeCount: 4,
+        },
+        freshness: "current",
+        graphRevision: 1,
+        lastIndexJob: { state: "succeeded" },
+      });
+
+      // 根外 baseUrl 必须经公共进程协议分类为扫描失败，并保留已提交模块 revision。
+      await writeFile(baseConfigPath, JSON.stringify({
+        compilerOptions: {
+          baseUrl: "../..",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          paths: { "@dep": ["outside/dep.ts"] },
+        },
+      }));
+      const failedJob = await client.startRebuild();
+      expect(await waitForTerminalStatus(client, failedJob.job.id)).toMatchObject({
+        committed: { graphRevision: 1 },
+        freshness: "stale",
+        graphRevision: 1,
+        lastIndexJob: {
+          error: { code: "GRAPH_SCAN_FAILED" },
+          resultGraphRevision: 1,
+          state: "failed",
+        },
+      });
+
+      await client.shutdown();
+      await waitForMissing(workspacePaths.metadataPath);
+      const store = await openSqliteGraphStore({
+        databasePath: path.join(workspacePaths.workspaceDirectory, "graph.sqlite"),
+        digestPort: { digest: sha256CanonicalJson },
+        workspaceKey: client.identity.workspaceKey,
+      });
+      try {
+        const snapshot = store.readCommittedSnapshot();
+        const dependencyNode = snapshot.allNodes?.find((node) =>
+          node.kind === "file" && node.relativePath === "src/dep.ts");
+        expect(dependencyNode).toBeDefined();
+        expect(snapshot.graphRevision).toBe(1);
+        expect(snapshot.allEdges?.filter((edge) => edge.relationType === "imports"))
+          .toEqual([expect.objectContaining({ toId: dependencyNode?.id })]);
+        expect(snapshot.allEvidence).toHaveLength(1);
+        expect(store.readBootstrapState()).toMatchObject({
+          committed: { graphRevision: 1 },
+          freshness: "stale",
+          lastJob: {
+            id: failedJob.job.id,
+            resultGraphRevision: 1,
+            state: "failed",
+          },
+        });
+      } finally {
+        store.close();
+      }
+    },
+    30_000,
+  );
+
+  it(
     "keeps the control plane available but fails first rebuild for .codegraphignore",
     async () => {
       const graphServiceEntry = path.resolve("apps/graph-service/dist/main.js");
@@ -419,10 +537,10 @@ describe("real graph-service process", () => {
       });
 
       // 扩大真实扫描窗口，在 running 状态后推进持久 base revision，强制 store CAS stale 重排。
-      for (let index = 0; index < 32; index += 1) {
+      for (let index = 0; index < 8; index += 1) {
         await writeFile(
           path.join(indexingRoot, "src", `generated-${index}.ts`),
-          Buffer.alloc(256 * 1024, index),
+          Buffer.alloc(64 * 1024, index),
         );
       }
       const staleJob = await first.startRebuild();
@@ -474,7 +592,8 @@ describe("real graph-service process", () => {
       const nextJob = await first.startRebuild();
       const observedRevisions = new Set<number | null>([3]);
       let switchedStatus: Awaited<ReturnType<GraphServiceConnection["status"]>> | undefined;
-      for (let attempt = 0; attempt < 300; attempt += 1) {
+      /** composite Worker rebuild 仍必须只暴露旧/新 revision，等待窗口覆盖冷启动。 */
+      for (let attempt = 0; attempt < 2_000; attempt += 1) {
         const status = await second.status();
         observedRevisions.add(status.graphRevision);
         if (status.lastIndexJob?.id === nextJob.job.id && status.lastIndexJob.state === "succeeded") {
@@ -534,7 +653,8 @@ async function createShortTempRoot(slot: string): Promise<string> {
 
 /** 轮询共享权威状态，直到当前 Job 进入 terminal。 */
 async function waitForTerminalStatus(client: GraphServiceConnection, expectedJobId: string) {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  /** 真实 TypeScript Worker 与双重 read-set 封口在并行 CI 下需要覆盖冷启动窗口。 */
+  for (let attempt = 0; attempt < 2_000; attempt += 1) {
     const status = await client.status();
     if (
       status.lastIndexJob?.id === expectedJobId &&

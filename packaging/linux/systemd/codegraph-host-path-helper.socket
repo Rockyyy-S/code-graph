@@ -1,0 +1,12 @@
+[Unit]
+Description=CodeGraph HostPath snapshot helper socket
+
+[Socket]
+ListenStream=/run/codegraph-host-path/helper.sock
+SocketUser=root
+SocketGroup=codegraph-host-path
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

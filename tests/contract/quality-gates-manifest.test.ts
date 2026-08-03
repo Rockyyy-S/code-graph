@@ -1,14 +1,20 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   loadQualityGateRegistry,
   validateQualityGateRegistry,
 } from "../../scripts/ci/load-quality-gates.mjs";
+import {
+  QUALITY_GATES,
+  runArchitectureRequired,
+} from "../../scripts/ci/run-architecture-required.mjs";
+import {
+  TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST,
+} from "../../scripts/ci/verify-typescript-module-analysis-v1.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
-const workflowSha = "0981130a71a3960aa374a82829d42aa9d9f15012";
 const temporaryRoots: string[] = [];
 
 const expectedGates = [
@@ -61,6 +67,71 @@ const expectedGates = [
     ["node", "scripts/contracts/verify-graph-bootstrap-job-request-v1.mjs", "--capability", "schema:jobStartRequestV1Schema", "--test", "tests/unit/graph-bootstrap-job-request-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-request-v1.json", "--evidence-id", "public-capability:schema:jobStartRequestV1Schema"],
     "qa",
   ],
+  /**
+   * Win32 gate 精确覆盖 producer、Story consumer、POSIX capability adapter 与 dedicated Win32 配置的三十二条影响路径；
+   * triggerPaths 只描述影响面，本地 architecture-required 仍必须始终执行该 blocking gate。
+   */
+  [
+    "host-path-identity-win32-v1",
+    ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
+    "qa",
+    [
+      "apps/graph-service/package.json",
+      "apps/graph-service/src/analyzer-config.ts",
+      "apps/graph-service/src/host-path-identity.ts",
+      "apps/graph-service/src/index-job-runtime.ts",
+      "apps/graph-service/src/index-read-set.ts",
+      "apps/graph-service/src/index.ts",
+      "apps/graph-service/src/workspace-scanner.ts",
+      "apps/graph-service/tsconfig.build.json",
+      "ci/quality-gates.v1.yaml",
+      "packages/adapters/analyzer-typescript/src/analyzer-worker.ts",
+      "packages/adapters/analyzer-typescript/src/module-target-resolver.ts",
+      "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
+      "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+      "packages/adapters/host-path-posix-native/package.json",
+      "packages/adapters/host-path-posix-native/src/capability.ts",
+      "packages/adapters/host-path-posix-native/src/index.ts",
+      "packages/adapters/host-path-posix-native/src/protocol.ts",
+      "packages/adapters/host-path-posix-native/tsconfig.build.json",
+      "packages/adapters/host-path-posix-native/tsconfig.json",
+      "packages/application/src/ports/analyzer-port.ts",
+      "pnpm-lock.yaml",
+      "scripts/ci/verify-host-path-identity-v1.mjs",
+      "tests/contract/host-path-identity-win32.test.ts",
+      "tests/contract/host-path-posix-capability.test.ts",
+      "tests/contract/quality-gates-manifest.test.ts",
+      "tests/unit/analyzer-config-capture.test.ts",
+      "tests/unit/host-path-identity.test.ts",
+      "tests/unit/index-job-runtime.test.ts",
+      "tests/unit/index-read-set.test.ts",
+      "tests/unit/typescript-analyzer-worker.test.ts",
+      "tests/unit/typescript-module-resolution.test.ts",
+      "vitest.contract.win32.config.ts",
+    ],
+  ],
+  /**
+   * Linux helper gate 锁定 Rust/TS ABI、权限分离打包、负向测试与固定 Linux workflow；本地仍始终执行静态/focused 边界。
+   */
+  [
+    "host-path-posix-helper-v1",
+    ["node", "scripts/ci/verify-host-path-posix-helper-v1.mjs"],
+    "security",
+    [
+      ".github/workflows/host-path-posix-linux.yml",
+      "Cargo.lock",
+      "Cargo.toml",
+      "ci/quality-gates.v1.yaml",
+      "packages/adapters/host-path-posix-native/**",
+      "packaging/linux/**",
+      "rust-toolchain.toml",
+      "scripts/ci/verify-host-path-posix-helper-v1.mjs",
+      "tests/contract/host-path-posix-helper-protocol.test.ts",
+      "tests/contract/quality-gates-manifest.test.ts",
+      "tests/platform/linux-host-path-helper/**",
+      "tests/unit/host-path-posix-capability.test.ts",
+    ],
+  ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
   ["planning-traceability", ["pnpm", "planning-trace"], "architecture-po"],
   [
@@ -94,6 +165,11 @@ const expectedGates = [
     "dev-enablement",
   ],
   ["type", ["pnpm", "type"], "dev-enablement"],
+  [
+    "typescript-module-analysis-v1",
+    ["node", "scripts/ci/verify-typescript-module-analysis-v1.mjs"],
+    "qa",
+  ],
   ["unit", ["pnpm", "unit"], "qa"],
 ] as const;
 
@@ -104,12 +180,109 @@ afterEach(async () => {
 });
 
 describe("quality-gates.v1 registry", () => {
-  it("登记唯一、升序、always-applicable 的二十三项 blocking gate", async () => {
+  it("locks the Story 1.5 verifier unit and process regression manifest", () => {
+    const originalUnitTests = [
+      "tests/unit/analyzer-config-capture.test.ts",
+      "tests/unit/analyzer-config-snapshot.test.ts",
+      "tests/unit/composite-graph-patch.test.ts",
+      "tests/unit/index-job-runtime.test.ts",
+      "tests/unit/index-read-set.test.ts",
+      "tests/unit/module-dependency-domain.test.ts",
+      "tests/unit/module-fact-batch.test.ts",
+      "tests/unit/sqlite-graph-store.test.ts",
+      "tests/unit/sqlite-module-dependencies.test.ts",
+      "tests/unit/typescript-analyzer-worker.test.ts",
+      "tests/unit/typescript-module-resolution.test.ts",
+      "tests/unit/typescript-module-syntax.test.ts",
+    ] as const;
+    expect(TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST).toEqual({
+      buildFilters: [
+        "@codegraph/domain",
+        "@codegraph/contracts",
+        "@codegraph/application",
+        "@codegraph/service-client",
+        "@codegraph/adapter-analyzer-typescript",
+        "@codegraph/adapter-git-local",
+        "@codegraph/adapter-store-sqlite",
+        "@codegraph/graph-service",
+      ],
+      contractTests: ["tests/contract/graph-service-process.test.ts"],
+      unitShards: [
+        {
+          expectedTestCount: 257,
+          shardId: "default-unit",
+          tests: originalUnitTests.filter(
+            (testPath) => testPath !== "tests/unit/sqlite-module-dependencies.test.ts",
+          ),
+        },
+        {
+          expectedTestCount: 24,
+          shardId: "sqlite-module-dependencies",
+          tests: ["tests/unit/sqlite-module-dependencies.test.ts"],
+        },
+      ],
+      version: 1,
+    });
+
+    const unitShards = TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards;
+    const unitTests = unitShards.flatMap(({ tests }) => tests);
+    expect(unitShards.map(({ shardId }) => shardId)).toEqual([
+      "default-unit",
+      "sqlite-module-dependencies",
+    ]);
+    expect(new Set(unitTests).size).toBe(unitTests.length);
+    expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
+    expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
+      .toBe(281);
+  });
+
+  it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {
+    const buildFilters = TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.buildFilters;
+    const order = new Map(buildFilters.map((filter, index) => [filter, index]));
+    const dependencies = new Map<string, readonly string[]>([
+      ["@codegraph/application", ["@codegraph/domain"]],
+      ["@codegraph/service-client", ["@codegraph/application", "@codegraph/contracts"]],
+      ["@codegraph/adapter-analyzer-typescript", ["@codegraph/application", "@codegraph/domain"]],
+      ["@codegraph/adapter-git-local", ["@codegraph/application", "@codegraph/domain"]],
+      ["@codegraph/adapter-store-sqlite", ["@codegraph/application", "@codegraph/domain"]],
+      ["@codegraph/graph-service", [
+        "@codegraph/contracts",
+        "@codegraph/application",
+        "@codegraph/service-client",
+        "@codegraph/adapter-analyzer-typescript",
+        "@codegraph/adapter-git-local",
+        "@codegraph/adapter-store-sqlite",
+      ]],
+    ]);
+
+    for (const [dependent, required] of dependencies) {
+      for (const dependency of required) {
+        expect(order.get(dependency), `${dependency} 必须先于 ${dependent} 构建`)
+          .toBeLessThan(order.get(dependent)!);
+      }
+    }
+  });
+
+  it("登记唯一、升序且由本地 runner 始终执行的二十六项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
+    const expectedGateIds = expectedGates.map(([gateId]) => gateId);
+    const workflowShas = new Set<string>(loaded.registry.gates.map(({
+      gateDefinition,
+    }: {
+      gateDefinition: { evidenceProducerId: string; gateId: string };
+    }) => {
+      const match = /@([a-f0-9]{40})#/u.exec(gateDefinition.evidenceProducerId);
+      if (match === null) {
+        throw new Error(`gate ${gateDefinition.gateId} producer SHA 无法解析。`);
+      }
+      return match[1]!;
+    }));
+    expect(workflowShas.size).toBe(1);
+    const workflowSha = [...workflowShas][0]!;
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(loaded.registry.gates).toHaveLength(expectedGates.length);
-    expectedGates.forEach(([gateId, command, capabilityOwner], index) => {
+    expectedGates.forEach(([gateId, command, capabilityOwner, triggerPaths], index) => {
       const entry = loaded.registry.gates[index]!;
       expect(entry.gateDefinition).toEqual({
         blocking: true,
@@ -118,10 +291,33 @@ describe("quality-gates.v1 registry", () => {
         command,
         evidenceProducerId: `gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@${workflowSha}#${gateId}`,
         gateId,
+        ...(triggerPaths === undefined ? {} : { triggerPaths }),
       });
       expect(entry.gateDefinitionDigest).toMatch(/^[a-f0-9]{64}$/);
-      expect(Object.hasOwn(entry.gateDefinition, "triggerPaths")).toBe(false);
+      expect(Object.hasOwn(entry.gateDefinition, "triggerPaths")).toBe(
+        triggerPaths !== undefined,
+      );
     });
+
+    expect(QUALITY_GATES).toEqual(expectedGateIds);
+    const execute = vi.fn(async () => ({
+      status: "pass" as const,
+      stderr: Buffer.alloc(0),
+      stderrTruncated: false,
+      stdout: Buffer.alloc(0),
+      stdoutTruncated: false,
+      termination: { code: 0, kind: "exit" as const },
+    }));
+    const result = await runArchitectureRequired({
+      execute,
+      registry: loaded.registry,
+      writeArtifacts: false,
+    });
+
+    expect(execute).toHaveBeenCalledTimes(expectedGates.length);
+    expect(result.gates.map(({ gateId, status }) => ({ gateId, status }))).toEqual(
+      expectedGateIds.map((gateId) => ({ gateId, status: "pass" })),
+    );
   });
 
   it.each([

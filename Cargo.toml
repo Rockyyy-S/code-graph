@@ -1,0 +1,15 @@
+[workspace]
+members = ["packages/adapters/host-path-posix-native/native/codegraph-host-path-helper"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+overflow-checks = true
+panic = "abort"
+strip = "symbols"

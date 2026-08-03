@@ -715,9 +715,12 @@ describe("shared service-client control API", () => {
     const indexingRoot = await mkdtemp(path.join(tmpdir(), "codegraph-stale-root-"));
     const cacheRoot = await mkdtemp(path.join(tmpdir(), "codegraph-stale-cache-"));
     roots.push(indexingRoot, cacheRoot);
+    let tokenPublished = false;
+    const observedStates: string[] = [];
     const start = vi.fn(async ({ paths }: TestLaunchConfig) => {
       await mkdir(paths.workspaceDirectory, { recursive: true });
       await writeFile(paths.tokenPath, randomBytes(32), { flag: "wx", mode: 0o600 });
+      tokenPublished = true;
     });
 
     await expect(
@@ -728,9 +731,20 @@ describe("shared service-client control API", () => {
         pollIntervalMs: 5,
         startTimeoutMs: 500,
         trust: { isTrusted: true },
-      }, cacheRoot),
+      }, cacheRoot, {
+        /**
+         * 真实 launcher 仍只发布 token；这里只隔离与分类合同无关的 lstat 抖动，
+         * 并显式记录 absent 后连续三次 stale 的安全判定序列。
+         */
+        probeDiscoveryState: async () => {
+          const state = tokenPublished ? "stale" : "absent";
+          observedStates.push(state);
+          return state;
+        },
+      }),
     ).rejects.toMatchObject({ code: "SERVICE_INSTANCE_CONFLICT" });
     expect(start).toHaveBeenCalledTimes(1);
+    expect(observedStates).toEqual(["absent", "stale", "stale", "stale"]);
   });
 
   it("rejects initialize identity that differs from discovery metadata", async () => {

@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { isBuiltin } from "node:module";
 import {
+  buildCompositeGraphPatch,
   buildHierarchyFactBatch,
   buildHierarchyGraphPatch,
+  buildModuleSourceFactBatch,
   HIERARCHY_PRODUCER_VERSION,
+  AnalyzerFailureError,
+  type AnalyzerPort,
   type CanonicalDigestPort,
   type GraphStorePort,
+  type StoredIndexSummary,
   type StoredIndexJob,
 } from "@codegraph/application";
 import {
@@ -13,6 +19,7 @@ import {
   sha256CanonicalJson,
   type ErrorCategory,
   type ErrorV1,
+  type IndexCommitSummaryV1,
   type JobStartRequest,
   type JobStartResult,
   type ServiceErrorCode,
@@ -35,6 +42,11 @@ import {
   type ScanWorkspaceOptions,
   type WorkspaceScanResult,
 } from "./workspace-scanner.js";
+import {
+  createAnalyzerSemanticContextCapture,
+  type AnalyzerHostPathIdentityBrokerPort,
+  type CaptureAnalyzerSemanticContext,
+} from "./analyzer-config.js";
 
 /** 显式 Job 预算；当前切片只允许一个实际 writer 并拒绝并发请求。 */
 export const MAX_PENDING_EXPLICIT_JOBS = 64;
@@ -58,9 +70,15 @@ export interface GraphServiceRuntime {
 
 /** runtime 初始化参数。 */
 export interface CreateIndexJobRuntimeOptions {
+  analyzer?: AnalyzerPort;
+  captureAnalyzerSemanticContext?: CaptureAnalyzerSemanticContext;
+  /** service-instance helper 的独立关闭边界，不把生命周期职责泄漏给 broker。 */
+  closeHostPathIdentityHelper?: () => Promise<void> | void;
   closeTimeoutMs?: number;
   createJobId?: () => string;
   digestPort?: CanonicalDigestPort;
+  /** 唯一组合根创建并按 service instance 注入的宿主对象身份 broker。 */
+  hostPathIdentityBroker?: AnalyzerHostPathIdentityBrokerPort;
   ignoreState: InitialIgnoreState;
   indexingRoot: string;
   now?: () => string;
@@ -180,6 +198,7 @@ export async function createVerifiedIndexJobRuntime(
     return createIndexJobRuntime({ ...effectiveOptions, readSetProvider });
   } catch (error) {
     readSetProvider.close?.();
+    await effectiveOptions.closeHostPathIdentityHelper?.();
     throw error;
   }
 }
@@ -189,8 +208,16 @@ export function createIndexJobRuntime(
   options: CreateIndexJobRuntimeOptions,
 ): GraphServiceRuntime {
   const persisted = options.store.readBootstrapState();
+  const persistedSnapshot = persisted.committed === null
+    ? null
+    : options.store.readCommittedSnapshot();
   const state = createServiceState({
-    committed: persisted.committed,
+    committed: persisted.committed === null || persistedSnapshot === null
+      ? null
+      : mapServiceCommitSummary(persisted.committed, {
+          edgeCount: persistedSnapshot.ownedEdges.length,
+          nodeCount: persistedSnapshot.ownedNodes.length,
+        }),
     completeness: persisted.completeness,
     freshness: persisted.freshness,
     lastJob: mapPersistedTerminalJob(persisted.lastJob),
@@ -217,13 +244,24 @@ export function createIndexJobRuntime(
   let closing = false;
   let currentRun: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
+  let hostPathClosePromise: Promise<void> | null = null;
   let storeClosed = false;
   let runAbortController: AbortController | null = null;
+
+  /** helper close 只启动一次，并允许 beginShutdown 立即中断在途 capture。 */
+  const closeHostPathIdentity = (): Promise<void> => {
+    if (hostPathClosePromise === null) {
+      hostPathClosePromise = Promise.resolve()
+        .then(() => options.closeHostPathIdentityHelper?.());
+    }
+    return hostPathClosePromise;
+  };
 
   /** 在返回 shutdown accepted 前同步关闭 Job 接收门禁。 */
   const beginShutdown = (): void => {
     closing = true;
     runAbortController?.abort();
+    void closeHostPathIdentity().catch(() => undefined);
   };
 
   /** 执行同一 logical Job 的完整 read-set、patch、复核、CAS 与有界重排。 */
@@ -271,15 +309,38 @@ export function createIndexJobRuntime(
           relativePaths: capture.readSet.manifest.map((entry) => entry.path),
           workspaceKey: options.workspaceKey,
         });
-        const patch = buildHierarchyGraphPatch({
-          batch,
-          digestPort,
-          readSet: capture.readSet,
-          snapshot,
-        });
+        const analyzerContext = capture.analyzerContext;
+        const moduleBatches = options.analyzer === undefined || analyzerContext === undefined
+          ? []
+          : await analyzeModuleBatches(
+              options.analyzer,
+              analyzerContext,
+              capture,
+              options.workspaceKey,
+              startedAt,
+              signal,
+            );
+        const patch = options.analyzer === undefined || analyzerContext === undefined
+          ? buildHierarchyGraphPatch({
+              batch,
+              digestPort,
+              readSet: capture.readSet,
+              snapshot,
+            })
+          : buildCompositeGraphPatch({
+              digestPort,
+              hierarchyBatch: batch,
+              moduleBatches,
+              readSet: capture.readSet,
+              snapshot,
+            });
         throwIfCancelled(signal);
 
-        if (!await readSetProvider.isCurrent(capture.readSet, signal)) {
+        const captureCurrent = capture.analyzerContext?.hostPathIdentitySidecar === undefined ||
+          readSetProvider.isCaptureCurrent === undefined
+          ? await readSetProvider.isCurrent(capture.readSet, signal)
+          : await readSetProvider.isCaptureCurrent(capture, signal);
+        if (!captureCurrent) {
           publishStale();
           staleRequeueAttempts = nextStaleAttempt(staleRequeueAttempts);
           continue;
@@ -313,11 +374,11 @@ export function createIndexJobRuntime(
           patch,
           summary: {
             builtinRulesVersion: "builtin-ignore-v1",
-            edgeCount: batch.edges.length,
+            edgeCount: "targetEdgeCount" in patch ? patch.targetEdgeCount : batch.edges.length,
             excludedPathCount: capture.scanResult.excludedPathCount,
             generatedAt: completedAt,
             indexedFileCount: capture.scanResult.manifest.length,
-            nodeCount: batch.nodes.length,
+            nodeCount: "targetNodeCount" in patch ? patch.targetNodeCount : batch.nodes.length,
           },
         });
         if (result.kind === "stale") {
@@ -325,12 +386,19 @@ export function createIndexJobRuntime(
           staleRequeueAttempts = nextStaleAttempt(staleRequeueAttempts);
           continue;
         }
-        state.publishSucceededJob(jobId, result.summary);
+        state.publishSucceededJob(
+          jobId,
+          mapServiceCommitSummary(result.summary, {
+            edgeCount: batch.edges.length,
+            nodeCount: batch.nodes.length,
+          }),
+        );
         return;
       }
     } catch (error) {
       const completedAt = timestampAtOrAfter(now(), startedAt);
-      if (signal.aborted && error instanceof WorkspaceScanCancelledError) {
+      if (signal.aborted &&
+        (error instanceof WorkspaceScanCancelledError || isAbortError(error))) {
         try {
           if (staleObserved) {
             options.store.markJobCancelledAndWorkspaceStale(jobId, completedAt);
@@ -343,9 +411,10 @@ export function createIndexJobRuntime(
         state.publishCancelledJob(jobId, completedAt);
         return;
       }
-      const mustPersistStale = staleObserved ||
+  const mustPersistStale = staleObserved ||
         error instanceof WorkspaceScanError ||
-        error instanceof WorkspaceIgnoreConfigChangedError;
+        error instanceof WorkspaceIgnoreConfigChangedError ||
+        isAnalyzerFailure(error);
       if (mustPersistStale) {
         // 扫描失败或已观察差异后，内存状态不得被附加持久化故障恢复为 current。
         state.publishStale();
@@ -388,9 +457,12 @@ export function createIndexJobRuntime(
       // 先关闭 watcher，保证 shutdown accepted 后不会再推进 generation 或发布 stale。
       readSetProvider.close?.();
       closePromise = (async () => {
-        if (activeRun !== null) {
-          await waitForRunWithinLimit(activeRun, closeTimeoutMs);
-        }
+        const analyzerClose = Promise.resolve().then(() => options.analyzer?.close());
+        const hostPathClose = closeHostPathIdentity();
+        const shutdownTasks = activeRun === null
+          ? Promise.all([analyzerClose, hostPathClose]).then(() => undefined)
+          : Promise.all([activeRun, analyzerClose, hostPathClose]).then(() => undefined);
+        await waitForRunWithinLimit(shutdownTasks, closeTimeoutMs);
         options.store.close();
         storeClosed = true;
       })().finally(() => {
@@ -455,6 +527,96 @@ export function createIndexJobRuntime(
   };
 }
 
+/**
+ * SQLite 摘要校验全图事实；ServiceStatusV1 v1 则保留 hierarchy 树计数合同。
+ *
+ * 模块边不能直接复用为公开摘要，否则会破坏 `edgeCount = nodeCount - 1` 的 canonical 不变量。
+ */
+function mapServiceCommitSummary(
+  summary: StoredIndexSummary,
+  hierarchyCounts: Pick<IndexCommitSummaryV1, "edgeCount" | "nodeCount">,
+): IndexCommitSummaryV1 {
+  return {
+    ...summary,
+    edgeCount: hierarchyCounts.edgeCount,
+    nodeCount: hierarchyCounts.nodeCount,
+  };
+}
+
+/** 在受限 Worker 中分析全部 manifest 源码，并由 application 规范化为 source FactBatch。 */
+async function analyzeModuleBatches(
+  analyzer: AnalyzerPort,
+  context: NonNullable<IndexReadSetCapture["analyzerContext"]>,
+  capture: IndexReadSetCapture,
+  workspaceKey: string,
+  detectedAt: string,
+  signal: AbortSignal,
+): Promise<ReturnType<typeof buildModuleSourceFactBatch>[]> {
+  const output = await analyzer.analyze({
+    ...(context.caseSensitiveFileNames === undefined
+      ? {}
+      : { caseSensitiveFileNames: context.caseSensitiveFileNames }),
+    configDigest: context.configDigest,
+    configSnapshot: context.configSnapshot,
+    configurationEntryPaths: context.configurationEntryPaths,
+    configurationFiles: context.configurationFiles,
+    ...(context.hostPathIdentitySidecar === undefined
+      ? {}
+      : { hostPathIdentitySidecar: context.hostPathIdentitySidecar }),
+    detectedAt,
+    inputDigest: context.inputDigest,
+    resolutionFiles: context.resolutionFiles,
+    sourceFiles: context.sourceFiles,
+    workspaceKey,
+  }, signal);
+  const consultedPaths = new Set(context.configSnapshot.consultedFiles.map((file) => file.path));
+  if (output.consultedLogicalPaths.some((logicalPath) => !consultedPaths.has(logicalPath))) {
+    throw new WorkspaceScanError(
+      "GRAPH_SCAN_FAILED",
+      "Analyzer 发现了未进入配置封口快照的解析元数据。",
+    );
+  }
+  const sourceIds = new Set(context.sourceFiles.map((file) => file.fileId));
+  const resultIds = output.files.map((file) => file.sourceFileId);
+  if (
+    resultIds.length !== sourceIds.size ||
+    new Set(resultIds).size !== resultIds.length ||
+    resultIds.some((fileId) => !sourceIds.has(fileId))
+  ) {
+    throw new WorkspaceScanError("GRAPH_SCAN_FAILED", "Analyzer 未返回完整唯一的 source 结果。");
+  }
+  for (const file of output.files) {
+    for (const relation of file.relations) {
+      const target = relation.target;
+      const invalidInternal = target.kind === "internal-file" && !sourceIds.has(target.id);
+      const invalidBuiltin = target.kind === "node-builtin" && (
+        target.id !== `node:${target.moduleName}` ||
+        target.moduleName.startsWith("node:") ||
+        !isBuiltin(target.id)
+      );
+      if (invalidInternal || invalidBuiltin) {
+        throw new AnalyzerFailureError(
+          "ANALYZER_PROTOCOL_INVALID",
+          "Analyzer 返回了未绑定本轮 manifest 或非规范 Node builtin 的 target。",
+        );
+      }
+    }
+  }
+  return output.files.map((file) => buildModuleSourceFactBatch({
+    analyzerKind: "typescript",
+    analyzerVersion: context.configSnapshot.analyzerVersion,
+    configDigest: capture.readSet.configDigest,
+    coverage: "complete",
+    detectedAt,
+    diagnostics: file.diagnostics,
+    inputDigest: capture.readSet.inputDigest,
+    localExportBindings: file.localExportBindings,
+    relations: file.relations,
+    sourceFileId: file.sourceFileId,
+    workspaceKey,
+  }));
+}
+
 /** 已提交语义 digest 与本次捕获不同即说明旧 revision 不再对应当前输入。 */
 function hasSemanticInputDifference(
   snapshot: ReturnType<GraphStorePort["readCommittedSnapshot"]>,
@@ -467,6 +629,11 @@ function hasSemanticInputDifference(
     committed.configDigest !== readSet.configDigest ||
     committed.effectiveIgnoreDigest !== readSet.effectiveIgnoreSnapshot.effectiveDigest
   );
+}
+
+/** Analyzer 使用标准 AbortError 名称收敛 Worker 取消。 */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 /** 默认 read-set provider 只在有效 ignore 启动屏障后创建。 */
@@ -484,6 +651,21 @@ function createDefaultReadSetProvider(options: CreateIndexJobRuntimeOptions): In
     };
   }
   return createIndexReadSetProvider({
+    ...(options.captureAnalyzerSemanticContext !== undefined
+      ? { captureAnalyzerSemanticContext: options.captureAnalyzerSemanticContext }
+      : options.analyzer === undefined
+        ? {}
+        : {
+            captureAnalyzerSemanticContext: createAnalyzerSemanticContextCapture({
+              analyzer: options.analyzer,
+              effectiveIgnoreSnapshot: options.ignoreState.snapshot,
+              ...(options.hostPathIdentityBroker === undefined
+                ? {}
+                : { hostPathIdentityBroker: options.hostPathIdentityBroker }),
+              indexingRoot: options.indexingRoot,
+              workspaceKey: options.workspaceKey,
+            }),
+          }),
     ignoreSnapshot: options.ignoreState.snapshot,
     indexingRoot: options.indexingRoot,
     ...(options.scan === undefined ? {} : { scan: options.scan }),
@@ -598,5 +780,19 @@ function mapJobFailure(error: unknown): ErrorV1 {
   if (error instanceof WorkspaceIgnoreConfigChangedError) {
     return createErrorV1("GRAPH_IGNORE_CONFIG_UNSUPPORTED", randomUUID());
   }
+  if (isAnalyzerFailure(error)) {
+    return createErrorV1("GRAPH_SCAN_FAILED", randomUUID());
+  }
   return createErrorV1("GRAPH_WRITE_FAILED", randomUUID());
+}
+
+/** 跨构建边界按封闭 analyzerCode 识别 AnalyzerFailureError。 */
+function isAnalyzerFailure(error: unknown): error is AnalyzerFailureError {
+  if (error instanceof AnalyzerFailureError) {return true;}
+  if (typeof error !== "object" || error === null || !("analyzerCode" in error)) {return false;}
+  const code = (error as { analyzerCode?: unknown }).analyzerCode;
+  return code === "ANALYZER_CLOSED" || code === "ANALYZER_EXECUTION_FAILED" ||
+    code === "ANALYZER_CONFIG_INVALID" || code === "ANALYZER_METADATA_UNSTABLE" ||
+    code === "ANALYZER_PROTOCOL_INVALID" || code === "ANALYZER_RESOURCE_LIMIT" ||
+    code === "ANALYZER_TIMEOUT";
 }

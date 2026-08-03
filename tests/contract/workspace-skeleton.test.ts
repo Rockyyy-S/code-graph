@@ -20,6 +20,8 @@ const expectedWorkspaces = [
   "packages/service-client",
   "packages/adapters/analyzer-typescript",
   "packages/adapters/git-local",
+  /** 该适配器含 Linux snapshot-only helper 子路径；其他 POSIX 强原语仍必须显式注入且 fail closed。 */
+  "packages/adapters/host-path-posix-native",
   "packages/adapters/store-sqlite",
 ];
 
@@ -68,7 +70,7 @@ describe("workspace responsibility skeleton", () => {
       const adapterDependencies = dependencies.filter((name) => adapterNames.has(name));
 
       if (workspace.relativePath === "apps/graph-service") {
-        expect(adapterDependencies).toHaveLength(3);
+        expect(adapterDependencies).toHaveLength(4);
       } else {
         expect(adapterDependencies, workspace.relativePath).toEqual([]);
       }

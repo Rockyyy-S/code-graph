@@ -1,0 +1,33 @@
+[package]
+name = "codegraph-host-path-helper"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "codegraph_host_path_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codegraph-host-path-bridge"
+path = "src/bin/bridge.rs"
+
+[[bin]]
+name = "codegraph-host-path-daemon"
+path = "src/bin/daemon.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2.1.1", default-features = false, features = ["alloc"] }
+hex = "0.4.3"
+hmac = "0.12.1"
+libc = "0.2.174"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+sha2 = "0.10.9"
+thiserror = "2.0.12"
+unicode-normalization = "0.1.24"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile = "3.20.0"

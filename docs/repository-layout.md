@@ -19,7 +19,7 @@
 | `packages/contracts` | 共享 Schema/DTO 与 Ajv 运行时校验的独立边界 | 领域行为、适配器实现、渲染库内部格式 |
 | `packages/service-client` | 工作区身份、用户缓存发现、deadline 连接、握手与客户端生命周期 | 业务查询语义、图存储、adapter、graph-service 入口定位 |
 | `packages/adapters/store-sqlite` | `GraphStorePort` 的 SQLite 实现；依赖 application/domain | 承担组合根职责、泄露 SQL/rowid，或被核心反向导入 |
-| `packages/adapters/analyzer-typescript` | 分析端口实现；依赖 application/domain | 向核心泄露 Compiler API 类型 |
+| `packages/adapters/analyzer-typescript` | `AnalyzerPort` 的真实 Worker 实现；只依赖 application/domain 与精确 `typescript@6.0.3` | 向核心泄露 Compiler API 类型、读取任意工作区物理路径、加载 plugin/transformer/scripts 或引入第二解析器 |
 | `packages/adapters/git-local` | Git 端口实现；依赖 application/domain | 承担业务用例或组合逻辑 |
 
 ## 共享代码选择规则
@@ -41,7 +41,9 @@ Story 1.2 的角色级第三方 allowlist 只允许 `packages/contracts` 使用 
 `packages/service-client` 与 `apps/graph-service` 使用 `vscode-jsonrpc`；其他角色及其他
 Schema/RPC 库继续默认拒绝。Story 1.4 仅为 `packages/adapters/store-sqlite` 增加
 `better-sqlite3@12.11.1` 与 `@types/better-sqlite3@7.6.13`，并在 `allowBuilds` 中只允许该原生包
-执行受控安装脚本。版本由各 workspace manifest 与 `pnpm-lock.yaml` 锁定。
+执行受控安装脚本。Story 1.5 仅为 `packages/adapters/analyzer-typescript` 增加
+`typescript@6.0.3` workspace 专属 allowlist；其他 adapter 仍不得声明 TypeScript 或第二解析器。
+版本由各 workspace manifest 与 `pnpm-lock.yaml` 锁定。
 
 TypeScript workspace 通过 project references 表达 manifest 依赖，质量 runner 按依赖拓扑
 执行 type/build，保证 clean checkout 不依赖历史 `dist` 产物。
@@ -61,7 +63,9 @@ TypeScript workspace 通过 project references 表达 manifest 依赖，质量 r
 | `pnpm architecture-required` | 从唯一 registry 执行全部适用 blocking gate，并生成 GateEvidenceV1 |
 
 `ci/quality-gates.v1.yaml` 是注册表中全部 blocking gate 的唯一机器清单，其中包含以上质量命令与
-`repository-contract-preflight`。候选仓库的 `child-gate-evidence` workflow 只调用按完整 commit
+`repository-contract-preflight`。`typescript-module-analysis-v1` 额外构建真实 Worker 产物，并固定运行
+配置封口、AD-24、目标解析、source FactBatch、composite patch、SQLite v3 与单 revision runtime 回归。
+候选仓库的 `child-gate-evidence` workflow 只调用按完整 commit
 SHA 固定的 `Rockyyy-S/code-graph-gate-controller` reusable workflow，产出 child evidence 和
 GitHub attestation；它不能发布权威 `architecture-required` umbrella check。
 
@@ -106,6 +110,20 @@ root。服务在开放握手前完成 SQLite 打开/迁移、generation 0 ignore
 按 node/edge ID 排序并以目标语义状态计算 digest，不包含 Job、时间、generation 或 base revision。
 相同目标状态重算与重放是 no-op，不产生重复事实、孤立 ownership 或无意义 revision。
 
+TypeScript/JavaScript 分析由构建后的 `analyzer-worker.js` 使用 TypeScript 6.0.3 稳定公开 API 完成。
+scanner 交付与 manifest hash 同次读取的不可变源码字节；Worker 只返回逻辑解析候选路径，
+`apps/graph-service` 经过普通文件、realpath containment、文件身份、单文件/总量预算检查后分阶段回送
+`package.json`、声明文件等解析元数据；broker 在候选数量、路径/文件字节与依赖深度预算内持续迭代至
+配置观察稳定，稳定确认本身不额外消耗依赖深度。冻结的
+`AnalyzerConfigSnapshotV1`、`configDigest` 与 `inputDigest` 绑定全部实际文件 hash；提交同步栅栏在 mutation
+前后再次复核这些字节。`rules.yaml`、项目 plugin、transformer、scripts 与 tsserver 私有状态不进入分析。
+
+application 将 hierarchy 与全部 `source:typescript:<fileId>` Evidence slice 组合为唯一
+`CompositeGraphPatchV1`。共享 imports/exports edge 与 external-package/node-builtin 节点不伪装成单一
+source owner；一次 logical rebuild 只调用一次 `commitAtomicGraphUpdate()`、只开启一个同步事务并至多推进
+一个 graph revision。`detectedAt` 不进入身份或语义 digest；移除 import 或删除 source slice 会在 complete
+replacement 中退休旧 Evidence 与失去支持的模块 edge。
+
 service-instance 级 `IndexReadSetProvider` 捕获规范 manifest/hash、完整 ignore snapshot、
 `bootstrapGeneration`、`statusEpoch` 与 `baseGraphRevision`。`inputDigest/configDigest` 只绑定规范输入和
 有效 ignore/producer 语义，generation/revision 仅作为完整 CAS 栅栏。提交前重新采集 read-set；过期
@@ -122,6 +140,12 @@ patch digest，启动恢复会同 workspace digest、revision、真实 ownership
 snapshot 读取也使用单一只读事务，任一步失败整体回滚；WAL 第二读者只能在提交前看到旧 revision、
 提交后一次看到新 revision。WAL、foreign keys、
 `synchronous=NORMAL`、5000 ms busy timeout、未知高版本拒绝和故障副本规则继续保留。
+
+migration v3 仍保持精确八表，通过单事务表重建扩展封闭 node/edge/ownership CHECK：hierarchy 节点继续
+使用相对路径，外部 npm 节点使用版本化 purl，Node built-in 使用 `node:` 身份；关系允许
+`contains|imports|exports` 且唯一性包含 qualifier。结构化 Evidence 保存 AD-21 ID 所需字段并由
+`source:typescript:<fileId>` 唯一持有。重启恢复分别验证 hierarchy 树、source ownership、完整全图
+`targetGraphDigest`、Job/read-set/patch digest 与 workspace 摘要，不能用全图计数冒充 hierarchy 子图计数。
 
 “从未构建”仍为 `availability=absent`、`freshness=null`、`completeness=empty`、
 `committed=null`、`graphRevision=null`。真实提交为 available/current，partial、failed、cancelled 或

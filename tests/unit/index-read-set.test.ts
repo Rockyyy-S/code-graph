@@ -1,11 +1,18 @@
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
+import { createAnalyzerConfigSnapshot } from "../../packages/application/src/index.js";
 import { createInitialIgnoreState } from "../../apps/graph-service/src/ignore-bootstrap.js";
 import {
+  readAnalyzerCaptureMetricsForTests,
+  resetAnalyzerCaptureMetricsForTests,
+} from "../../apps/graph-service/src/analyzer-config.js";
+import {
+  createNativeWorkspaceChangeMonitor,
   createIndexReadSetProvider,
   isPotentialSemanticWorkspaceEvent,
   WorkspaceIgnoreConfigChangedError,
@@ -48,6 +55,525 @@ describe("index read-set provider", () => {
     expect(isPotentialSemanticWorkspaceEvent(".CodeGraphIgnore", "change")).toBe(true);
     expect(isPotentialSemanticWorkspaceEvent("dist/index.js", "rename")).toBe(true);
     expect(isPotentialSemanticWorkspaceEvent(undefined, "change")).toBe(true);
+  });
+
+  it("case-folds dynamic analyzer metadata paths on case-insensitive watchers", () => {
+    const metadataPaths = new Set(["configs/base.json"]);
+
+    expect(isPotentialSemanticWorkspaceEvent(
+      "Configs/Base.json",
+      "change",
+      "file",
+      metadataPaths,
+      false,
+    )).toBe(true);
+    expect(isPotentialSemanticWorkspaceEvent(
+      "Configs/Base.json",
+      "change",
+      "file",
+      metadataPaths,
+      true,
+    )).toBe(false);
+  });
+
+  it("CR8-001 uses TypeScript host identity for non-ASCII watcher paths", () => {
+    const metadataPaths = new Set([
+      "configs/Σ.json",
+      "configs/İ.json",
+    ]);
+
+    expect(isPotentialSemanticWorkspaceEvent(
+      "CONFIGS/σ.JSON",
+      "change",
+      "file",
+      metadataPaths,
+      false,
+    )).toBe(true);
+    expect(isPotentialSemanticWorkspaceEvent(
+      "configs/i\u0307.json",
+      "change",
+      "file",
+      metadataPaths,
+      false,
+    )).toBe(false);
+    expect(isPotentialSemanticWorkspaceEvent(
+      "CONFIGS/σ.JSON",
+      "change",
+      "file",
+      metadataPaths,
+      true,
+    )).toBe(false);
+  });
+
+  it("CR7-003 treats pnpm-workspace.yaml as a semantic watcher event and COMMIT-fenced root metadata", async () => {
+    expect(isPotentialSemanticWorkspaceEvent(
+      "pnpm-workspace.yaml",
+      "change",
+      "file",
+    )).toBe(true);
+
+    const root = await createRoot();
+    const workspacePath = path.join(root, "pnpm-workspace.yaml");
+    const original = "packages:\n  - packages/*\n";
+    await writeFile(workspacePath, original);
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("测试前置条件不成立。");}
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{
+        contentHash: createHash("sha256").update(original).digest("hex"),
+        path: "pnpm-workspace.yaml",
+      }],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const provider = createIndexReadSetProvider({
+      captureAnalyzerSemanticContext: async () => ({
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "3".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      statusEpoch: "epoch-cr7-003",
+    });
+    const expected = await provider.capture(null);
+    const commitMutation = vi.fn(() => {
+      writeFileSync(workspacePath, "packages:\n  - modules/*\n", "utf8");
+    });
+
+    expect(await runPreparedCommitFence(provider, expected.readSet, commitMutation)).toBe(false);
+    expect(commitMutation).toHaveBeenCalledTimes(1);
+    provider.close?.();
+  });
+
+  it("CR9-001 always installs root Analyzer metadata names into the native watcher", async () => {
+    const root = await createRoot();
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("测试前置条件不成立。");}
+    const setAnalyzerMetadataPaths = vi.fn(async () => undefined);
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const provider = createIndexReadSetProvider({
+      captureAnalyzerSemanticContext: async () => ({
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "4".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      createWorkspaceChangeMonitor: () => ({
+        close: () => undefined,
+        readSequence: () => 0n,
+        setAnalyzerMetadataPaths,
+      }),
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      statusEpoch: "epoch-cr9-001",
+      watchWorkspaceChanges: true,
+    });
+
+    await provider.capture(null);
+    expect(setAnalyzerMetadataPaths).toHaveBeenCalledWith(expect.arrayContaining([
+      "jsconfig.json",
+      "package-lock.json",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "tsconfig.json",
+      "yarn.lock",
+    ]), undefined);
+    provider.close?.();
+  });
+
+  it("CR6-003 case-folds consulted metadata in the main-thread classifier", async () => {
+    const root = await createRoot();
+    await mkdir(path.join(root, "Configs"), { recursive: true });
+    await writeFile(path.join(root, "Configs", "Base.json"), "{}\n");
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("测试前置条件不成立。");}
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{
+        contentHash: createHash("sha256").update("{}\n").digest("hex"),
+        path: "configs/base.json",
+      }],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    let notifyWorkspaceChanged!: (
+      relativePath?: string,
+      eventType?: "change" | "rename",
+    ) => void;
+    const onSemanticChange = vi.fn();
+    const provider = createIndexReadSetProvider({
+      caseSensitivePaths: false,
+      captureAnalyzerSemanticContext: async () => ({
+        caseSensitiveFileNames: false,
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "3".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      createWorkspaceChangeMonitor: (_indexingRoot, onChange) => {
+        notifyWorkspaceChanged = onChange;
+        return { close: vi.fn() };
+      },
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      statusEpoch: "epoch-cr6-003",
+      watchWorkspaceChanges: true,
+      workspaceChangeHandler: onSemanticChange,
+    });
+    const expected = await provider.capture(null);
+
+    notifyWorkspaceChanged("Configs/Base.json", "change");
+
+    expect(onSemanticChange).toHaveBeenCalledTimes(1);
+    expect(provider.isFenceCurrent?.(expected.readSet)).toBe(false);
+    provider.close?.();
+  });
+
+  const metadataAncestorRenameCases = [
+    {
+      label: "consulted metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        consultedFiles: [{
+          contentHash: "1".repeat(64),
+          path: "node_modules/pkg/package.json",
+        }],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+    {
+      label: "absent config metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        absentFiles: ["node_modules/pkg/tsconfig.json"],
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        consultedFiles: [],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+    {
+      label: "absent resolution metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        consultedFiles: [],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+    {
+      label: "blocked resolution metadata",
+      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
+        analyzerKind: "typescript",
+        analyzerVersion: "6.0.3",
+        blockedResolutionFiles: [{
+          contentHash: "2".repeat(64),
+          path: "node_modules/pkg/private.ts",
+        }],
+        consultedFiles: [],
+        effectiveCompilerOptions: {},
+        effectiveIgnore: { effectiveDigest, version: 1 },
+        workspacePackages: [],
+      }, { digest: sha256CanonicalJson }),
+    },
+  ] as const;
+
+  for (const metadataCase of metadataAncestorRenameCases) {
+    it(`CR11-007 immediately invalidates an ignored ancestor rename for ${metadataCase.label}`, async () => {
+      const root = await createRoot();
+      await writeFile(path.join(root, "index.ts"), "export const value = 1;\n");
+      await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+      const ignoreState = await createInitialIgnoreState(root);
+      if (ignoreState.kind !== "ready") {
+        throw new Error("测试前置条件不成立。");
+      }
+      const config = metadataCase.createConfig(ignoreState.snapshot.effectiveDigest);
+      let notifyWorkspaceChanged!: (
+        relativePath?: string,
+        eventType?: "change" | "rename",
+      ) => void;
+      const onSemanticChange = vi.fn();
+      const provider = createIndexReadSetProvider({
+        captureAnalyzerSemanticContext: async () => ({
+          configDigest: config.configDigest,
+          configSnapshot: config.snapshot,
+          configurationEntryPaths: [],
+          configurationFiles: [],
+          inputDigest: "3".repeat(64),
+          resolutionFiles: [],
+          sourceFiles: [],
+        }),
+        createWorkspaceChangeMonitor: (_indexingRoot, onChange) => {
+          notifyWorkspaceChanged = onChange;
+          return { close: vi.fn() };
+        },
+        ignoreSnapshot: ignoreState.snapshot,
+        indexingRoot: root,
+        statusEpoch: `epoch-cr11-007-${metadataCase.label.replaceAll(" ", "-")}`,
+        watchWorkspaceChanges: true,
+        workspaceChangeHandler: onSemanticChange,
+      });
+      const expected = await provider.capture(null);
+
+      try {
+        notifyWorkspaceChanged("node_modules/pkg", "rename");
+
+        expect(onSemanticChange).toHaveBeenCalledTimes(1);
+        expect(provider.isFenceCurrent?.(expected.readSet)).toBe(false);
+      } finally {
+        provider.close?.();
+        await provider.awaitPendingRenameVerification?.();
+      }
+    });
+  }
+
+  it("CR11-007 uses case-aware ancestor identity without crossing path segments", async () => {
+    const root = await createRoot();
+    await writeFile(path.join(root, "index.ts"), "export const value = 1;\n");
+    await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "pkg2"), { recursive: true });
+    const packageMetadata = "{}\n";
+    await writeFile(path.join(root, "node_modules", "pkg2", "package.json"), packageMetadata);
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {
+      throw new Error("测试前置条件不成立。");
+    }
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{
+        contentHash: createHash("sha256").update(packageMetadata).digest("hex"),
+        path: "NODE_MODULES/PKG2/package.json",
+      }],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    let notifyWorkspaceChanged!: (
+      relativePath?: string,
+      eventType?: "change" | "rename",
+    ) => void;
+    let scanCalls = 0;
+    const onSemanticChange = vi.fn();
+    const provider = createIndexReadSetProvider({
+      caseSensitivePaths: false,
+      captureAnalyzerSemanticContext: async () => ({
+        caseSensitiveFileNames: false,
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "5".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      createWorkspaceChangeMonitor: (_indexingRoot, onChange) => {
+        notifyWorkspaceChanged = onChange;
+        return { close: vi.fn() };
+      },
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      scan: async (options) => {
+        scanCalls += 1;
+        return scanWorkspace(options);
+      },
+      statusEpoch: "epoch-cr11-007-segment-boundary",
+      watchWorkspaceChanges: true,
+      workspaceChangeHandler: onSemanticChange,
+    });
+    const expected = await provider.capture(null);
+
+    try {
+      notifyWorkspaceChanged("node_modules/pkg", "rename");
+      await provider.awaitPendingRenameVerification?.();
+
+      expect(scanCalls).toBe(2);
+      expect(onSemanticChange).not.toHaveBeenCalled();
+      expect(provider.isFenceCurrent?.(expected.readSet)).toBe(true);
+
+      notifyWorkspaceChanged("node_modules/PKG2", "rename");
+      expect(onSemanticChange).toHaveBeenCalledTimes(1);
+      expect(provider.isFenceCurrent?.(expected.readSet)).toBe(false);
+    } finally {
+      provider.close?.();
+      await provider.awaitPendingRenameVerification?.();
+    }
+  });
+
+  it("keeps native raw events separate from non-semantic README changes", async () => {
+    const root = await createRoot();
+    const readmePath = path.join(root, "README.md");
+    await writeFile(readmePath, "before\n");
+    const errors: unknown[] = [];
+    const monitor = createNativeWorkspaceChangeMonitor(
+      root,
+      () => undefined,
+      (error) => errors.push(error),
+    );
+    try {
+      const rawBefore = monitor.readRawSequence?.() ?? 0n;
+      const semanticBefore = monitor.readSequence?.() ?? 0n;
+      await writeFile(readmePath, "after\n");
+      await vi.waitFor(() => {
+        expect(monitor.readRawSequence?.()).toBeGreaterThan(rawBefore);
+      });
+
+      expect(errors).toEqual([]);
+      expect(monitor.readSequence?.()).toBe(semanticBefore);
+    } finally {
+      monitor.close();
+    }
+  });
+
+  it("injects consulted and absent metadata paths into the native watcher semantic sequence", async () => {
+    const root = await createRoot();
+    await mkdir(path.join(root, "configs"), { recursive: true });
+    const consultedPath = path.join(root, "configs", "base.json");
+    const absentPath = path.join(root, "configs", "future.json");
+    await writeFile(consultedPath, "{}\n");
+    const errors: unknown[] = [];
+    const monitor = createNativeWorkspaceChangeMonitor(
+      root,
+      () => undefined,
+      (error) => errors.push(error),
+    );
+    try {
+      await monitor.setAnalyzerMetadataPaths?.(["configs/base.json", "configs/future.json"]);
+      const beforeConsulted = monitor.readSequence?.() ?? 0n;
+      await writeFile(consultedPath, '{"strict":true}\n');
+      await vi.waitFor(() => {
+        expect(monitor.readSequence?.()).toBeGreaterThan(beforeConsulted);
+      });
+
+      const beforeAbsentCreation = monitor.readSequence?.() ?? 0n;
+      await writeFile(absentPath, "{}\n");
+      await vi.waitFor(() => {
+        expect(monitor.readSequence?.()).toBeGreaterThan(beforeAbsentCreation);
+      });
+      expect(errors).toEqual([]);
+    } finally {
+      monitor.close();
+    }
+  });
+
+  it("rejects a metadata ACK request when close wins the race", async () => {
+    const root = await createRoot();
+    const monitor = createNativeWorkspaceChangeMonitor(root, () => undefined, () => undefined);
+    const pending = monitor.setAnalyzerMetadataPaths?.(["configs/pending.json"]);
+    if (pending === undefined) {throw new Error("metadata watcher 测试接口缺失。");}
+    monitor.close();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("removes metadata ACK listeners when the request signal aborts", async () => {
+    const root = await createRoot();
+    const monitor = createNativeWorkspaceChangeMonitor(root, () => undefined, () => undefined);
+    const controller = new AbortController();
+    const pending = monitor.setAnalyzerMetadataPaths?.(
+      ["configs/aborted.json"],
+      { signal: controller.signal, timeoutMs: 5_000 },
+    );
+    if (pending === undefined) {throw new Error("metadata watcher 测试接口缺失。");}
+    controller.abort();
+    try {
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      monitor.close();
+    }
+  });
+
+  it("rejects arbitrary consulted metadata changed inside the final commit window", async () => {
+    resetAnalyzerCaptureMetricsForTests();
+    const root = await createRoot();
+    await mkdir(path.join(root, "configs"), { recursive: true });
+    const metadataPath = path.join(root, "configs", "base.json");
+    const original = "{}\n";
+    await writeFile(metadataPath, original);
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("测试前置条件不成立。");}
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{
+        contentHash: createHash("sha256").update(original).digest("hex"),
+        path: "configs/base.json",
+      }],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: {
+        effectiveDigest: ignoreState.snapshot.effectiveDigest,
+        version: 1,
+      },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const provider = createIndexReadSetProvider({
+      captureAnalyzerSemanticContext: async () => ({
+        configDigest: config.configDigest,
+        configSnapshot: config.snapshot,
+        configurationEntryPaths: [],
+        configurationFiles: [],
+        inputDigest: "1".repeat(64),
+        resolutionFiles: [],
+        sourceFiles: [],
+      }),
+      ignoreSnapshot: ignoreState.snapshot,
+      indexingRoot: root,
+      statusEpoch: "epoch-read-set-arbitrary-metadata",
+      watchWorkspaceChanges: true,
+    });
+    try {
+      let expected = await provider.capture(null);
+      let prepared = await provider.prepareCommitFence(expected.readSet);
+      for (let attempt = 0; prepared === null && attempt < 4; attempt += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expected = await provider.capture(null);
+        prepared = await provider.prepareCommitFence(expected.readSet);
+      }
+      if (prepared === null) {throw new Error("测试前置条件不成立。");}
+      const hashedBeforeTransaction = readAnalyzerCaptureMetricsForTests()
+        .synchronousFenceBytesHashed;
+      const commitMutation = vi.fn(() => {
+        writeFileSync(metadataPath, '{"strict":true}\n', "utf8");
+      });
+
+      expect(provider.runCommitFence(expected.readSet, prepared, commitMutation)).toBe(false);
+      expect(commitMutation).toHaveBeenCalledTimes(1);
+      expect(readAnalyzerCaptureMetricsForTests().synchronousFenceBytesHashed)
+        .toBe(hashedBeforeTransaction);
+    } finally {
+      provider.close?.();
+    }
   });
 
   it("separates semantic digests from generation and base revision fences", async () => {

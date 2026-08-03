@@ -1,0 +1,46 @@
+[Unit]
+Description=CodeGraph HostPath snapshot-only privileged helper
+Documentation=file:/usr/share/doc/codegraph-host-path-helper/README.md
+Requires=codegraph-host-path-helper.socket
+After=local-fs.target
+ConditionPathExists=/etc/codegraph-host-path/client.key
+ConditionPathExists=/usr/share/codegraph-host-path/provenance.json
+ConditionPathExists=/usr/share/codegraph-host-path/release.pub
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/codegraph-host-path-daemon serve-v1 --socket /run/codegraph-host-path/helper.sock --key /etc/codegraph-host-path/client.key --provenance /usr/share/codegraph-host-path/provenance.json --public-key /usr/share/codegraph-host-path/release.pub
+User=root
+Group=codegraph-host-path
+UMask=0077
+RuntimeDirectory=codegraph-host-path
+RuntimeDirectoryMode=0750
+PrivateMounts=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+NoNewPrivileges=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/run/codegraph-host-path
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+SystemCallFilter=@system-service @mount
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillMode=mixed
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

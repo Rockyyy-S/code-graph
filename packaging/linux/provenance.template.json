@@ -1,0 +1,9 @@
+{
+  "bridgeBinarySha256": "RELEASE_BRIDGE_BINARY_SHA256",
+  "daemonBinarySha256": "RELEASE_DAEMON_BINARY_SHA256",
+  "manifestSha256": "CANONICAL_PAYLOAD_SHA256",
+  "schemaVersion": 2,
+  "signature": "ED25519_SIGNATURE_HEX",
+  "signatureKeyId": "codegraph-linux-release-1",
+  "signerId": "codegraph-release-key-1"
+}

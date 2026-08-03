@@ -1,0 +1,23 @@
+{
+  "name": "@codegraph/adapter-host-path-posix-native",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "codegraph": {
+    "role": "adapter"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./linux-helper": {
+      "types": "./dist/linux-helper.d.ts",
+      "default": "./dist/linux-helper.js"
+    }
+  },
+  "scripts": {
+    "type": "tsc -b tsconfig.build.json --pretty false",
+    "build": "tsc -p tsconfig.build.json"
+  }
+}
