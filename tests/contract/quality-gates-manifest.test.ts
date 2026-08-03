@@ -209,14 +209,14 @@ describe("quality-gates.v1 registry", () => {
       contractTests: ["tests/contract/graph-service-process.test.ts"],
       unitShards: [
         {
-          expectedTestCount: 257,
+          expectedTestCount: 272,
           shardId: "default-unit",
           tests: originalUnitTests.filter(
             (testPath) => testPath !== "tests/unit/sqlite-module-dependencies.test.ts",
           ),
         },
         {
-          expectedTestCount: 24,
+          expectedTestCount: 25,
           shardId: "sqlite-module-dependencies",
           tests: ["tests/unit/sqlite-module-dependencies.test.ts"],
         },
@@ -233,7 +233,7 @@ describe("quality-gates.v1 registry", () => {
     expect(new Set(unitTests).size).toBe(unitTests.length);
     expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
     expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(281);
+      .toBe(297);
   });
 
   it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {

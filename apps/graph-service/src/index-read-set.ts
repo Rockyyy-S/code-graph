@@ -8,6 +8,7 @@ import {
   isSupportedSourceFile,
   normalizeHostPathIdentity,
   normalizeRelativeGraphPath,
+  type AnalyzerConfigFenceSnapshotV1,
   type AnalyzerConfigSnapshotV1,
   type HierarchyReadSetV1,
 } from "@codegraph/application";
@@ -403,9 +404,9 @@ export function createIndexReadSetProvider(
       await monitor?.setAnalyzerMetadataPaths?.([
         ...ANALYZER_ROOT_METADATA_PATHS,
         ...analyzerContext.configSnapshot.consultedFiles.map((file) => file.path),
-        ...(analyzerContext.configSnapshot.absentFiles ?? []),
-        ...(analyzerContext.configSnapshot.absentResolutionFiles ?? []),
-        ...(analyzerContext.configSnapshot.blockedResolutionFiles ?? [])
+        ...analyzerContext.configFenceSnapshot.absentFiles,
+        ...analyzerContext.configFenceSnapshot.absentResolutionFiles,
+        ...analyzerContext.configFenceSnapshot.blockedResolutionFiles
           .map((file) => file.path),
       ], signal === undefined ? undefined : { signal });
       assertMonitorHealthy(monitorError);
@@ -424,6 +425,7 @@ export function createIndexReadSetProvider(
       sha256CanonicalJson({ manifest: scanResult.manifest });
     const readSet: HierarchyReadSetV1 = Object.freeze({
       ...(analyzerContext === undefined ? {} : {
+        analyzerConfigFenceSnapshot: analyzerContext.configFenceSnapshot,
         analyzerConfigSnapshot: analyzerContext.configSnapshot,
       }),
       baseGraphRevision,
@@ -1098,10 +1100,10 @@ function isAnalyzerMetadataPath(
     return true;
   }
   const snapshot = readSet?.analyzerConfigSnapshot;
-  if (typeof snapshot !== "object" || snapshot === null || !("consultedFiles" in snapshot)) {
-    return false;
-  }
-  const consultedFiles = (snapshot as { consultedFiles?: unknown }).consultedFiles;
+  const consultedFiles = typeof snapshot === "object" && snapshot !== null &&
+      "consultedFiles" in snapshot
+    ? (snapshot as { consultedFiles?: unknown }).consultedFiles
+    : undefined;
   if (Array.isArray(consultedFiles) && consultedFiles.some((entry) =>
     typeof entry === "object" && entry !== null && "path" in entry &&
     typeof (entry as { path?: unknown }).path === "string" &&
@@ -1112,19 +1114,21 @@ function isAnalyzerMetadataPath(
     ))) {
     return true;
   }
-  const absentFiles = (snapshot as { absentFiles?: unknown }).absentFiles;
+  const fenceSnapshot = readSet?.analyzerConfigFenceSnapshot;
+  if (typeof fenceSnapshot !== "object" || fenceSnapshot === null) {return false;}
+  const absentFiles = (fenceSnapshot as { absentFiles?: unknown }).absentFiles;
   if (Array.isArray(absentFiles) && absentFiles.some((entry) => typeof entry === "string" &&
     isTrackedMetadataPathAtOrBelow(entry, normalizedKey, caseSensitivePaths))) {
     return true;
   }
-  const absentResolutionFiles = (snapshot as { absentResolutionFiles?: unknown })
+  const absentResolutionFiles = (fenceSnapshot as { absentResolutionFiles?: unknown })
     .absentResolutionFiles;
   if (Array.isArray(absentResolutionFiles) &&
     absentResolutionFiles.some((entry) => typeof entry === "string" &&
       isTrackedMetadataPathAtOrBelow(entry, normalizedKey, caseSensitivePaths))) {
     return true;
   }
-  const blockedResolutionFiles = (snapshot as { blockedResolutionFiles?: unknown })
+  const blockedResolutionFiles = (fenceSnapshot as { blockedResolutionFiles?: unknown })
     .blockedResolutionFiles;
   return Array.isArray(blockedResolutionFiles) && blockedResolutionFiles.some((entry) =>
     typeof entry === "object" && entry !== null && "path" in entry &&
@@ -1149,11 +1153,14 @@ function isAnalyzerConfigCurrent(
   readSet: HierarchyReadSetV1,
 ): boolean {
   const snapshot = readSet.analyzerConfigSnapshot;
-  if (snapshot === undefined) {return true;}
-  if (typeof snapshot !== "object" || snapshot === null) {return false;}
+  const fenceSnapshot = readSet.analyzerConfigFenceSnapshot;
+  if (snapshot === undefined && fenceSnapshot === undefined) {return true;}
+  if (typeof snapshot !== "object" || snapshot === null ||
+    typeof fenceSnapshot !== "object" || fenceSnapshot === null) {return false;}
   return verifyAnalyzerConfigSnapshotSynchronously(
     indexingRoot,
     snapshot as AnalyzerConfigSnapshotV1,
+    fenceSnapshot as AnalyzerConfigFenceSnapshotV1,
   );
 }
 
@@ -1163,11 +1170,14 @@ function prepareAnalyzerFence(
   readSet: HierarchyReadSetV1,
 ): PreparedAnalyzerConfigFenceV1 | null | false {
   const snapshot = readSet.analyzerConfigSnapshot;
-  if (snapshot === undefined) {return null;}
-  if (typeof snapshot !== "object" || snapshot === null) {return false;}
+  const fenceSnapshot = readSet.analyzerConfigFenceSnapshot;
+  if (snapshot === undefined && fenceSnapshot === undefined) {return null;}
+  if (typeof snapshot !== "object" || snapshot === null ||
+    typeof fenceSnapshot !== "object" || fenceSnapshot === null) {return false;}
   return prepareAnalyzerConfigFenceSynchronously(
     indexingRoot,
     snapshot as AnalyzerConfigSnapshotV1,
+    fenceSnapshot as AnalyzerConfigFenceSnapshotV1,
   ) ?? false;
 }
 
@@ -1178,11 +1188,14 @@ function isPreparedAnalyzerFenceCurrent(
   prepared: PreparedAnalyzerConfigFenceV1 | null,
 ): boolean {
   const snapshot = readSet.analyzerConfigSnapshot;
-  if (snapshot === undefined) {return prepared === null;}
+  const fenceSnapshot = readSet.analyzerConfigFenceSnapshot;
+  if (snapshot === undefined && fenceSnapshot === undefined) {return prepared === null;}
   return prepared !== null && typeof snapshot === "object" && snapshot !== null &&
+    typeof fenceSnapshot === "object" && fenceSnapshot !== null &&
     verifyPreparedAnalyzerConfigFenceSynchronously(
       indexingRoot,
       snapshot as AnalyzerConfigSnapshotV1,
+      fenceSnapshot as AnalyzerConfigFenceSnapshotV1,
       prepared,
     );
 }

@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES } from "@codegraph/application";
 import {
   captureHostPathPosixNativeV1,
   isValidatedHostPathPosixCapabilityV1,
@@ -13,7 +14,7 @@ import {
 } from "@codegraph/adapter-host-path-posix-native";
 
 export const DEFAULT_MAX_HOST_PATH_CANDIDATES = 256;
-export const MAX_HOST_PATH_CANDIDATES = 6_144;
+export const MAX_HOST_PATH_CANDIDATES = MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES;
 export const DEFAULT_MAX_HOST_PATH_LOGICAL_BYTES = 4096;
 export const MAX_HOST_PATH_LOGICAL_BYTES = 16 * 1024;
 export const DEFAULT_MAX_HOST_PATH_ABSOLUTE_BYTES = 32 * 1024;

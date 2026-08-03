@@ -29,6 +29,8 @@ export interface EffectiveIgnoreReadSetV1 {
 
 /** hierarchy Job 捕获的完整 read-set；generation/revision 只承担并发栅栏职责。 */
 export interface HierarchyReadSetV1 {
+  /** Analyzer watcher/CAS 的独立 fence 状态，不属于 configDigest 语义身份。 */
+  analyzerConfigFenceSnapshot?: unknown;
   analyzerConfigSnapshot?: unknown;
   baseGraphRevision: number | null;
   bootstrapGeneration: number;

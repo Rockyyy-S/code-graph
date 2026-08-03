@@ -7,6 +7,14 @@ import type { AnalyzerConfigSnapshotV1 } from "../indexing/analyzer-config-snaps
 import type { ModuleRelationSeedV1 } from "../indexing/module-fact-batch.js";
 
 /**
+ * Analyzer host identity sidecar 的唯一条目数权威。
+ *
+ * producer、graph-service 组合根、Analyzer parent 与 Worker 必须共同引用本值，确保合法的
+ * 5000 源码加解析元数据工作区不会在基础设施边界被更低的独立预算拒绝。
+ */
+export const MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES = 6_144;
+
+/**
  * 仅用于扩展名、保留目录名等 ASCII 协议文本比较。
  *
  * 现存宿主路径是否指向同一对象必须消费 `AnalyzerHostPathIdentitySidecarV1`，不得把本函数

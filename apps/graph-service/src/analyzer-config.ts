@@ -11,6 +11,7 @@ import {
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import {
+  createAnalyzerConfigFenceSnapshot,
   createAnalyzerConfigSnapshot,
   createAnalyzerInputDigest,
   AnalyzerFailureError,
@@ -19,6 +20,7 @@ import {
   normalizeHostPathIdentity,
   normalizeRelativeGraphPath,
   type AnalyzerByteFileV1,
+  type AnalyzerConfigFenceSnapshotV1,
   type AnalyzerConfigSnapshotV1,
   type AnalyzerHostPathIdentitySidecarV1,
   type AnalyzerPort,
@@ -109,6 +111,8 @@ export interface PreparedAnalyzerConfigFenceV1 {
 export interface PreparedAnalyzerContextV1 {
   caseSensitiveFileNames?: boolean;
   configDigest: string;
+  /** watcher、持久 read-set 与提交 CAS 独占的非语义路径状态。 */
+  configFenceSnapshot: AnalyzerConfigFenceSnapshotV1;
   configSnapshot: AnalyzerConfigSnapshotV1;
   configurationEntryPaths: readonly string[];
   configurationFiles: readonly AnalyzerByteFileV1[];
@@ -161,21 +165,23 @@ export type CaptureAnalyzerSemanticContext = (
 export function verifyAnalyzerConfigSnapshotSynchronously(
   indexingRoot: string,
   snapshot: AnalyzerConfigSnapshotV1,
+  fenceSnapshot: AnalyzerConfigFenceSnapshotV1,
 ): boolean {
-  return prepareAnalyzerConfigFenceSynchronously(indexingRoot, snapshot) !== null;
+  return prepareAnalyzerConfigFenceSynchronously(indexingRoot, snapshot, fenceSnapshot) !== null;
 }
 
 /** 事务外流式复核全部 Analyzer 文件字节并保存有界身份。 */
 export function prepareAnalyzerConfigFenceSynchronously(
   indexingRoot: string,
   snapshot: AnalyzerConfigSnapshotV1,
+  fenceSnapshot: AnalyzerConfigFenceSnapshotV1,
 ): PreparedAnalyzerConfigFenceV1 | null {
   try {
     const files: AnalyzerFileIdentityProofV1[] = [];
     for (const [entry, maximumBytes] of [
       ...snapshot.consultedFiles.map((file) =>
         [file, MAX_ANALYZER_METADATA_FILE_BYTES] as const),
-      ...(snapshot.blockedResolutionFiles ?? []).map((file) =>
+      ...fenceSnapshot.blockedResolutionFiles.map((file) =>
         [file, MAX_SOURCE_FILE_BYTES] as const),
     ]) {
       const logicalPath = normalizeRelativeGraphPath(entry.path);
@@ -221,8 +227,8 @@ export function prepareAnalyzerConfigFenceSynchronously(
       }
     }
     for (const absentPath of [
-      ...(snapshot.absentFiles ?? []),
-      ...(snapshot.absentResolutionFiles ?? []),
+      ...fenceSnapshot.absentFiles,
+      ...fenceSnapshot.absentResolutionFiles,
     ]) {
       const logicalPath = normalizeRelativeGraphPath(absentPath);
       if (logicalPath !== absentPath) {return null;}
@@ -236,8 +242,8 @@ export function prepareAnalyzerConfigFenceSynchronously(
     }
     return Object.freeze({
       absentPaths: Object.freeze([
-        ...(snapshot.absentFiles ?? []),
-        ...(snapshot.absentResolutionFiles ?? []),
+        ...fenceSnapshot.absentFiles,
+        ...fenceSnapshot.absentResolutionFiles,
       ]),
       files: Object.freeze(files),
     });
@@ -250,13 +256,14 @@ export function prepareAnalyzerConfigFenceSynchronously(
 export function verifyPreparedAnalyzerConfigFenceSynchronously(
   indexingRoot: string,
   snapshot: AnalyzerConfigSnapshotV1,
+  fenceSnapshot: AnalyzerConfigFenceSnapshotV1,
   prepared: PreparedAnalyzerConfigFenceV1,
 ): boolean {
   try {
     const expectedFiles = [
       ...snapshot.consultedFiles.map((file) =>
         [file.path, MAX_ANALYZER_METADATA_FILE_BYTES] as const),
-      ...(snapshot.blockedResolutionFiles ?? []).map((file) =>
+      ...fenceSnapshot.blockedResolutionFiles.map((file) =>
         [file.path, MAX_SOURCE_FILE_BYTES] as const),
     ];
     if (prepared.files.length !== expectedFiles.length) {return false;}
@@ -273,8 +280,8 @@ export function verifyPreparedAnalyzerConfigFenceSynchronously(
       }
     }
     const expectedAbsent = [
-      ...(snapshot.absentFiles ?? []),
-      ...(snapshot.absentResolutionFiles ?? []),
+      ...fenceSnapshot.absentFiles,
+      ...fenceSnapshot.absentResolutionFiles,
     ];
     if (prepared.absentPaths.length !== expectedAbsent.length ||
       prepared.absentPaths.some((entry, index) => entry !== expectedAbsent[index])) {
@@ -550,6 +557,15 @@ export function createAnalyzerSemanticContextCapture(options: {
     const created = createAnalyzerConfigSnapshot({
       analyzerKind: "typescript",
       analyzerVersion: "6.0.3",
+      consultedFiles,
+      effectiveCompilerOptions: observation.effectiveCompilerOptions,
+      effectiveIgnore: {
+        effectiveDigest: options.effectiveIgnoreSnapshot.effectiveDigest,
+        version: 1,
+      },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const configFenceSnapshot = createAnalyzerConfigFenceSnapshot({
       absentFiles: requiredMissingFiles,
       absentResolutionFiles: [
         ...absentRootMetadataPaths,
@@ -561,14 +577,8 @@ export function createAnalyzerSemanticContextCapture(options: {
         contentHash: file.contentHash,
         path: file.path,
       })),
-      consultedFiles,
-      effectiveCompilerOptions: observation.effectiveCompilerOptions,
-      effectiveIgnore: {
-        effectiveDigest: options.effectiveIgnoreSnapshot.effectiveDigest,
-        version: 1,
-      },
-      workspacePackages: [],
-    }, { digest: sha256CanonicalJson });
+      consultedFiles: created.snapshot.consultedFiles,
+    });
     const inputDigest = createAnalyzerInputDigest({
       analyzerKind: "typescript",
       configDigest: created.configDigest,
@@ -577,6 +587,7 @@ export function createAnalyzerSemanticContextCapture(options: {
     return Object.freeze({
       caseSensitiveFileNames,
       configDigest: created.configDigest,
+      configFenceSnapshot,
       configSnapshot: created.snapshot,
       configurationEntryPaths,
       configurationFiles,

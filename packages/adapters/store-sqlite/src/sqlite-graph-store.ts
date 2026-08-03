@@ -10,6 +10,7 @@ import {
   HIERARCHY_PRODUCER_VERSION,
   type AtomicGraphCommitResult,
   type AtomicGraphUpdate,
+  type AnalyzerConfigFenceSnapshotV1,
   type AnalyzerConfigSnapshotV1,
   type CanonicalDigestPort,
   type CreateStoredIndexJobInput,
@@ -2881,8 +2882,10 @@ function parsePersistedGraphReadSet(
   }
   const hasCompositeDigest = "targetGraphDigest" in value;
   const hasAnalyzerSnapshot = "analyzerConfigSnapshot" in value;
-  if (hasCompositeDigest !== hasAnalyzerSnapshot) {
-    throw new Error("持久化 composite read-set 缺少 Analyzer 或目标图摘要。");
+  const hasAnalyzerFenceSnapshot = "analyzerConfigFenceSnapshot" in value;
+  if (hasCompositeDigest !== hasAnalyzerSnapshot ||
+    hasCompositeDigest !== hasAnalyzerFenceSnapshot) {
+    throw new Error("持久化 composite read-set 缺少 Analyzer 语义、fence 或目标图摘要。");
   }
   if (hasCompositeDigest) {
     if (!isSha256Digest(value.targetGraphDigest)) {
@@ -2891,6 +2894,10 @@ function parsePersistedGraphReadSet(
     validatePersistedAnalyzerConfigSnapshot(
       value.analyzerConfigSnapshot,
       ignore.effectiveDigest as string,
+    );
+    validatePersistedAnalyzerConfigFenceSnapshot(
+      value.analyzerConfigFenceSnapshot,
+      value.analyzerConfigSnapshot as AnalyzerConfigSnapshotV1,
     );
   }
   return value as unknown as HierarchyReadSetV1 | CompositeGraphReadSetV1;
@@ -2903,6 +2910,15 @@ function validatePersistedAnalyzerConfigSnapshot(
 ): asserts snapshot is AnalyzerConfigSnapshotV1 {
   if (
     !isRecord(snapshot) || snapshot.version !== 1 || snapshot.analyzerKind !== "typescript" ||
+    !hasExactObjectKeys(snapshot, [
+      "analyzerKind",
+      "analyzerVersion",
+      "consultedFiles",
+      "effectiveCompilerOptions",
+      "effectiveIgnore",
+      "version",
+      "workspacePackages",
+    ]) ||
     typeof snapshot.analyzerVersion !== "string" || snapshot.analyzerVersion.length === 0 ||
     !isRecord(snapshot.effectiveCompilerOptions) || !isRecord(snapshot.effectiveIgnore) ||
     snapshot.effectiveIgnore.version !== 1 ||
@@ -2912,30 +2928,53 @@ function validatePersistedAnalyzerConfigSnapshot(
     throw new Error("持久化 AnalyzerConfigSnapshotV1 形状不合法。");
   }
   assertSortedDigestPaths(snapshot.consultedFiles, "consultedFiles");
-  const existingPaths = new Set(snapshot.consultedFiles.map((entry) =>
-    (entry as { path: string }).path));
-  if (snapshot.blockedResolutionFiles !== undefined) {
-    if (!Array.isArray(snapshot.blockedResolutionFiles)) {
-      throw new Error("持久化 Analyzer blockedResolutionFiles 形状不合法。");
+  if (snapshot.consultedFiles.some((entry) =>
+    isReservedAnalyzerRulesPath((entry as { path: string }).path))) {
+    throw new Error("持久化 AnalyzerConfigSnapshotV1 不得包含 rules.yaml。");
+  }
+  let previousRoot: string | null = null;
+  for (const entry of snapshot.workspacePackages) {
+    if (
+      !isRecord(entry) || typeof entry.name !== "string" || entry.name.length === 0 ||
+      typeof entry.root !== "string" || entry.root.length === 0 ||
+      (previousRoot !== null && previousRoot >= entry.root)
+    ) {
+      throw new Error("持久化 workspacePackages 未按规范 root 唯一排序。");
     }
-    assertSortedDigestPaths(snapshot.blockedResolutionFiles, "blockedResolutionFiles");
-    for (const entry of snapshot.blockedResolutionFiles) {
-      const blockedPath = (entry as { path: string }).path;
-      if (existingPaths.has(blockedPath)) {
-        throw new Error("持久化 Analyzer existing/blocked 路径集合不互斥。");
-      }
-      existingPaths.add(blockedPath);
+    previousRoot = entry.root;
+  }
+}
+
+/** 持久 fence 快照保持封闭字段、规范排序及与七字段语义快照的集合互斥。 */
+function validatePersistedAnalyzerConfigFenceSnapshot(
+  fenceSnapshot: unknown,
+  snapshot: AnalyzerConfigSnapshotV1,
+): asserts fenceSnapshot is AnalyzerConfigFenceSnapshotV1 {
+  if (!isRecord(fenceSnapshot) || fenceSnapshot.version !== 1 ||
+    !hasExactObjectKeys(fenceSnapshot, [
+      "absentFiles",
+      "absentResolutionFiles",
+      "blockedResolutionFiles",
+      "version",
+    ]) || !Array.isArray(fenceSnapshot.absentFiles) ||
+    !Array.isArray(fenceSnapshot.absentResolutionFiles) ||
+    !Array.isArray(fenceSnapshot.blockedResolutionFiles)) {
+    throw new Error("持久化 AnalyzerConfigFenceSnapshotV1 形状不合法。");
+  }
+  assertSortedDigestPaths(fenceSnapshot.blockedResolutionFiles, "blockedResolutionFiles");
+  const existingPaths = new Set(snapshot.consultedFiles.map((entry) => entry.path));
+  for (const entry of fenceSnapshot.blockedResolutionFiles) {
+    const blockedPath = (entry as { path: string }).path;
+    if (existingPaths.has(blockedPath)) {
+      throw new Error("持久化 Analyzer existing/blocked 路径集合不互斥。");
     }
+    existingPaths.add(blockedPath);
   }
   const absentPaths = new Set<string>();
   for (const [label, value] of [
-    ["absentFiles", snapshot.absentFiles],
-    ["absentResolutionFiles", snapshot.absentResolutionFiles],
+    ["absentFiles", fenceSnapshot.absentFiles],
+    ["absentResolutionFiles", fenceSnapshot.absentResolutionFiles],
   ] as const) {
-    if (value === undefined) {continue;}
-    if (!Array.isArray(value)) {
-      throw new Error(`持久化 Analyzer ${label} 形状不合法。`);
-    }
     let previousAbsentPath: string | null = null;
     for (const absentPath of value) {
       if (
@@ -2949,16 +2988,23 @@ function validatePersistedAnalyzerConfigSnapshot(
       previousAbsentPath = absentPath;
     }
   }
-  let previousRoot: string | null = null;
-  for (const entry of snapshot.workspacePackages) {
-    if (
-      !isRecord(entry) || typeof entry.root !== "string" || entry.root.length === 0 ||
-      (previousRoot !== null && previousRoot >= entry.root)
-    ) {
-      throw new Error("持久化 workspacePackages 未按规范 root 唯一排序。");
-    }
-    previousRoot = entry.root;
+  if ([
+    ...existingPaths,
+    ...absentPaths,
+  ].some(isReservedAnalyzerRulesPath)) {
+    throw new Error("持久化 AnalyzerConfigFenceSnapshotV1 不得包含 rules.yaml。");
   }
+}
+
+/** 持久协议对象拒绝额外字段，避免 fence 状态重新漂入语义摘要。 */
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  return JSON.stringify(Object.keys(value).sort(compareCanonicalGraphText)) ===
+    JSON.stringify([...expected].sort(compareCanonicalGraphText));
+}
+
+/** rules.yaml 由规则 Story 独占，不得进入 Analyzer 语义或 fence 快照。 */
+function isReservedAnalyzerRulesPath(logicalPath: string): boolean {
+  return logicalPath.split("/").at(-1)?.toLowerCase() === "rules.yaml";
 }
 
 /** 配置文件集合必须按 path 唯一排序并携带 SHA-256。 */
@@ -3040,8 +3086,12 @@ function countsModuleFacts(database: Database.Database, workspaceKey: string): b
 /** 运行时与恢复验证共享 CompositeGraphReadSetV1 判定。 */
 function isCompositeGraphReadSet(
   readSet: HierarchyReadSetV1 | CompositeGraphReadSetV1,
-): readSet is CompositeGraphReadSetV1 & { analyzerConfigSnapshot: AnalyzerConfigSnapshotV1 } {
-  return "targetGraphDigest" in readSet && "analyzerConfigSnapshot" in readSet;
+): readSet is CompositeGraphReadSetV1 & {
+  analyzerConfigFenceSnapshot: AnalyzerConfigFenceSnapshotV1;
+  analyzerConfigSnapshot: AnalyzerConfigSnapshotV1;
+} {
+  return "targetGraphDigest" in readSet && "analyzerConfigSnapshot" in readSet &&
+    "analyzerConfigFenceSnapshot" in readSet;
 }
 
 /** Evidence 观察时间不进入目标语义图摘要。 */

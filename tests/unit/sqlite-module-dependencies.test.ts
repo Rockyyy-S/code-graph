@@ -7,6 +7,7 @@ import {
   buildCompositeGraphPatch,
   buildHierarchyFactBatch,
   buildModuleSourceFactBatch,
+  createAnalyzerConfigFenceSnapshot,
   createAnalyzerConfigSnapshot,
   createAnalyzerInputDigest,
 } from "../../packages/application/src/index.js";
@@ -74,6 +75,10 @@ async function createDatabasePath(): Promise<string> {
 function createPatch(
   snapshot: ReturnType<Awaited<ReturnType<typeof openSqliteGraphStore>>["readCommittedSnapshot"]>,
   detectedAt: string,
+  fenceInput: Omit<
+    Parameters<typeof createAnalyzerConfigFenceSnapshot>[0],
+    "consultedFiles"
+  > = {},
 ) {
   const manifest = [{ contentHash: "1".repeat(64), path: "src/index.ts" }] as const;
   const analyzerConfig = createAnalyzerConfigSnapshot({
@@ -84,12 +89,17 @@ function createPatch(
     effectiveIgnore: { effectiveDigest: "4".repeat(64), version: 1 },
     workspacePackages: [],
   }, digestPort);
+  const analyzerConfigFence = createAnalyzerConfigFenceSnapshot({
+    ...fenceInput,
+    consultedFiles: analyzerConfig.snapshot.consultedFiles,
+  });
   const inputDigest = createAnalyzerInputDigest({
     analyzerKind: "typescript",
     configDigest: analyzerConfig.configDigest,
     inputs: manifest,
   }, digestPort);
   const readSet: HierarchyReadSetV1 = {
+    analyzerConfigFenceSnapshot: analyzerConfigFence,
     analyzerConfigSnapshot: analyzerConfig.snapshot,
     baseGraphRevision: snapshot.graphRevision,
     bootstrapGeneration: 0,
@@ -151,6 +161,69 @@ function createPatch(
 }
 
 describe("Story 1.5 SQLite module dependency storage", () => {
+  it("DIAGNOSIS23 S2 persists fence state while keeping it outside recovered configDigest", async () => {
+    const databasePath = await createDatabasePath();
+    const store = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
+    const snapshot = store.readCommittedSnapshot();
+    const baseline = createPatch(snapshot, "2026-07-27T00:00:00.000Z");
+    const variants = [
+      createPatch(snapshot, "2026-07-27T00:00:00.000Z", {
+        absentFiles: ["configs/base.json"],
+      }),
+      createPatch(snapshot, "2026-07-27T00:00:00.000Z", {
+        absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
+      }),
+      createPatch(snapshot, "2026-07-27T00:00:00.000Z", {
+        blockedResolutionFiles: [{
+          contentHash: "5".repeat(64),
+          path: "src/blocked.ts",
+        }],
+      }),
+    ];
+    for (const variant of variants) {
+      expect(variant.readSet.configDigest).toBe(baseline.readSet.configDigest);
+      expect(variant.readSet.analyzerConfigFenceSnapshot).toBeDefined();
+    }
+
+    const patch = variants[2]!;
+    store.createJob({
+      baseGraphRevision: null,
+      id: "fence-recovery",
+      kind: "initial-index",
+      requestedAt: "2026-07-27T00:00:00.000Z",
+    });
+    store.markJobRunning("fence-recovery", "2026-07-27T00:00:00.000Z");
+    store.commitAtomicGraphUpdate({
+      completedAt: "2026-07-27T00:00:01.000Z",
+      expectedSnapshot: snapshot,
+      finalReadSetFence: (commit) => {commit(); return true;},
+      jobId: "fence-recovery",
+      patch,
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: patch.targetEdgeCount,
+        excludedPathCount: 0,
+        generatedAt: "2026-07-27T00:00:01.000Z",
+        indexedFileCount: 1,
+        nodeCount: patch.targetNodeCount,
+      },
+    });
+    store.close();
+
+    const database = new RawSqlite(databasePath);
+    const persisted = database.prepare("SELECT read_set_json FROM jobs WHERE id = ?")
+      .get("fence-recovery") as { read_set_json: string };
+    const readSet = JSON.parse(persisted.read_set_json) as HierarchyReadSetV1;
+    expect(readSet.analyzerConfigFenceSnapshot).toEqual(
+      patch.readSet.analyzerConfigFenceSnapshot,
+    );
+    database.close();
+
+    const reopened = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
+    expect(reopened.readCommittedSnapshot().graphRevision).toBe(1);
+    reopened.close();
+  });
+
   it("tokenizes CHECK only outside SQL comments, quoted identifiers and token substrings", () => {
     const ddl = `
       CREATE TABLE sample (

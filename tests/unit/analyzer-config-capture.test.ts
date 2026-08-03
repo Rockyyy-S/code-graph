@@ -11,6 +11,7 @@ import type {
   AnalyzerPort,
 } from "../../packages/application/src/index.js";
 import {
+  createAnalyzerConfigFenceSnapshot,
   createAnalyzerConfigSnapshot,
   createAnalyzerInputDigest,
 } from "../../packages/application/src/index.js";
@@ -318,7 +319,11 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     await writeFile(workspacePath, "packages:\n  - modules/*\n");
     const after = await capture(scanResult);
     expect(after.configDigest).not.toBe(before.configDigest);
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, before.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      before.configSnapshot,
+      before.configFenceSnapshot,
+    ))
       .toBe(false);
   });
 
@@ -350,7 +355,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       sourceFiles: [],
     });
 
-    expect(context.configSnapshot.absentResolutionFiles).toEqual([
+    expect(context.configFenceSnapshot.absentResolutionFiles).toEqual([
       "jsconfig.json",
       "package-lock.json",
       "package.json",
@@ -360,7 +365,11 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       "yarn.lock",
     ]);
     await writeFile(path.join(indexingRoot, "package.json"), "{}\n");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(false);
   });
 
@@ -381,13 +390,16 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       const created = createAnalyzerConfigSnapshot({
         analyzerKind: "typescript",
         analyzerVersion: "6.0.3",
-        blockedResolutionFiles: kind === "blocked" ? [file] : [],
         consultedFiles: kind === "consulted" ? [file] : [],
         effectiveCompilerOptions: {},
         effectiveIgnore: { effectiveDigest: "a".repeat(64), version: 1 },
         workspacePackages: [],
       }, { digest: sha256CanonicalJson });
-      return verifyAnalyzerConfigSnapshotSynchronously(root, created.snapshot);
+      const fenceSnapshot = createAnalyzerConfigFenceSnapshot({
+        blockedResolutionFiles: kind === "blocked" ? [file] : [],
+        consultedFiles: created.snapshot.consultedFiles,
+      });
+      return verifyAnalyzerConfigSnapshotSynchronously(root, created.snapshot, fenceSnapshot);
     };
 
     expect(await verify("consulted-max.json", MAX_ANALYZER_METADATA_FILE_BYTES, "consulted"))
@@ -518,10 +530,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
 
     const [expected, ...permutations] = captures;
     if (expected === undefined) {throw new Error("blocked alias 预算回归缺少基准捕获。");}
-    const expectedBlockedFiles = expected.configSnapshot.blockedResolutionFiles;
-    if (expectedBlockedFiles === undefined) {
-      throw new Error("blocked alias 预算回归缺少封口文件。");
-    }
+    const expectedBlockedFiles = expected.configFenceSnapshot.blockedResolutionFiles;
     expect(expectedBlockedFiles.map((file) => file.path)).toEqual([
       "src/ALIAS.ts",
       uniquePath,
@@ -530,7 +539,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       Object.keys(file).sort().join(",") === "contentHash,path")).toBe(true);
     for (const capture of permutations) {
       expect(capture.configDigest).toBe(expected.configDigest);
-      expect(capture.configSnapshot.blockedResolutionFiles)
+      expect(capture.configFenceSnapshot.blockedResolutionFiles)
         .toEqual(expectedBlockedFiles);
     }
   }, 30_000);
@@ -1319,7 +1328,7 @@ describe("Story 1.5 Analyzer configuration capture", () => {
         return null;
       },
     })(scanResult);
-    expect(context.configSnapshot.absentResolutionFiles).toContain(candidate);
+    expect(context.configFenceSnapshot.absentResolutionFiles).toContain(candidate);
 
     await expect(createAnalyzerSemanticContextCapture({
       analyzer,
@@ -1488,13 +1497,21 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       "node_modules/example/package.json",
       "tsconfig.json",
     ]);
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(true);
     await writeFile(
       path.join(indexingRoot, "node_modules", "example", "package.json"),
       JSON.stringify({ name: "example", types: "index.d.ts", version: "2.0.0" }),
     );
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(false);
   });
 
@@ -1525,12 +1542,20 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       sourceFiles: [],
     });
 
-    expect(context.configSnapshot.absentFiles).toContain("configs/base.json");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(context.configFenceSnapshot.absentFiles).toContain("configs/base.json");
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(true);
     await mkdir(path.join(indexingRoot, "configs"), { recursive: true });
     await writeFile(path.join(indexingRoot, "configs", "base.json"), "{}\n");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(false);
   });
 
@@ -1642,7 +1667,11 @@ describe("Story 1.5 Analyzer configuration capture", () => {
     expect(context.resolutionFiles.map((file) => file.path)).toEqual([
       "packages/app/node_modules/example/package.json",
     ]);
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(true);
   });
 
@@ -2166,17 +2195,22 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       manifestDigest: sha256CanonicalJson([{ contentHash: source.contentHash, path: source.path }]),
       sourceFiles: [source],
     });
-    const sealed = context.configSnapshot as unknown as {
+    const sealed = context.configFenceSnapshot as unknown as {
       absentResolutionFiles: readonly string[];
       blockedResolutionFiles: readonly { contentHash: string; path: string }[];
     };
 
     expect(sealed.blockedResolutionFiles.map((entry) => entry.path)).toContain("src/blocked.ts");
     expect(sealed.absentResolutionFiles).toContain("src/missing.ts");
-    expect(context.configSnapshot.absentFiles).not.toContain("src/missing.ts");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(context.configFenceSnapshot.absentFiles).not.toContain("src/missing.ts");
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(true);
     const output = analyzeTypeScriptModules({
+      blockedResolutionLogicalPaths: sealed.blockedResolutionFiles.map((entry) => entry.path),
       configDigest: context.configDigest,
       configSnapshot: context.configSnapshot,
       configurationEntryPaths: context.configurationEntryPaths,
@@ -2194,13 +2228,25 @@ describe("Story 1.5 Analyzer configuration capture", () => {
       code: "MODULE_RESOLUTION_FAILED",
     }));
     await writeFile(path.join(indexingRoot, "src", "blocked.ts"), "export const hidden = 2;\n");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(false);
     await writeFile(path.join(indexingRoot, "src", "blocked.ts"), "export const hidden = 1;\n");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(true);
     await writeFile(path.join(indexingRoot, "src", "missing.ts"), "export {};\n");
-    expect(verifyAnalyzerConfigSnapshotSynchronously(indexingRoot, context.configSnapshot))
+    expect(verifyAnalyzerConfigSnapshotSynchronously(
+      indexingRoot,
+      context.configSnapshot,
+      context.configFenceSnapshot,
+    ))
       .toBe(false);
   });
 

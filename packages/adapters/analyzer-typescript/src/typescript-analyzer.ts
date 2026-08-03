@@ -11,6 +11,7 @@ import type {
 } from "@codegraph/application";
 import {
   AnalyzerFailureError,
+  MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES,
   type AnalyzerFailureCode,
 } from "@codegraph/application";
 import {
@@ -367,11 +368,17 @@ function assertAnalyzerRequestAdmission(
   }
   if (sidecar !== undefined) {
     if (sidecar.version !== 1 || !Array.isArray(sidecar.entries) ||
-      sidecar.entries.length > 4_096 || typeof sidecar.proofDigest !== "string" ||
+      typeof sidecar.proofDigest !== "string" ||
       typeof sidecar.snapshotIdentity !== "string") {
       throw new AnalyzerFailureError(
         "ANALYZER_PROTOCOL_INVALID",
-        "Analyzer host path identity sidecar 超限或形状不合法。",
+        "Analyzer host path identity sidecar 形状不合法。",
+      );
+    }
+    if (sidecar.entries.length > MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES) {
+      throw new AnalyzerFailureError(
+        "ANALYZER_RESOURCE_LIMIT",
+        "Analyzer host path identity sidecar 条目数超过 admission 预算。",
       );
     }
     for (const entry of sidecar.entries) {

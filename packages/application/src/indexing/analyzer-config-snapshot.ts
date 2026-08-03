@@ -16,15 +16,9 @@ export interface AnalyzerWorkspacePackageV1 {
 
 /** graph-service 冻结并生产 digest 的 Analyzer 配置快照。 */
 export interface AnalyzerConfigSnapshotV1 {
-  /** 捕获时不存在、但其创建/rename 会改变 Analyzer 语义的路径。 */
-  absentFiles?: readonly string[];
-  /** 普通模块解析探测中不存在的候选，与必需配置缺失事实分离。 */
-  absentResolutionFiles?: readonly string[];
   analyzerKind: "typescript";
   analyzerVersion: string;
   consultedFiles: readonly AnalyzerConsultedFileV1[];
-  /** root 内真实存在但不属于本轮 manifest 的源码候选，只封口身份与 hash。 */
-  blockedResolutionFiles?: readonly AnalyzerConsultedFileV1[];
   effectiveCompilerOptions: Readonly<Record<string, unknown>>;
   effectiveIgnore: {
     effectiveDigest: string;
@@ -32,6 +26,22 @@ export interface AnalyzerConfigSnapshotV1 {
   };
   version: 1;
   workspacePackages: readonly AnalyzerWorkspacePackageV1[];
+}
+
+/**
+ * Analyzer 提交栅栏与 watcher 的独立 read-set 状态。
+ *
+ * 这些路径事实影响 stale/requeue 与提交 CAS，但不属于 AD-3 的七字段语义身份，禁止进入
+ * `configDigest` 或 Worker 的 `AnalyzerConfigSnapshotV1`。
+ */
+export interface AnalyzerConfigFenceSnapshotV1 {
+  /** 捕获时不存在、但其创建/rename 会改变 Analyzer 语义的必需配置路径。 */
+  absentFiles: readonly string[];
+  /** 普通模块解析探测中不存在的候选，与必需配置缺失事实分离。 */
+  absentResolutionFiles: readonly string[];
+  /** root 内真实存在但不属于本轮 manifest 的源码候选，只封口身份与 hash。 */
+  blockedResolutionFiles: readonly AnalyzerConsultedFileV1[];
+  version: 1;
 }
 
 /** 配置快照及其 RFC 8785 JCS → UTF-8 → SHA-256 结果。 */
@@ -145,22 +155,50 @@ function normalizeProjectConfigurations(value: readonly unknown[]): readonly unk
   return Object.freeze(projects);
 }
 
-/** 创建排序、唯一且不包含 rules.yaml 的 AnalyzerConfigSnapshotV1。 */
+/** 创建 AD-3 精确七字段、排序唯一且不包含 rules.yaml 的语义配置快照。 */
 export function createAnalyzerConfigSnapshot(
-  input: Omit<
-    AnalyzerConfigSnapshotV1,
-    "absentFiles" | "absentResolutionFiles" | "blockedResolutionFiles" | "version"
-  > & {
-    absentFiles?: readonly string[];
-    absentResolutionFiles?: readonly string[];
-    blockedResolutionFiles?: readonly AnalyzerConsultedFileV1[];
-  },
+  input: Omit<AnalyzerConfigSnapshotV1, "version">,
   digestPort: CanonicalDigestPort,
 ): CreatedAnalyzerConfigSnapshotV1 {
   assertDigest(input.effectiveIgnore.effectiveDigest, "effectiveIgnore.effectiveDigest");
   if (input.analyzerVersion.length === 0) {
     throw new TypeError("analyzerVersion 不能为空。");
   }
+  const consultedFiles = sortUniquePathEntries(input.consultedFiles, "consultedFiles");
+  if (consultedFiles.some((entry) => isReservedAnalyzerRulesPath(entry.path))) {
+    throw new TypeError("rules.yaml 不得进入 Analyzer 配置快照。");
+  }
+  const workspacePackages = [...input.workspacePackages]
+    .map((entry) => {
+      if (typeof entry.name !== "string" || entry.name.length === 0) {
+        throw new TypeError("workspace package name 不能为空。");
+      }
+      return Object.freeze({
+        name: entry.name,
+        root: normalizeRelativeGraphPath(entry.root),
+      });
+    })
+    .sort((left, right) => compareCanonicalGraphText(left.root, right.root) ||
+      compareCanonicalGraphText(left.name, right.name));
+  const snapshot: AnalyzerConfigSnapshotV1 = Object.freeze({
+    analyzerKind: input.analyzerKind,
+    analyzerVersion: input.analyzerVersion,
+    consultedFiles,
+    effectiveCompilerOptions: normalizeEffectiveCompilerOptions(input.effectiveCompilerOptions),
+    effectiveIgnore: Object.freeze({ ...input.effectiveIgnore }),
+    version: 1,
+    workspacePackages: Object.freeze(workspacePackages),
+  });
+  return Object.freeze({ configDigest: digestPort.digest(snapshot), snapshot });
+}
+
+/** 创建排序唯一、集合互斥且不包含 rules.yaml 的独立 commit-fence/read-set 快照。 */
+export function createAnalyzerConfigFenceSnapshot(input: {
+  absentFiles?: readonly string[];
+  absentResolutionFiles?: readonly string[];
+  blockedResolutionFiles?: readonly AnalyzerConsultedFileV1[];
+  consultedFiles: readonly AnalyzerConsultedFileV1[];
+}): AnalyzerConfigFenceSnapshotV1 {
   const consultedFiles = sortUniquePathEntries(input.consultedFiles, "consultedFiles");
   const absentFiles = sortUniquePaths(input.absentFiles ?? [], "absentFiles");
   const absentResolutionFiles = sortUniquePaths(
@@ -177,45 +215,26 @@ export function createAnalyzerConfigSnapshot(
   ]);
   if (
     blockedResolutionFiles.some((file) => consultedFiles.some((entry) => entry.path === file.path)) ||
-    absentFiles.some((path) => existingPaths.has(path)) ||
-    absentResolutionFiles.some((path) => existingPaths.has(path) || absentFiles.includes(path))
+    absentFiles.some((logicalPath) => existingPaths.has(logicalPath)) ||
+    absentResolutionFiles.some((logicalPath) =>
+      existingPaths.has(logicalPath) || absentFiles.includes(logicalPath))
   ) {
-    throw new TypeError("Analyzer 配置快照的存在、blocked 与缺失路径集合必须互斥。");
+    throw new TypeError("Analyzer 配置栅栏的存在、blocked 与缺失路径集合必须互斥。");
   }
-  const snapshotPaths = [
+  if ([
     ...consultedFiles.map((entry) => entry.path),
     ...blockedResolutionFiles.map((entry) => entry.path),
     ...absentFiles,
     ...absentResolutionFiles,
-  ];
-  if (snapshotPaths.some(isReservedAnalyzerRulesPath)) {
-    throw new TypeError("rules.yaml 不得进入 Analyzer 配置快照。");
+  ].some(isReservedAnalyzerRulesPath)) {
+    throw new TypeError("rules.yaml 不得进入 Analyzer 配置栅栏快照。");
   }
-  const workspacePackages = [...input.workspacePackages]
-    .map((entry) => {
-      if (typeof entry.name !== "string" || entry.name.length === 0) {
-        throw new TypeError("workspace package name 不能为空。");
-      }
-      return Object.freeze({
-        name: entry.name,
-        root: normalizeRelativeGraphPath(entry.root),
-      });
-    })
-    .sort((left, right) => compareCanonicalGraphText(left.root, right.root) ||
-      compareCanonicalGraphText(left.name, right.name));
-  const snapshot: AnalyzerConfigSnapshotV1 = Object.freeze({
+  return Object.freeze({
     absentFiles,
     absentResolutionFiles,
-    analyzerKind: input.analyzerKind,
-    analyzerVersion: input.analyzerVersion,
     blockedResolutionFiles,
-    consultedFiles,
-    effectiveCompilerOptions: normalizeEffectiveCompilerOptions(input.effectiveCompilerOptions),
-    effectiveIgnore: Object.freeze({ ...input.effectiveIgnore }),
     version: 1,
-    workspacePackages: Object.freeze(workspacePackages),
   });
-  return Object.freeze({ configDigest: digestPort.digest(snapshot), snapshot });
 }
 
 /** rules.yaml 由规则 Story 独占，任何 Analyzer 观察集合都不得将其封口。 */

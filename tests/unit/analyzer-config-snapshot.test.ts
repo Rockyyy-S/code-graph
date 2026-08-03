@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createAnalyzerConfigFenceSnapshot,
   createAnalyzerConfigSnapshot,
   createAnalyzerInputDigest,
   normalizeEffectiveCompilerOptions,
@@ -62,6 +63,15 @@ describe("Story 1.5 analyzer config snapshot", () => {
     expect(() => create([{ contentHash: "d".repeat(64), path: "rules.yaml" }]))
       .toThrow(/rules\.yaml/u);
     expect(first.snapshot.workspacePackages).toEqual([]);
+    expect(Object.keys(first.snapshot).sort()).toEqual([
+      "analyzerKind",
+      "analyzerVersion",
+      "consultedFiles",
+      "effectiveCompilerOptions",
+      "effectiveIgnore",
+      "version",
+      "workspacePackages",
+    ]);
   });
 
   it("CR8-005 preserves workspace package names in sorting and config digests", () => {
@@ -108,18 +118,87 @@ describe("Story 1.5 analyzer config snapshot", () => {
       effectiveIgnore: { effectiveDigest: "c".repeat(64), version: 1 as const },
       workspacePackages: [],
     };
-    expect(() => createAnalyzerConfigSnapshot({
-      ...base,
+    const semantic = createAnalyzerConfigSnapshot(base, digestPort).snapshot;
+    expect(() => createAnalyzerConfigFenceSnapshot({
       absentFiles: ["Rules.yaml"],
-    }, digestPort)).toThrow(/rules\.yaml/iu);
-    expect(() => createAnalyzerConfigSnapshot({
-      ...base,
+      consultedFiles: semantic.consultedFiles,
+    })).toThrow(/rules\.yaml/iu);
+    expect(() => createAnalyzerConfigFenceSnapshot({
       absentResolutionFiles: ["config/RULES.YAML"],
-    }, digestPort)).toThrow(/rules\.yaml/iu);
-    expect(() => createAnalyzerConfigSnapshot({
-      ...base,
+      consultedFiles: semantic.consultedFiles,
+    })).toThrow(/rules\.yaml/iu);
+    expect(() => createAnalyzerConfigFenceSnapshot({
       blockedResolutionFiles: [{ contentHash: "d".repeat(64), path: "rules.yaml" }],
-    }, digestPort)).toThrow(/rules\.yaml/iu);
+      consultedFiles: semantic.consultedFiles,
+    })).toThrow(/rules\.yaml/iu);
+  });
+
+  it("DIAGNOSIS23 S2 keeps fence-only state outside AD-3 configDigest identity", () => {
+    const semanticInput = {
+      analyzerKind: "typescript" as const,
+      analyzerVersion: "6.0.3",
+      consultedFiles: [{ contentHash: "1".repeat(64), path: "tsconfig.json" }],
+      effectiveCompilerOptions: { module: "NodeNext" },
+      effectiveIgnore: { effectiveDigest: "2".repeat(64), version: 1 as const },
+      workspacePackages: [],
+    };
+    const baseline = createAnalyzerConfigSnapshot(semanticInput, digestPort);
+    const fenceVariants = [
+      createAnalyzerConfigFenceSnapshot({
+        absentFiles: ["configs/base.json"],
+        consultedFiles: baseline.snapshot.consultedFiles,
+      }),
+      createAnalyzerConfigFenceSnapshot({
+        absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
+        consultedFiles: baseline.snapshot.consultedFiles,
+      }),
+      createAnalyzerConfigFenceSnapshot({
+        blockedResolutionFiles: [{
+          contentHash: "3".repeat(64),
+          path: "src/blocked.ts",
+        }],
+        consultedFiles: baseline.snapshot.consultedFiles,
+      }),
+    ];
+
+    for (const fenceSnapshot of fenceVariants) {
+      expect(createAnalyzerConfigSnapshot(semanticInput, digestPort).configDigest)
+        .toBe(baseline.configDigest);
+      expect(Object.keys(fenceSnapshot).sort()).toEqual([
+        "absentFiles",
+        "absentResolutionFiles",
+        "blockedResolutionFiles",
+        "version",
+      ]);
+    }
+
+    for (const changed of [
+      { ...semanticInput, analyzerVersion: "6.0.4" },
+      { ...semanticInput, consultedFiles: [{ contentHash: "4".repeat(64), path: "tsconfig.json" }] },
+      { ...semanticInput, effectiveCompilerOptions: { module: "CommonJS" } },
+      { ...semanticInput, effectiveIgnore: { effectiveDigest: "5".repeat(64), version: 1 as const } },
+      { ...semanticInput, workspacePackages: [{ name: "pkg", root: "packages/pkg" }] },
+    ]) {
+      expect(createAnalyzerConfigSnapshot(changed, digestPort).configDigest)
+        .not.toBe(baseline.configDigest);
+    }
+  });
+
+  it("keeps consulted, blocked and absent fence paths mutually exclusive", () => {
+    const consultedFiles = [{ contentHash: "1".repeat(64), path: "tsconfig.json" }];
+    expect(() => createAnalyzerConfigFenceSnapshot({
+      absentFiles: ["tsconfig.json"],
+      consultedFiles,
+    })).toThrow(/互斥/u);
+    expect(() => createAnalyzerConfigFenceSnapshot({
+      absentFiles: ["src/missing.ts"],
+      absentResolutionFiles: ["src/missing.ts"],
+      consultedFiles,
+    })).toThrow(/互斥/u);
+    expect(() => createAnalyzerConfigFenceSnapshot({
+      blockedResolutionFiles: [{ contentHash: "2".repeat(64), path: "tsconfig.json" }],
+      consultedFiles,
+    })).toThrow(/互斥/u);
   });
 
   it("computes inputDigest from configDigest and canonically sorted source inputs", () => {

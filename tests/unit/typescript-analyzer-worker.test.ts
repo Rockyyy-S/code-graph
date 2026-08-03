@@ -7,6 +7,7 @@ import {
   buildGraphEntityId,
   createAnalyzerConfigSnapshot,
   createAnalyzerInputDigest,
+  MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES,
 } from "../../packages/application/src/index.js";
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
 import {
@@ -51,6 +52,27 @@ function hostPathIdentitySidecar(
   return Object.freeze({
     entries: Object.freeze(logicalPaths.map((logicalPath) => {
       const canonicalLogicalPath = canonicalByLogicalPath[logicalPath] ?? logicalPath;
+      return Object.freeze({
+        canonicalLogicalPath,
+        identity: `${snapshotIdentity}:${canonicalLogicalPath}`,
+        logicalPath,
+      });
+    })),
+    proofDigest: `proof-${snapshotIdentity}`,
+    snapshotIdentity,
+    version: 1 as const,
+  });
+}
+
+/** 构造达到权威条目基数的同对象 alias proof，避免用源码数量混淆 sidecar 预算。 */
+function hostPathIdentitySidecarAtCardinality(
+  entryCount: number,
+  snapshotIdentity: string,
+) {
+  const canonicalLogicalPath = "src/index.ts";
+  return Object.freeze({
+    entries: Object.freeze(Array.from({ length: entryCount }, (_, index) => {
+      const logicalPath = index === 0 ? canonicalLogicalPath : `alias/${index}.ts`;
       return Object.freeze({
         canonicalLogicalPath,
         identity: `${snapshotIdentity}:${canonicalLogicalPath}`,
@@ -397,6 +419,88 @@ describe("Story 1.5 TypeScript Analyzer Worker", () => {
         sourceFiles,
       })).rejects.toMatchObject({ analyzerCode: "ANALYZER_RESOURCE_LIMIT" });
     } finally {
+      await analyzer.close();
+    }
+  });
+
+  it("DIAGNOSIS23 S1 admits 4097, 5000 and 6144 sidecar entries in parent and Worker", async () => {
+    const workerUrl = new URL(
+      "data:text/javascript," + encodeURIComponent([
+        "import { parentPort } from 'node:worker_threads';",
+        "parentPort.on('message', (message) => parentPort.postMessage({ requestId: message.requestId, ok: true, value: { consultedLogicalPaths: [], effectiveCompilerOptions: {}, projectConfigurations: [], resolutionCandidateLogicalPaths: [] } }));",
+      ].join("\n")),
+    );
+    const analyzer = createTypeScriptAnalyzer({ workerUrl });
+    const source = workerSourceFile("src/index.ts");
+    try {
+      for (const entryCount of [
+        4_097,
+        5_000,
+        MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES,
+      ]) {
+        const sidecar = hostPathIdentitySidecarAtCardinality(
+          entryCount,
+          `parent-${entryCount}`,
+        );
+        await expect(analyzer.observeConfiguration({
+          caseSensitiveFileNames: false,
+          configurationFiles: [],
+          hostPathIdentitySidecar: sidecar,
+          sourceFiles: [],
+        })).resolves.toMatchObject({ consultedLogicalPaths: [] });
+
+        resetWorkerAnalysisCacheForTests();
+        expect(() => observeTypeScriptConfiguration({
+          caseSensitiveFileNames: false,
+          configurationFiles: [],
+          hostPathIdentitySidecar: hostPathIdentitySidecarAtCardinality(
+            entryCount,
+            `worker-${entryCount}`,
+          ),
+          sourceFiles: [source],
+        })).not.toThrow();
+      }
+    } finally {
+      resetWorkerAnalysisCacheForTests();
+      await analyzer.close();
+    }
+  });
+
+  it("DIAGNOSIS23 S1 rejects 6145 before parent clone and Worker decode or AST state", async () => {
+    const workerUrl = new URL(
+      "data:text/javascript," + encodeURIComponent([
+        "import { parentPort } from 'node:worker_threads';",
+        "parentPort.on('message', (message) => parentPort.postMessage({ requestId: message.requestId, ok: true, value: { consultedLogicalPaths: [], effectiveCompilerOptions: {}, projectConfigurations: [], resolutionCandidateLogicalPaths: [] } }));",
+      ].join("\n")),
+    );
+    const analyzer = createTypeScriptAnalyzer({ workerUrl });
+    const overLimit = MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES + 1;
+    try {
+      await expect(analyzer.observeConfiguration({
+        caseSensitiveFileNames: false,
+        configurationFiles: [],
+        hostPathIdentitySidecar: hostPathIdentitySidecarAtCardinality(overLimit, "parent-over"),
+        sourceFiles: [],
+      })).rejects.toMatchObject({ analyzerCode: "ANALYZER_RESOURCE_LIMIT" });
+
+      resetWorkerAnalysisCacheForTests();
+      const undecodableSource = Object.freeze({
+        ...workerSourceFile("src/index.ts"),
+        bytes: new Uint8Array([0xff]),
+      });
+      expect(() => observeTypeScriptConfiguration({
+        caseSensitiveFileNames: false,
+        configurationFiles: [],
+        hostPathIdentitySidecar: hostPathIdentitySidecarAtCardinality(overLimit, "worker-over"),
+        sourceFiles: [undecodableSource],
+      })).toThrow(/sidecar.*预算/u);
+      expect(readWorkerAnalysisCacheStatsForTests()).toMatchObject({
+        directoryIndexBuildFileVisits: 0,
+        programBuilds: 0,
+        sourceFileObjectCreationPeak: 0,
+      });
+    } finally {
+      resetWorkerAnalysisCacheForTests();
       await analyzer.close();
     }
   });

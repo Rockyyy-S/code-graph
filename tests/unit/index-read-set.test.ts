@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
-import { createAnalyzerConfigSnapshot } from "../../packages/application/src/index.js";
+import {
+  createAnalyzerConfigFenceSnapshot,
+  createAnalyzerConfigSnapshot,
+} from "../../packages/application/src/index.js";
 import { createInitialIgnoreState } from "../../apps/graph-service/src/ignore-bootstrap.js";
 import {
   readAnalyzerCaptureMetricsForTests,
@@ -132,6 +135,9 @@ describe("index read-set provider", () => {
     const provider = createIndexReadSetProvider({
       captureAnalyzerSemanticContext: async () => ({
         configDigest: config.configDigest,
+        configFenceSnapshot: createAnalyzerConfigFenceSnapshot({
+          consultedFiles: config.snapshot.consultedFiles,
+        }),
         configSnapshot: config.snapshot,
         configurationEntryPaths: [],
         configurationFiles: [],
@@ -169,6 +175,9 @@ describe("index read-set provider", () => {
     const provider = createIndexReadSetProvider({
       captureAnalyzerSemanticContext: async () => ({
         configDigest: config.configDigest,
+        configFenceSnapshot: createAnalyzerConfigFenceSnapshot({
+          consultedFiles: config.snapshot.consultedFiles,
+        }),
         configSnapshot: config.snapshot,
         configurationEntryPaths: [],
         configurationFiles: [],
@@ -200,6 +209,68 @@ describe("index read-set provider", () => {
     provider.close?.();
   });
 
+  it("DIAGNOSIS23 S2 persists three fence-only states without changing configDigest", async () => {
+    const root = await createRoot();
+    const ignoreState = await createInitialIgnoreState(root);
+    if (ignoreState.kind !== "ready") {throw new Error("测试前置条件不成立。");}
+    const config = createAnalyzerConfigSnapshot({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      consultedFiles: [],
+      effectiveCompilerOptions: {},
+      effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
+      workspacePackages: [],
+    }, { digest: sha256CanonicalJson });
+    const fenceSnapshots = [
+      createAnalyzerConfigFenceSnapshot({
+        absentFiles: ["configs/base.json"],
+        consultedFiles: config.snapshot.consultedFiles,
+      }),
+      createAnalyzerConfigFenceSnapshot({
+        absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
+        consultedFiles: config.snapshot.consultedFiles,
+      }),
+      createAnalyzerConfigFenceSnapshot({
+        blockedResolutionFiles: [{
+          contentHash: "1".repeat(64),
+          path: "src/blocked.ts",
+        }],
+        consultedFiles: config.snapshot.consultedFiles,
+      }),
+    ];
+
+    for (const configFenceSnapshot of fenceSnapshots) {
+      const provider = createIndexReadSetProvider({
+        captureAnalyzerSemanticContext: async () => ({
+          configDigest: config.configDigest,
+          configFenceSnapshot,
+          configSnapshot: config.snapshot,
+          configurationEntryPaths: [],
+          configurationFiles: [],
+          inputDigest: "4".repeat(64),
+          resolutionFiles: [],
+          sourceFiles: [],
+        }),
+        ignoreSnapshot: ignoreState.snapshot,
+        indexingRoot: root,
+        statusEpoch: "epoch-diagnosis23-s2",
+      });
+      const captured = await provider.capture(null);
+      expect(captured.readSet.configDigest).toBe(config.configDigest);
+      expect(captured.readSet.analyzerConfigFenceSnapshot).toEqual(configFenceSnapshot);
+      expect(Object.keys(captured.readSet.analyzerConfigSnapshot as object).sort()).toEqual([
+        "analyzerKind",
+        "analyzerVersion",
+        "consultedFiles",
+        "effectiveCompilerOptions",
+        "effectiveIgnore",
+        "version",
+        "workspacePackages",
+      ]);
+      provider.close?.();
+    }
+  });
+
   it("CR6-003 case-folds consulted metadata in the main-thread classifier", async () => {
     const root = await createRoot();
     await mkdir(path.join(root, "Configs"), { recursive: true });
@@ -227,6 +298,9 @@ describe("index read-set provider", () => {
       captureAnalyzerSemanticContext: async () => ({
         caseSensitiveFileNames: false,
         configDigest: config.configDigest,
+        configFenceSnapshot: createAnalyzerConfigFenceSnapshot({
+          consultedFiles: config.snapshot.consultedFiles,
+        }),
         configSnapshot: config.snapshot,
         configurationEntryPaths: [],
         configurationFiles: [],
@@ -256,56 +330,88 @@ describe("index read-set provider", () => {
   const metadataAncestorRenameCases = [
     {
       label: "consulted metadata",
-      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
-        analyzerKind: "typescript",
-        analyzerVersion: "6.0.3",
-        consultedFiles: [{
-          contentHash: "1".repeat(64),
-          path: "node_modules/pkg/package.json",
-        }],
-        effectiveCompilerOptions: {},
-        effectiveIgnore: { effectiveDigest, version: 1 },
-        workspacePackages: [],
-      }, { digest: sha256CanonicalJson }),
+      createConfig: (effectiveDigest: string) => {
+        const config = createAnalyzerConfigSnapshot({
+          analyzerKind: "typescript",
+          analyzerVersion: "6.0.3",
+          consultedFiles: [{
+            contentHash: "1".repeat(64),
+            path: "node_modules/pkg/package.json",
+          }],
+          effectiveCompilerOptions: {},
+          effectiveIgnore: { effectiveDigest, version: 1 },
+          workspacePackages: [],
+        }, { digest: sha256CanonicalJson });
+        return {
+          config,
+          fenceSnapshot: createAnalyzerConfigFenceSnapshot({
+            consultedFiles: config.snapshot.consultedFiles,
+          }),
+        };
+      },
     },
     {
       label: "absent config metadata",
-      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
-        absentFiles: ["node_modules/pkg/tsconfig.json"],
-        analyzerKind: "typescript",
-        analyzerVersion: "6.0.3",
-        consultedFiles: [],
-        effectiveCompilerOptions: {},
-        effectiveIgnore: { effectiveDigest, version: 1 },
-        workspacePackages: [],
-      }, { digest: sha256CanonicalJson }),
+      createConfig: (effectiveDigest: string) => {
+        const config = createAnalyzerConfigSnapshot({
+          analyzerKind: "typescript",
+          analyzerVersion: "6.0.3",
+          consultedFiles: [],
+          effectiveCompilerOptions: {},
+          effectiveIgnore: { effectiveDigest, version: 1 },
+          workspacePackages: [],
+        }, { digest: sha256CanonicalJson });
+        return {
+          config,
+          fenceSnapshot: createAnalyzerConfigFenceSnapshot({
+            absentFiles: ["node_modules/pkg/tsconfig.json"],
+            consultedFiles: config.snapshot.consultedFiles,
+          }),
+        };
+      },
     },
     {
       label: "absent resolution metadata",
-      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
-        absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
-        analyzerKind: "typescript",
-        analyzerVersion: "6.0.3",
-        consultedFiles: [],
-        effectiveCompilerOptions: {},
-        effectiveIgnore: { effectiveDigest, version: 1 },
-        workspacePackages: [],
-      }, { digest: sha256CanonicalJson }),
+      createConfig: (effectiveDigest: string) => {
+        const config = createAnalyzerConfigSnapshot({
+          analyzerKind: "typescript",
+          analyzerVersion: "6.0.3",
+          consultedFiles: [],
+          effectiveCompilerOptions: {},
+          effectiveIgnore: { effectiveDigest, version: 1 },
+          workspacePackages: [],
+        }, { digest: sha256CanonicalJson });
+        return {
+          config,
+          fenceSnapshot: createAnalyzerConfigFenceSnapshot({
+            absentResolutionFiles: ["node_modules/pkg/missing.d.ts"],
+            consultedFiles: config.snapshot.consultedFiles,
+          }),
+        };
+      },
     },
     {
       label: "blocked resolution metadata",
-      createConfig: (effectiveDigest: string) => createAnalyzerConfigSnapshot({
-        analyzerKind: "typescript",
-        analyzerVersion: "6.0.3",
-        blockedResolutionFiles: [{
-          contentHash: "2".repeat(64),
-          path: "node_modules/pkg/private.ts",
-        }],
-        consultedFiles: [],
-        effectiveCompilerOptions: {},
-        effectiveIgnore: { effectiveDigest, version: 1 },
-        workspacePackages: [],
-      }, { digest: sha256CanonicalJson }),
+      createConfig: (effectiveDigest: string) => {
+        const config = createAnalyzerConfigSnapshot({
+          analyzerKind: "typescript",
+          analyzerVersion: "6.0.3",
+          consultedFiles: [],
+          effectiveCompilerOptions: {},
+          effectiveIgnore: { effectiveDigest, version: 1 },
+          workspacePackages: [],
+        }, { digest: sha256CanonicalJson });
+        return {
+          config,
+          fenceSnapshot: createAnalyzerConfigFenceSnapshot({
+            blockedResolutionFiles: [{
+              contentHash: "2".repeat(64),
+              path: "node_modules/pkg/private.ts",
+            }],
+            consultedFiles: config.snapshot.consultedFiles,
+          }),
+        };
+      },
     },
   ] as const;
 
@@ -318,7 +424,9 @@ describe("index read-set provider", () => {
       if (ignoreState.kind !== "ready") {
         throw new Error("测试前置条件不成立。");
       }
-      const config = metadataCase.createConfig(ignoreState.snapshot.effectiveDigest);
+      const { config, fenceSnapshot } = metadataCase.createConfig(
+        ignoreState.snapshot.effectiveDigest,
+      );
       let notifyWorkspaceChanged!: (
         relativePath?: string,
         eventType?: "change" | "rename",
@@ -327,6 +435,7 @@ describe("index read-set provider", () => {
       const provider = createIndexReadSetProvider({
         captureAnalyzerSemanticContext: async () => ({
           configDigest: config.configDigest,
+          configFenceSnapshot: fenceSnapshot,
           configSnapshot: config.snapshot,
           configurationEntryPaths: [],
           configurationFiles: [],
@@ -392,6 +501,9 @@ describe("index read-set provider", () => {
       captureAnalyzerSemanticContext: async () => ({
         caseSensitiveFileNames: false,
         configDigest: config.configDigest,
+        configFenceSnapshot: createAnalyzerConfigFenceSnapshot({
+          consultedFiles: config.snapshot.consultedFiles,
+        }),
         configSnapshot: config.snapshot,
         configurationEntryPaths: [],
         configurationFiles: [],
@@ -541,6 +653,9 @@ describe("index read-set provider", () => {
     const provider = createIndexReadSetProvider({
       captureAnalyzerSemanticContext: async () => ({
         configDigest: config.configDigest,
+        configFenceSnapshot: createAnalyzerConfigFenceSnapshot({
+          consultedFiles: config.snapshot.consultedFiles,
+        }),
         configSnapshot: config.snapshot,
         configurationEntryPaths: [],
         configurationFiles: [],

@@ -1,6 +1,7 @@
 import path from "node:path";
 import ts from "typescript";
 import {
+  MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES,
   normalizeHostPathIdentity,
   normalizeEffectiveCompilerOptions,
   type AnalysisInputV1,
@@ -313,14 +314,9 @@ function discoverResolutionCandidatePaths(
  */
 export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutputV1 {
   assertWorkerInputAdmission(input);
-  if ((input.configSnapshot.absentFiles?.length ?? 0) > 0) {
-    throw new TypeError("Analyzer 配置闭包仍存在缺失文件，拒绝生成模块事实。");
-  }
   const allFiles = [...input.configurationFiles, ...input.resolutionFiles, ...input.sourceFiles];
-  const blockedResolutionPathSet = new Set([
-    ...(input.blockedResolutionLogicalPaths ?? []),
-    ...(input.configSnapshot.blockedResolutionFiles ?? []).map((file) => file.path),
-  ].map((entry) => normalizeRelativeGraphPath(entry)));
+  const blockedResolutionPathSet = new Set((input.blockedResolutionLogicalPaths ?? [])
+    .map((entry) => normalizeRelativeGraphPath(entry)));
   const files = createVirtualFileMap(
     allFiles,
     blockedResolutionPathSet,
@@ -1891,7 +1887,8 @@ function assertWorkerInputAdmission(
     );
   }
   if (sidecar !== undefined) {
-    if (!Array.isArray(sidecar.entries) || sidecar.entries.length > 4_096) {
+    if (!Array.isArray(sidecar.entries) ||
+      sidecar.entries.length > MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES) {
       throw new WorkerAnalysisError(
         "ANALYZER_RESOURCE_LIMIT",
         "Analyzer host proof sidecar 条目数超过安全预算。",

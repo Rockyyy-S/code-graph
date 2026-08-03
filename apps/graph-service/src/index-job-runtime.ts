@@ -552,7 +552,15 @@ async function analyzeModuleBatches(
   detectedAt: string,
   signal: AbortSignal,
 ): Promise<ReturnType<typeof buildModuleSourceFactBatch>[]> {
+  if (context.configFenceSnapshot.absentFiles.length > 0) {
+    throw new AnalyzerFailureError(
+      "ANALYZER_CONFIG_INVALID",
+      "Analyzer 配置闭包仍存在缺失文件，拒绝生成模块事实。",
+    );
+  }
   const output = await analyzer.analyze({
+    blockedResolutionLogicalPaths: context.configFenceSnapshot.blockedResolutionFiles
+      .map((file) => file.path),
     ...(context.caseSensitiveFileNames === undefined
       ? {}
       : { caseSensitiveFileNames: context.caseSensitiveFileNames }),

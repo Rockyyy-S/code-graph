@@ -21,6 +21,11 @@ const posixCapabilityContractTestPath = "tests/contract/host-path-posix-capabili
 const dedicatedContractConfigPath = "vitest.contract.win32.config.ts";
 const manifestTestPath = "tests/contract/quality-gates-manifest.test.ts";
 const verifierPath = "scripts/ci/verify-host-path-identity-v1.mjs";
+const analyzerPortPath = "packages/application/src/ports/analyzer-port.ts";
+const graphServiceCompositionRootPath = "apps/graph-service/src/index.ts";
+const analyzerParentPath = "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts";
+const analyzerWorkerPath = "packages/adapters/analyzer-typescript/src/worker-analysis.ts";
+const analyzerSidecarAuthorityName = "MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES";
 const triggerPaths = [
   "apps/graph-service/package.json",
   "apps/graph-service/src/analyzer-config.ts",
@@ -57,13 +62,20 @@ const triggerPaths = [
 ];
 const allowedProductionImports = new Set([
   "@codegraph/adapter-host-path-posix-native",
+  "@codegraph/application",
   "node:child_process",
   "node:crypto",
   "node:fs/promises",
   "node:os",
   "node:path",
 ]);
-const expectedProductionSourceDigest = "925be0e3928f3ade44b032554726deb9089c0392dd617288445e06fcefc02595";
+const expectedProductionSourceDigest = "902408ae9828938ea39ebea5f8ec91dfa8759f90212ded60cf54daea5a03ac73";
+const expectedAnalyzerSidecarAuthoritySourceDigests = new Map([
+  [analyzerPortPath, "7bf991bb2569ff1a9f52cc3bbe9a455f61457086c320d713e640ffd3ffaa78b9"],
+  [graphServiceCompositionRootPath, "29723ef96e41c41a460bac84b4f133998685f6ad4e3e963a6bf4674cb0dfc447"],
+  [analyzerParentPath, "dd9301c5375b27efcd2b816aeac176d27af7e8c6af6ae0efebf61b35f1f835a9"],
+  [analyzerWorkerPath, "7e731fee9d80afbd55a2e828d4321ba8f539737568f36536a9f10db1f423f283"],
+]);
 const expectedPosixAdapterSourceDigests = new Map([
   [posixAdapterCapabilityPath, "4e2f2746660aeb8fafab091af382192acd4ebb74a57029a02cda36d35ef8cb06"],
   [posixAdapterIndexPath, "6527a99e366018dec0775f10bbfe2ac67e581ae7802f820b2c21da7de7230a99"],
@@ -116,6 +128,13 @@ const MAX_TRUSTED_WINDOWS_PREFLIGHT_BYTES = 32 * 1024;
 /** 独立校验完整生产闭包与固定原生脚本，执行 mutation oracle 后运行黑盒回归。 */
 export async function verifyHostPathIdentityV1() {
   const source = await readVerifiedCandidateSource();
+  const analyzerSidecarAuthoritySources = new Map([[sourcePath, source]]);
+  for (const [relativePath, expectedDigest] of expectedAnalyzerSidecarAuthoritySourceDigests) {
+    analyzerSidecarAuthoritySources.set(relativePath, await readVerifiedCandidateSource({
+      expectedDigest,
+      relativePath,
+    }));
+  }
   const posixAdapterSources = new Map();
   for (const [relativePath, expectedDigest] of expectedPosixAdapterSourceDigests) {
     posixAdapterSources.set(relativePath, await readVerifiedCandidateSource({
@@ -124,6 +143,7 @@ export async function verifyHostPathIdentityV1() {
     }));
   }
   validateHostPathIdentitySource(source, sourcePath);
+  validateAnalyzerSidecarCardinalityAuthoritySources(analyzerSidecarAuthoritySources);
   validateHostPathPosixAdapterSources(posixAdapterSources);
   validateMutationOracle(source, posixAdapterSources);
   await validateGateRegistration();
@@ -153,6 +173,145 @@ export async function verifyHostPathIdentityV1() {
     suite: suite.suite,
   });
   return suite.ok ? 0 : 1;
+}
+
+/**
+ * 锁定 application-owned 6144 sidecar 权威及 producer、parent、Worker 的唯一引用链。
+ *
+ * @param {Map<string, string>} sources 已按仓库相对路径索引的规范源码。
+ * @param {boolean} [enforceSourceDigests] 是否同时锁定完整源码摘要。
+ */
+export function validateAnalyzerSidecarCardinalityAuthoritySources(
+  sources,
+  enforceSourceDigests = true,
+) {
+  if (!(sources instanceof Map)) {
+    throw new Error("Analyzer sidecar authority verifier 缺少源码集合。");
+  }
+  const violations = [];
+  const sourceFiles = new Map();
+  for (const relativePath of [
+    analyzerPortPath,
+    sourcePath,
+    graphServiceCompositionRootPath,
+    analyzerParentPath,
+    analyzerWorkerPath,
+  ]) {
+    const source = sources.get(relativePath);
+    if (typeof source !== "string") {
+      violations.push(`${relativePath}: 缺少 sidecar authority 源码。`);
+      continue;
+    }
+    const normalized = source.replaceAll("\r\n", "\n");
+    sourceFiles.set(relativePath, ts.createSourceFile(
+      relativePath,
+      normalized,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    ));
+    const expectedDigest = relativePath === sourcePath
+      ? expectedProductionSourceDigest
+      : expectedAnalyzerSidecarAuthoritySourceDigests.get(relativePath);
+    const digest = createHash("sha256").update(normalized, "utf8").digest("hex");
+    if (enforceSourceDigests && digest !== expectedDigest) {
+      violations.push(`${relativePath}: sidecar authority 完整源码摘要漂移。`);
+    }
+  }
+
+  const analyzerPort = sourceFiles.get(analyzerPortPath);
+  if (analyzerPort !== undefined) {
+    const declarations = collectAstNodes(analyzerPort, (node) =>
+      ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      node.name.text === analyzerSidecarAuthorityName);
+    const declaration = declarations.length === 1 ? declarations[0] : undefined;
+    if (declaration === undefined || declaration.initializer === undefined ||
+      !ts.isNumericLiteral(declaration.initializer) ||
+      Number(declaration.initializer.text) !== 6_144) {
+      violations.push(`${analyzerPortPath}: 必须唯一声明值为 6144 的 sidecar 条目权威。`);
+    }
+  }
+
+  for (const relativePath of [sourcePath, analyzerParentPath, analyzerWorkerPath]) {
+    const sourceFile = sourceFiles.get(relativePath);
+    if (sourceFile === undefined) {continue;}
+    const applicationImports = collectAstNodes(sourceFile, (node) =>
+      ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text === "@codegraph/application");
+    const importsAuthority = applicationImports.some((declaration) =>
+      declaration.importClause?.namedBindings !== undefined &&
+      ts.isNamedImports(declaration.importClause.namedBindings) &&
+      declaration.importClause.namedBindings.elements.some((element) =>
+        element.name.text === analyzerSidecarAuthorityName));
+    if (!importsAuthority) {
+      violations.push(`${relativePath}: 必须静态导入 application-owned sidecar 条目权威。`);
+    }
+  }
+
+  const hostSource = sourceFiles.get(sourcePath);
+  if (hostSource !== undefined) {
+    const ceilings = collectAstNodes(hostSource, (node) =>
+      ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) &&
+      node.name.text === "MAX_HOST_PATH_CANDIDATES");
+    const initializer = ceilings.length === 1 ? ceilings[0].initializer : undefined;
+    if (initializer === undefined || !ts.isIdentifier(initializer) ||
+      initializer.text !== analyzerSidecarAuthorityName) {
+      violations.push(`${sourcePath}: producer ceiling 必须直接引用 application sidecar 权威。`);
+    }
+  }
+
+  const compositionRoot = sourceFiles.get(graphServiceCompositionRootPath);
+  if (compositionRoot !== undefined) {
+    const brokerConstructions = collectAstNodes(compositionRoot, (node) =>
+      ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === "HostPathIdentityBroker");
+    const maxCandidateBindings = brokerConstructions.flatMap((construction) =>
+      construction.arguments?.length === 1 && ts.isObjectLiteralExpression(construction.arguments[0])
+        ? construction.arguments[0].properties.filter((property) =>
+          ts.isPropertyAssignment(property) &&
+          ((ts.isIdentifier(property.name) && property.name.text === "maxCandidates") ||
+            (ts.isStringLiteral(property.name) && property.name.text === "maxCandidates")) &&
+          ts.isIdentifier(property.initializer) &&
+          property.initializer.text === "MAX_HOST_PATH_CANDIDATES")
+        : []);
+    if (brokerConstructions.length !== 1 || maxCandidateBindings.length !== 1) {
+      violations.push(
+        `${graphServiceCompositionRootPath}: 组合根必须唯一把 producer ceiling 交给 HostPathIdentityBroker。`,
+      );
+    }
+  }
+
+  for (const [relativePath, functionName] of [
+    [analyzerParentPath, "assertAnalyzerRequestAdmission"],
+    [analyzerWorkerPath, "assertWorkerInputAdmission"],
+  ]) {
+    const sourceFile = sourceFiles.get(relativePath);
+    if (sourceFile === undefined) {continue;}
+    const functions = collectAstNodes(sourceFile, (node) =>
+      ts.isFunctionDeclaration(node) && node.name?.text === functionName);
+    const body = functions.length === 1 ? functions[0].body : undefined;
+    if (body === undefined) {
+      violations.push(`${relativePath}: 缺少唯一 ${functionName} admission。`);
+      continue;
+    }
+    const authorityComparisons = collectAstNodes(body, (node) =>
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.GreaterThanToken &&
+      accessPathEquals(node.left, ["sidecar", "entries", "length"]) &&
+      ts.isIdentifier(node.right) && node.right.text === analyzerSidecarAuthorityName);
+    if (authorityComparisons.length !== 1) {
+      violations.push(`${relativePath}: sidecar admission 必须唯一比较 application 权威。`);
+    }
+    const sidecarBudgetLiterals = collectAstNodes(body, (node) =>
+      ts.isNumericLiteral(node) && [4_096, 6_144].includes(Number(node.text)));
+    if (sidecarBudgetLiterals.length > 0) {
+      violations.push(`${relativePath}: sidecar admission 禁止裸 4096 或独立复制 6144。`);
+    }
+  }
+
+  if (violations.length > 0) {
+    throw new Error(`Analyzer sidecar cardinality authority 合同失败。\n${violations.join("\n")}`);
+  }
 }
 
 /**
@@ -1251,7 +1410,7 @@ function validateHostPathIdentitySourceInternal(source, modulePath, enforceSourc
     }
   }
   if (imports.size !== allowedProductionImports.size) {
-    violations.push("生产依赖闭包必须精确等于已审计的 Node 内建模块与 POSIX adapter。");
+    violations.push("生产依赖闭包必须精确等于已审计的 application 权威、Node 内建模块与 POSIX adapter。");
   }
   for (const [callableName, requiredCalls] of requiredProductionCalls) {
     const calls = observedProductionCalls.get(callableName);

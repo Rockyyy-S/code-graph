@@ -23,7 +23,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
   /** 按数组顺序串行启动独立 Vitest 进程，隔离 SQLite 锁与构建后并行资源竞争。 */
   unitShards: Object.freeze([
     Object.freeze({
-      expectedTestCount: 257,
+      expectedTestCount: 272,
       shardId: "default-unit",
       tests: Object.freeze([
         "tests/unit/analyzer-config-capture.test.ts",
@@ -40,7 +40,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
       ]),
     }),
     Object.freeze({
-      expectedTestCount: 24,
+      expectedTestCount: 25,
       shardId: "sqlite-module-dependencies",
       tests: Object.freeze([
         "tests/unit/sqlite-module-dependencies.test.ts",

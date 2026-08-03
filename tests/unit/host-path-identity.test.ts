@@ -6,6 +6,9 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
+  MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES,
+} from "../../packages/application/src/index.js";
+import {
   HOST_PATH_POSIX_ABI_VERSION,
   HOST_PATH_POSIX_PROTOCOL_VERSION,
   type HostPathPosixCapabilityV1,
@@ -32,6 +35,7 @@ import {
   runHostPathIdentityPnpm,
   runWindowsContractPreflight,
   serializeHostPathIdentityEnvelope,
+  validateAnalyzerSidecarCardinalityAuthoritySources,
   validateCandidateSourceIdentity,
   validateHostPathIdentitySource,
   validateHostPathPosixAdapterSources,
@@ -697,12 +701,70 @@ describe("host path identity broker", () => {
         ), "utf8"),
       ],
     ]);
+    const analyzerSidecarAuthoritySources = new Map([
+      ["apps/graph-service/src/host-path-identity.ts", source],
+      [
+        "apps/graph-service/src/index.ts",
+        readFileSync(new URL("../../apps/graph-service/src/index.ts", import.meta.url), "utf8"),
+      ],
+      [
+        "packages/application/src/ports/analyzer-port.ts",
+        readFileSync(new URL(
+          "../../packages/application/src/ports/analyzer-port.ts",
+          import.meta.url,
+        ), "utf8"),
+      ],
+      [
+        "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
+        readFileSync(new URL(
+          "../../packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
+          import.meta.url,
+        ), "utf8"),
+      ],
+      [
+        "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+        readFileSync(new URL(
+          "../../packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+          import.meta.url,
+        ), "utf8"),
+      ],
+    ]);
     expect(() => validateHostPathIdentitySource(
       source,
       "apps/graph-service/src/host-path-identity.ts",
     )).not.toThrow();
     expect(() => validateHostPathPosixAdapterSources(posixAdapterSources)).not.toThrow();
+    expect(() => validateAnalyzerSidecarCardinalityAuthoritySources(
+      analyzerSidecarAuthoritySources,
+    )).not.toThrow();
     expect(() => validateMutationOracle(source, posixAdapterSources)).not.toThrow();
+
+    for (const [relativePath, search, replacement] of [
+      [
+        "packages/application/src/ports/analyzer-port.ts",
+        "MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES = 6_144",
+        "MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES = 4_096",
+      ],
+      [
+        "apps/graph-service/src/host-path-identity.ts",
+        "MAX_HOST_PATH_CANDIDATES = MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES",
+        "MAX_HOST_PATH_CANDIDATES = 6_144",
+      ],
+      [
+        "packages/adapters/analyzer-typescript/src/typescript-analyzer.ts",
+        "sidecar.entries.length > MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES",
+        "sidecar.entries.length > 4_096",
+      ],
+      [
+        "packages/adapters/analyzer-typescript/src/worker-analysis.ts",
+        "sidecar.entries.length > MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES",
+        "sidecar.entries.length > 6_144",
+      ],
+    ] as const) {
+      const mutated = new Map(analyzerSidecarAuthoritySources);
+      mutated.set(relativePath, mutated.get(relativePath)!.replace(search, replacement));
+      expect(() => validateAnalyzerSidecarCardinalityAuthoritySources(mutated, false)).toThrow();
+    }
 
     for (const mutation of [
       `const member = ["to", "LowerCase"].join(""); export const folded = "A"[member]();`,
@@ -1235,7 +1297,8 @@ describe("host path identity broker", () => {
   });
 
   it("covers 5000 sources, 1024 resolution metadata entries and bounded root metadata", async () => {
-    expect(MAX_HOST_PATH_CANDIDATES).toBe(6_144);
+    expect(MAX_HOST_PATH_CANDIDATES)
+      .toBe(MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES);
     const capture = vi.fn<HostPathIdentitySnapshotProvider["capture"]>(async (request) => ({
       capability: supportedCapability,
       captureNonce: request.captureNonce,
