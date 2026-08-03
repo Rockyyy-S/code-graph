@@ -374,7 +374,8 @@ describe("index read-set provider", () => {
       analyzerVersion: "6.0.3",
       consultedFiles: [{
         contentHash: createHash("sha256").update(packageMetadata).digest("hex"),
-        path: "NODE_MODULES/PKG2/package.json",
+        /** 物理夹具必须匹配大小写敏感文件系统；大小写折叠语义由后续 rename 事件差异验证。 */
+        path: "node_modules/pkg2/package.json",
       }],
       effectiveCompilerOptions: {},
       effectiveIgnore: { effectiveDigest: ignoreState.snapshot.effectiveDigest, version: 1 },
