@@ -14,6 +14,7 @@ import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
 import {
   buildGraphEdgeId,
   buildGraphEntityId,
+  buildLegacyGraphEdgeIdV0,
   type HierarchyGraph,
   type HierarchyReadSetV1,
 } from "../../packages/domain/src/index.js";
@@ -48,6 +49,7 @@ interface RawSqliteDatabase {
   exec: (source: string) => RawSqliteDatabase;
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
   prepare: (source: string) => {
+    all: (...parameters: unknown[]) => unknown[];
     get: (...parameters: unknown[]) => unknown;
     run: (...parameters: unknown[]) => unknown;
   };
@@ -84,6 +86,58 @@ function createJob(
     ...job,
     baseGraphRevision: store.readCommittedSnapshot().graphRevision,
   });
+}
+
+/** 构造真正缺少 committed binding 的 schema-v1 fixture，禁止用 v4 删 meta 冒充旧库。 */
+function seedPreBindingSchemaV1Database(
+  databasePath: string,
+  workspaceKey: string,
+  jobs: readonly {
+    completedAt: string;
+    id: string;
+    kind: "initial-index" | "rebuild";
+    requestedAt: string;
+    startedAt: string;
+  }[],
+): void {
+  const latest = jobs.at(-1);
+  if (latest === undefined) {throw new Error("schema-v1 fixture 至少需要一个 succeeded Job。");}
+  const database = new RawSqlite(databasePath);
+  try {
+    applyBootstrapMigration(database as never);
+    const rootId = buildGraphEntityId(workspaceKey, "workspace", "");
+    database.prepare(`
+      INSERT INTO workspace(
+        workspace_key, committed_at, indexed_file_count, node_count, edge_count,
+        excluded_path_count, builtin_rules_version
+      ) VALUES (?, ?, 0, 1, 0, 0, 'builtin-ignore-v1')
+    `).run(workspaceKey, latest.completedAt);
+    database.prepare(`
+      INSERT INTO nodes(id, workspace_key, kind, relative_path)
+      VALUES (?, ?, 'workspace', '')
+    `).run(rootId, workspaceKey);
+    database.prepare(`
+      INSERT INTO facts_ownership(fact_id, owner_key, workspace_key)
+      VALUES (?, ?, ?)
+    `).run(rootId, `hierarchy:${rootId}`, workspaceKey);
+    const insertJob = database.prepare(`
+      INSERT INTO jobs(
+        id, workspace_key, kind, state, requested_at, started_at, completed_at
+      ) VALUES (?, ?, ?, 'succeeded', ?, ?, ?)
+    `);
+    for (const job of jobs) {
+      insertJob.run(
+        job.id,
+        workspaceKey,
+        job.kind,
+        job.requestedAt,
+        job.startedAt,
+        job.completedAt,
+      );
+    }
+  } finally {
+    database.close();
+  }
 }
 
 /** 把 Story 1.4 测试输入转换为 Story 1.19 唯一 GraphPatch 提交通道。 */
@@ -343,7 +397,7 @@ describe("sqlite graph store", () => {
     rawDatabase.close();
 
     await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
-      .rejects.toThrow(/缺少对应的 succeeded Job/u);
+      .rejects.toThrow(/committed Job meta 指向不存在的 succeeded Job|缺少对应的 succeeded Job/u);
   });
 
   it("binds a committed summary to the exact succeeded Job even when timestamps collide", async () => {
@@ -396,40 +450,21 @@ describe("sqlite graph store", () => {
     rawDatabase.close();
 
     await expect(openSqliteGraphStore({ databasePath, workspaceKey }))
-      .rejects.toThrow(/缺少对应的 succeeded Job/u);
+      .rejects.toThrow(/committed Job meta 指向不存在的 succeeded Job|缺少对应的 succeeded Job/u);
   });
 
   it("backfills the exact committed Job binding for a valid pre-binding schema v1 database", async () => {
     const databasePath = await createDatabasePath();
     const workspaceKey = "8".repeat(64);
-    const graph = buildHierarchyGraph(workspaceKey, []);
-    let store = await openSqliteGraphStore({ databasePath, workspaceKey });
-    createJob(store, {
+    seedPreBindingSchemaV1Database(databasePath, workspaceKey, [{
+      completedAt: "2026-07-25T00:00:02.000Z",
       id: "job-legacy-committed",
       kind: "initial-index",
       requestedAt: "2026-07-25T00:00:00.000Z",
-    });
-    store.markJobRunning("job-legacy-committed", "2026-07-25T00:00:01.000Z");
-    commitHierarchy(store, {
-      completedAt: "2026-07-25T00:00:02.000Z",
-      graph,
-      jobId: "job-legacy-committed",
-      summary: {
-        builtinRulesVersion: "builtin-ignore-v1",
-        edgeCount: 0,
-        excludedPathCount: 0,
-        generatedAt: "2026-07-25T00:00:02.000Z",
-        indexedFileCount: 0,
-        nodeCount: 1,
-      },
-    });
-    store.close();
+      startedAt: "2026-07-25T00:00:01.000Z",
+    }]);
 
-    let rawDatabase = new RawSqlite(databasePath);
-    rawDatabase.prepare("DELETE FROM meta WHERE key LIKE 'bootstrap-committed-job:%'").run();
-    rawDatabase.close();
-
-    store = await openSqliteGraphStore({ databasePath, workspaceKey });
+    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
     try {
       expect(store.readBootstrapState()).toMatchObject({
         committed: { generatedAt: "2026-07-25T00:00:02.000Z" },
@@ -439,48 +474,37 @@ describe("sqlite graph store", () => {
       store.close();
     }
 
-    rawDatabase = new RawSqlite(databasePath);
-    const binding = rawDatabase.prepare(`
-      SELECT value FROM meta WHERE key = ?
-    `).get(`bootstrap-committed-job:${workspaceKey}`) as { value: string };
-    rawDatabase.close();
-    expect(binding.value).toBe("job-legacy-committed");
+    const rawDatabase = new RawSqlite(databasePath);
+    try {
+      expect(rawDatabase.prepare(`
+        SELECT value FROM meta WHERE key = ?
+      `).get(`bootstrap-committed-job:${workspaceKey}`)).toEqual({
+        value: "job-legacy-committed",
+      });
+    } finally {
+      rawDatabase.close();
+    }
   });
 
   it("backfills the latest persisted succeeded Job when legacy timestamps collide", async () => {
     const databasePath = await createDatabasePath();
     const workspaceKey = "9".repeat(64);
-    const graph = buildHierarchyGraph(workspaceKey, []);
-    const store = await openSqliteGraphStore({ databasePath, workspaceKey });
-    for (const [id, kind] of [
-      ["job-legacy-first", "initial-index"],
-      ["job-legacy-second", "rebuild"],
-    ] as const) {
-      createJob(store, {
-        id,
-        kind,
-        requestedAt: "2026-07-25T00:00:00.000Z",
-      });
-      store.markJobRunning(id, "2026-07-25T00:00:01.000Z");
-      commitHierarchy(store, {
+    seedPreBindingSchemaV1Database(databasePath, workspaceKey, [
+      {
         completedAt: "2026-07-25T00:00:02.000Z",
-        graph,
-        jobId: id,
-        summary: {
-          builtinRulesVersion: "builtin-ignore-v1",
-          edgeCount: 0,
-          excludedPathCount: 0,
-          generatedAt: "2026-07-25T00:00:02.000Z",
-          indexedFileCount: 0,
-          nodeCount: 1,
-        },
-      });
-    }
-    store.close();
-
-    const rawDatabase = new RawSqlite(databasePath);
-    rawDatabase.prepare("DELETE FROM meta WHERE key LIKE 'bootstrap-committed-job:%'").run();
-    rawDatabase.close();
+        id: "job-legacy-first",
+        kind: "initial-index",
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        startedAt: "2026-07-25T00:00:01.000Z",
+      },
+      {
+        completedAt: "2026-07-25T00:00:02.000Z",
+        id: "job-legacy-second",
+        kind: "rebuild",
+        requestedAt: "2026-07-25T00:00:00.000Z",
+        startedAt: "2026-07-25T00:00:01.000Z",
+      },
+    ]);
 
     const reopened = await openSqliteGraphStore({ databasePath, workspaceKey });
     try {
@@ -493,11 +517,13 @@ describe("sqlite graph store", () => {
     }
 
     const reboundDatabase = new RawSqlite(databasePath);
-    const rebound = reboundDatabase.prepare(`
-      SELECT value FROM meta WHERE key = ?
-    `).get(`bootstrap-committed-job:${workspaceKey}`) as { value: string };
-    reboundDatabase.close();
-    expect(rebound.value).toBe("job-legacy-second");
+    try {
+      expect(reboundDatabase.prepare(`
+        SELECT value FROM meta WHERE key = ?
+      `).get(`bootstrap-committed-job:${workspaceKey}`)).toEqual({ value: "job-legacy-second" });
+    } finally {
+      reboundDatabase.close();
+    }
   });
 
   it("bounds retained terminal Job history while preserving the latest status", async () => {
@@ -1534,6 +1560,7 @@ describe("sqlite graph store", () => {
     const file = graph.nodes.find((node) => node.kind === "file")!;
     const edge = graph.edges[0]!;
     const rawDatabase = new RawSqlite(databasePath);
+    try {
     if (corruption === "missing-root") {
       rawDatabase.prepare("UPDATE nodes SET kind = 'directory' WHERE id = ?").run(root.id);
     } else if (corruption === "multiple-root") {
@@ -1603,11 +1630,12 @@ describe("sqlite graph store", () => {
     } else if (corruption === "unknown-relation") {
       rawDatabase.pragma("ignore_check_constraints = ON");
       const edgeWithFutureRelation = graph.edges[0]!;
-      const futureEdgeId = buildGraphEdgeId(
+      const futureEdgeId = buildLegacyGraphEdgeIdV0(
         workspaceKey,
         edgeWithFutureRelation.fromId,
         "imports" as never,
         edgeWithFutureRelation.toId,
+        "",
       );
       rawDatabase.prepare("UPDATE edges SET id = ?, relation_type = 'imports' WHERE id = ?")
         .run(futureEdgeId, edgeWithFutureRelation.id);
@@ -1724,7 +1752,9 @@ describe("sqlite graph store", () => {
         `).run(rootEdge.id);
       }
     }
-    rawDatabase.close();
+    } finally {
+      rawDatabase.close();
+    }
 
     /** 打开无关干净 workspace，证明完整性检查覆盖数据库全局而非当前 slice。 */
     await expect(openSqliteGraphStore({ databasePath, workspaceKey: openedWorkspaceKey }).then(
@@ -1843,7 +1873,13 @@ describe("sqlite graph store", () => {
     `);
     for (const edge of graph.edges) {
       insertEdge.run(
-        edge.id,
+        buildLegacyGraphEdgeIdV0(
+          workspaceKey,
+          edge.fromId,
+          edge.relationType,
+          edge.toId,
+          edge.qualifier,
+        ),
         workspaceKey,
         edge.fromId,
         edge.relationType,
@@ -1914,7 +1950,13 @@ describe("sqlite graph store", () => {
     `);
     for (const edge of graph.edges) {
       insertEdge.run(
-        edge.id,
+        buildLegacyGraphEdgeIdV0(
+          workspaceKey,
+          edge.fromId,
+          edge.relationType,
+          edge.toId,
+          edge.qualifier,
+        ),
         workspaceKey,
         edge.fromId,
         edge.relationType,
@@ -2914,7 +2956,7 @@ describe("sqlite graph store", () => {
     rawDatabase.close();
 
     await expect(openSqliteGraphStore({ databasePath, workspaceKey })).rejects.toThrow(
-      /历史 succeeded Job.*digest|规范语义重新派生/u,
+      /历史 succeeded Job.*digest|patch\/read-set 证据无法重新派生|规范语义重新派生/u,
     );
   });
 
@@ -3123,7 +3165,7 @@ describe("sqlite graph store", () => {
         applied_at TEXT NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at)
-      VALUES (4, '2026-07-25T00:00:00.000Z');
+      VALUES (5, '2026-07-25T00:00:00.000Z');
     `);
     expect(String(rawDatabase.pragma("journal_mode", { simple: true })).toLowerCase()).toBe("delete");
     rawDatabase.close();
@@ -3142,7 +3184,7 @@ describe("sqlite graph store", () => {
         .toBe("delete");
       expect(preservedDatabase.prepare(
         "SELECT MAX(version) AS version FROM schema_migrations",
-      ).get()).toEqual({ version: 4 });
+      ).get()).toEqual({ version: 5 });
     } finally {
       preservedDatabase.close();
     }
@@ -3160,7 +3202,7 @@ describe("sqlite graph store", () => {
         applied_at TEXT NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at)
-      VALUES (4, '2026-07-25T00:00:00.000Z');
+      VALUES (5, '2026-07-25T00:00:00.000Z');
     `);
     try {
       for (let attempt = 0; attempt < 5; attempt += 1) {

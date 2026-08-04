@@ -21,6 +21,7 @@ import {
 } from "@codegraph/application";
 import {
   buildGraphEntityId,
+  buildLegacyGraphEdgeIdV0,
   createExternalPackageNode,
   createNodeBuiltinNode,
   createUnresolvedExternalPackageNode,
@@ -39,11 +40,12 @@ import {
   type ModuleEvidenceV1,
 } from "@codegraph/domain";
 import {
-  assertModuleDependencySchemaSupported,
-  assertModuleDependencySchemaIntegrity,
-  applyModuleDependencyMigration,
-  MODULE_DEPENDENCY_TABLE_NAMES,
-} from "./migrations/003-module-dependencies.js";
+  AD4_EDGE_IDENTITY_SCHEMA_VERSION,
+  AD4_EDGE_IDENTITY_TABLE_NAMES,
+  applyAd4EdgeIdentityMigration,
+  assertAd4EdgeIdentitySchemaIntegrity,
+  assertAd4EdgeIdentitySchemaSupported,
+} from "./migrations/004-ad4-edge-identity.js";
 
 /** SQLite 锁竞争等待的固定上限。 */
 export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
@@ -1101,7 +1103,7 @@ export class SqliteGraphStore implements GraphStorePort {
       "原子提交触发了未声明的旁路表变更。",
     );
     // 提交公开前独立验证 module edge/Evidence 拓扑与精确 v3 Schema。
-    assertModuleDependencySchemaIntegrity(this.#database);
+    assertAd4EdgeIdentitySchemaIntegrity(this.#database, this.#digestPort);
     // 最终公开前复用启动屏障，校验 topology、ownership、摘要及完整 read-set 绑定。
     this.readBootstrapState();
 
@@ -1586,9 +1588,20 @@ export async function openSqliteGraphStore(
   try {
     database = new Database(options.databasePath, { timeout: SQLITE_BUSY_TIMEOUT_MS });
     /** 未知未来 Schema 必须在 WAL 等持久设置前只读拒绝。 */
-    assertModuleDependencySchemaSupported(database);
+    assertAd4EdgeIdentitySchemaSupported(database);
     configurePragmas(database);
-    applyModuleDependencyMigration(database);
+    const schemaVersionBeforeMigration = readSchemaVersionForBackup(database);
+    if (
+      existedBeforeOpen &&
+      schemaVersionBeforeMigration !== null &&
+      schemaVersionBeforeMigration < AD4_EDGE_IDENTITY_SCHEMA_VERSION
+    ) {
+      await createVerifiedAd4MigrationBackup(database, options.databasePath);
+    }
+    applyAd4EdgeIdentityMigration(database, {
+      digestPort: options.digestPort,
+      ...(options.faultInjector === undefined ? {} : { faultInjector: options.faultInjector }),
+    });
     database.prepare(`
       INSERT INTO workspace(workspace_key, completeness)
       VALUES (?, 'empty')
@@ -1597,7 +1610,7 @@ export async function openSqliteGraphStore(
     readAndValidatePragmas(database);
     if (
       JSON.stringify(readTableNames(database)) !==
-      JSON.stringify(MODULE_DEPENDENCY_TABLE_NAMES)
+      JSON.stringify(AD4_EDGE_IDENTITY_TABLE_NAMES)
     ) {
       throw new Error("SQLite migration 未保持精确八表。");
     }
@@ -1618,6 +1631,36 @@ export async function openSqliteGraphStore(
     }
     await preserveFailureCopy(options.databasePath, existedBeforeOpen);
     throw error;
+  }
+}
+
+/** 读取在线备份路由所需版本；空库返回 null。 */
+function readSchemaVersionForBackup(database: Database.Database): number | null {
+  if (!readTableNames(database).includes("schema_migrations")) {return null;}
+  return (database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as
+    { version: number | null }).version;
+}
+
+/**
+ * v1-v3 重键前使用 SQLite online backup API 生成一致快照，并以只读连接验证完整性。
+ *
+ * 备份保留在数据库同目录，名称含 UUID；并发 opener 各自生成完整快照，不覆盖已有文件。
+ */
+async function createVerifiedAd4MigrationBackup(
+  database: Database.Database,
+  databasePath: string,
+): Promise<void> {
+  const backupPath = `${databasePath}.pre-ad4-v4-${randomUUID()}.bak`;
+  await database.backup(backupPath);
+  const backup = new Database(backupPath, { readonly: true });
+  try {
+    const integrity = backup.pragma("integrity_check", { simple: true });
+    if (String(integrity).toLowerCase() !== "ok") {
+      throw new Error("SQLite AD-4 migration 在线备份完整性验证失败。");
+    }
+    assertAd4EdgeIdentitySchemaSupported(backup);
+  } finally {
+    backup.close();
   }
 }
 
@@ -2122,11 +2165,20 @@ function validatePersistedSucceededAttempt(
     throw new Error("历史 succeeded Job 的完整证据校验缺少规范 digest 实现。");
   }
   const derivedEvidence = derivePersistedEvidenceDigests(workspaceKey, readSet, digestPort);
+  const semanticDigestsMatch =
+    derivedEvidence.manifestDigest === readSet.manifestDigest &&
+    derivedEvidence.inputDigest === readSet.inputDigest &&
+    derivedEvidence.configDigest === readSet.configDigest;
+  const canonicalPatchMatches = derivedEvidence.patchDigest === row.patch_digest;
+  /** 仅在三份语义摘要已验证且 canonical patch 不匹配时，按需兼容历史 hierarchy ID。 */
+  const legacyHierarchyPatchDigest = semanticDigestsMatch &&
+    !canonicalPatchMatches &&
+    !isCompositeGraphReadSet(readSet)
+    ? deriveLegacyHierarchyPatchDigest(workspaceKey, readSet, digestPort)
+    : null;
   if (
-    derivedEvidence.manifestDigest !== readSet.manifestDigest ||
-    derivedEvidence.inputDigest !== readSet.inputDigest ||
-    derivedEvidence.configDigest !== readSet.configDigest ||
-    derivedEvidence.patchDigest !== row.patch_digest
+    !semanticDigestsMatch ||
+    (!canonicalPatchMatches && legacyHierarchyPatchDigest !== row.patch_digest)
   ) {
     throw new Error("历史 succeeded Job 的 read-set 或 patch digest 无法从规范语义重新派生。");
   }
@@ -2719,6 +2771,7 @@ function deriveHierarchyEvidenceDigests(
   workspaceKey: string,
   readSet: HierarchyReadSetV1,
   digestPort: CanonicalDigestPort,
+  identity: "canonical" | "legacy" = "canonical",
 ): {
   configDigest: string;
   inputDigest: string;
@@ -2731,7 +2784,18 @@ function deriveHierarchyEvidenceDigests(
   );
   const targetNodes = [...expectedGraph.nodes]
     .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
-  const targetEdges = [...expectedGraph.edges]
+  const targetEdges = expectedGraph.edges.map((edge) => identity === "canonical"
+    ? edge
+    : Object.freeze({
+        ...edge,
+        id: buildLegacyGraphEdgeIdV0(
+          workspaceKey,
+          edge.fromId,
+          edge.relationType,
+          edge.toId,
+          edge.qualifier,
+        ),
+      }))
     .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
   const manifestDigest = digestPort.digest(readSet.manifest);
   const inputDigest = digestPort.digest({ manifest: readSet.manifest });
@@ -2761,6 +2825,41 @@ function deriveHierarchyEvidenceDigests(
       producerVersion: HIERARCHY_PRODUCER_VERSION,
     }),
   };
+}
+
+/** legacy fallback 只重算受旧 edge ID 影响的 patch，不重复派生已验证的三份语义摘要。 */
+function deriveLegacyHierarchyPatchDigest(
+  workspaceKey: string,
+  readSet: HierarchyReadSetV1,
+  digestPort: CanonicalDigestPort,
+): string {
+  const expectedGraph = buildHierarchyGraph(
+    workspaceKey,
+    readSet.manifest.map((entry) => entry.path),
+  );
+  const targetNodes = [...expectedGraph.nodes]
+    .sort((left, right) => compareCanonicalGraphText(left.id, right.id));
+  const targetEdges = expectedGraph.edges.map((edge) => Object.freeze({
+    ...edge,
+    id: buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      edge.fromId,
+      edge.relationType,
+      edge.toId,
+      edge.qualifier,
+    ),
+  })).sort((left, right) => compareCanonicalGraphText(left.id, right.id));
+  return digestPort.digest({
+    configDigest: readSet.configDigest,
+    coverage: "complete",
+    edges: targetEdges,
+    inputDigest: readSet.inputDigest,
+    manifestDigest: readSet.manifestDigest,
+    nodes: targetNodes,
+    ownershipSliceId: hierarchyOwnershipSliceId(workspaceKey),
+    producerKind: HIERARCHY_PRODUCER_KIND,
+    producerVersion: HIERARCHY_PRODUCER_VERSION,
+  });
 }
 
 /** 用 committed Job 的规范 manifest 重建期望 hierarchy，拒绝同计数但拓扑或 ownership 被替换。 */

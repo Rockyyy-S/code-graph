@@ -2,4 +2,5 @@
 export * from "./migrations/001-bootstrap.js";
 export * from "./migrations/002-deterministic-commit.js";
 export * from "./migrations/003-module-dependencies.js";
+export * from "./migrations/004-ad4-edge-identity.js";
 export * from "./sqlite-graph-store.js";

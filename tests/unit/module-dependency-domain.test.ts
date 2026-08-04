@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGraphEdgeId,
+  buildLegacyGraphEdgeIdV0,
   buildModuleEvidenceId,
   buildNpmPackagePurl,
   buildUnresolvedNpmPackagePurl,
@@ -13,13 +14,15 @@ import {
 const workspaceKey = "a".repeat(64);
 
 describe("Story 1.5 module dependency domain", () => {
-  it("extends edge identity without changing the committed contains identity", () => {
+  it("uses AD-4 for every relation while keeping legacy encoding migration-only", () => {
     const fromId = `cg://${workspaceKey}/file/src/a.ts`;
     const toId = `cg://${workspaceKey}/file/src/b.ts`;
 
-    expect(buildGraphEdgeId(workspaceKey, fromId, "contains", toId)).toBe(
+    expect(buildLegacyGraphEdgeIdV0(workspaceKey, fromId, "contains", toId)).toBe(
       `cg://${workspaceKey}/edge/${encodeURIComponent(`${fromId}\0contains\0${toId}\0`)}`,
     );
+    expect(buildGraphEdgeId(workspaceKey, fromId, "contains", toId))
+      .toMatch(new RegExp(`^cg://${workspaceKey}/edge/v1/[a-f0-9]{64}$`, "u"));
     expect(buildGraphEdgeId(workspaceKey, fromId, "imports", toId, "type"))
       .not.toBe(buildGraphEdgeId(workspaceKey, fromId, "imports", toId, "value"));
   });

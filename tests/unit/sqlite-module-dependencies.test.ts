@@ -1,11 +1,12 @@
 import { createRequire } from "node:module";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCompositeGraphPatch,
   buildHierarchyFactBatch,
+  buildHierarchyGraph,
   buildModuleSourceFactBatch,
   createAnalyzerConfigFenceSnapshot,
   createAnalyzerConfigSnapshot,
@@ -14,15 +15,19 @@ import {
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
 import {
   buildGraphEntityId,
-  buildGraphEdgeId,
+  buildLegacyGraphEdgeIdV0,
   buildModuleEvidenceId,
   type HierarchyReadSetV1,
 } from "../../packages/domain/src/index.js";
 import {
+  AD4_EDGE_IDENTITY_SCHEMA_VERSION,
   applyBootstrapMigration,
+  applyAd4EdgeIdentityMigration,
   applyDeterministicCommitMigration,
   applyModuleDependencyMigration,
+  assertAd4ModuleDependencySchemaIntegrity,
   assertModuleDependencySchemaIntegrity,
+  GraphEdgeIdCollisionError,
   MODULE_DEPENDENCY_SCHEMA_VERSION,
   openSqliteGraphStore,
 } from "../../packages/adapters/store-sqlite/src/index.js";
@@ -55,7 +60,7 @@ interface RawSqliteDatabase {
 
 /** 从 store-sqlite 自身依赖边界解析原生 SQLite 构造器。 */
 interface RawSqliteConstructor {
-  new (databasePath: string): RawSqliteDatabase;
+  new (databasePath: string, options?: { readonly?: boolean }): RawSqliteDatabase;
 }
 
 const RawSqlite = requireFromStorePackage("better-sqlite3") as RawSqliteConstructor;
@@ -69,6 +74,335 @@ async function createDatabasePath(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "codegraph-module-sqlite-"));
   roots.push(root);
   return path.join(root, "graph.sqlite");
+}
+
+/** 构造带 current composite 证据的真实 v3 数据库，供 v4 rekey/恢复测试复用。 */
+async function seedLegacyV3CompositeDatabase(databasePath: string): Promise<{
+  canonicalEdgeIds: readonly string[];
+  canonicalEvidenceIds: readonly string[];
+  canonicalPatchDigest: string;
+  canonicalReadSetDigest: string;
+  canonicalTargetGraphDigest: string;
+  historicalPatchDigest: string;
+  historicalReadSetJson: string;
+  legacyEdgeIds: readonly string[];
+  legacyEvidenceIds: readonly string[];
+  legacyTargetGraphDigest: string;
+}> {
+  const emptySnapshot = {
+    allEdges: [],
+    allEvidence: [],
+    allNodes: [],
+    committedReadSet: null,
+    graphRevision: null,
+    ownedEdges: [],
+    ownedNodes: [],
+    ownedSlices: [],
+    ownershipSliceId: `hierarchy:${buildGraphEntityId(workspaceKey, "workspace", "")}`,
+    patchDigest: null,
+  } as const;
+  const patch = createPatch(emptySnapshot, "2026-07-27T00:00:00.000Z");
+  const hierarchySlice = patch.slices.find((slice) =>
+    slice.ownershipSliceId.startsWith("hierarchy:"));
+  const sourceSlice = patch.slices.find((slice) =>
+    slice.ownershipSliceId.startsWith("source:typescript:"));
+  if (hierarchySlice === undefined || sourceSlice === undefined) {
+    throw new Error("legacy v3 fixture 缺少 hierarchy/source slice。");
+  }
+  const canonicalEdges = [...hierarchySlice.edgeUpserts, ...patch.sharedEdgeUpserts]
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const legacyEdges = canonicalEdges.map((edge) => Object.freeze({
+    ...edge,
+    id: buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      edge.fromId,
+      edge.relationType,
+      edge.toId,
+      edge.qualifier,
+    ),
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  const legacyEdgeIdByCanonical = new Map(canonicalEdges.map((edge) => [
+    edge.id,
+    buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      edge.fromId,
+      edge.relationType,
+      edge.toId,
+      edge.qualifier,
+    ),
+  ]));
+  const legacyEvidence = sourceSlice.evidenceUpserts.map((item) => {
+    const edgeId = legacyEdgeIdByCanonical.get(item.edgeId);
+    if (edgeId === undefined) {throw new Error("legacy Evidence 缺少 edge 映射。");}
+    return Object.freeze({
+      ...item,
+      edgeId,
+      id: buildModuleEvidenceId({
+        analyzerVersion: item.analyzerVersion,
+        edgeId,
+        evidenceKind: item.evidenceKind,
+        normalizedRange: item.normalizedRange,
+        provenance: item.provenance,
+        sourceFileId: item.sourceFileId,
+      }),
+    });
+  });
+  const nodes = [...hierarchySlice.nodeUpserts, ...patch.sharedNodeUpserts]
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const ownership = [
+    ...hierarchySlice.nodeUpserts.map((node) => ({
+      factId: node.id,
+      factKind: "node" as const,
+      ownerKey: hierarchySlice.ownershipSliceId,
+    })),
+    ...legacyEdges.filter((edge) => edge.relationType === "contains").map((edge) => ({
+      factId: edge.id,
+      factKind: "edge" as const,
+      ownerKey: hierarchySlice.ownershipSliceId,
+    })),
+    ...legacyEvidence.map((item) => ({
+      factId: item.id,
+      factKind: "evidence" as const,
+      ownerKey: sourceSlice.ownershipSliceId,
+    })),
+  ].sort((left, right) => left.factKind.localeCompare(right.factKind) ||
+    left.factId.localeCompare(right.factId) || left.ownerKey.localeCompare(right.ownerKey));
+  const targetGraphDigest = sha256CanonicalJson({
+    edges: legacyEdges,
+    evidence: legacyEvidence.map(({ detectedAt: _detectedAt, ...semantic }) => semantic),
+    nodes,
+    ownership,
+    version: 1,
+  });
+  const readSet = Object.freeze({ ...patch.readSet, targetGraphDigest });
+  const patchDigest = sha256CanonicalJson({
+    configDigest: readSet.configDigest,
+    inputDigest: readSet.inputDigest,
+    manifestDigest: readSet.manifestDigest,
+    targetGraphDigest,
+    version: 1,
+  });
+
+  const database = new RawSqlite(databasePath);
+  applyModuleDependencyMigration(database as never);
+  database.pragma("foreign_keys = ON");
+  database.prepare(`
+    INSERT INTO workspace(
+      workspace_key, committed_at, indexed_file_count, node_count, edge_count,
+      excluded_path_count, builtin_rules_version, graph_revision, freshness, completeness,
+      manifest_digest, input_digest, config_digest, effective_ignore_digest, patch_digest
+    ) VALUES (?, ?, 1, ?, ?, 0, 'builtin-ignore-v1', 1, 'current', 'complete', ?, ?, ?, ?, ?)
+  `).run(
+    workspaceKey,
+    "2026-07-27T00:00:01.000Z",
+    nodes.length,
+    legacyEdges.length,
+    readSet.manifestDigest,
+    readSet.inputDigest,
+    readSet.configDigest,
+    readSet.effectiveIgnoreSnapshot.effectiveDigest,
+    patchDigest,
+  );
+  const insertNode = database.prepare(`
+    INSERT INTO nodes(id, workspace_key, kind, relative_path, payload_json)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  for (const node of nodes) {
+    const relativePath = "relativePath" in node ? node.relativePath : null;
+    const payload = node.kind === "external-package"
+      ? JSON.stringify({
+          packageName: node.packageName,
+          packageVersion: node.packageVersion,
+          versionState: node.versionState,
+        })
+      : node.kind === "node-builtin"
+        ? JSON.stringify({ moduleName: node.moduleName })
+        : "{}";
+    insertNode.run(node.id, workspaceKey, node.kind, relativePath, payload);
+  }
+  const insertEdge = database.prepare(`
+    INSERT INTO edges(id, workspace_key, from_id, relation_type, to_id, qualifier)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  for (const edge of legacyEdges) {
+    insertEdge.run(edge.id, workspaceKey, edge.fromId, edge.relationType, edge.toId, edge.qualifier);
+  }
+  const insertEvidence = database.prepare(`
+    INSERT INTO evidence(
+      id, workspace_key, edge_id, provenance, analyzer_version, source_file_id,
+      range_start, range_end, evidence_kind, confidence, language, detected_at, payload_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')
+  `);
+  for (const item of legacyEvidence) {
+    insertEvidence.run(
+      item.id,
+      workspaceKey,
+      item.edgeId,
+      item.provenance,
+      item.analyzerVersion,
+      item.sourceFileId,
+      item.normalizedRange.start,
+      item.normalizedRange.end,
+      item.evidenceKind,
+      item.confidence,
+      item.language,
+      item.detectedAt,
+    );
+  }
+  const insertOwnership = database.prepare(`
+    INSERT INTO facts_ownership(fact_kind, fact_id, owner_key, workspace_key)
+    VALUES (?, ?, ?, ?)
+  `);
+  for (const item of ownership) {
+    insertOwnership.run(item.factKind, item.factId, item.ownerKey, workspaceKey);
+  }
+  const historicalReadSetJson = JSON.stringify(readSet, null, 2);
+  const insertSucceededJob = database.prepare(`
+    INSERT INTO jobs(
+      id, workspace_key, kind, state, requested_at, started_at, completed_at,
+      base_graph_revision, result_graph_revision, read_set_json, patch_digest
+    ) VALUES (?, ?, 'initial-index', 'succeeded', ?, ?, ?, NULL, 1, ?, ?)
+  `);
+  insertSucceededJob.run(
+    "legacy-v3-historical",
+    workspaceKey,
+    "2026-07-26T23:59:57.000Z",
+    "2026-07-26T23:59:58.000Z",
+    "2026-07-26T23:59:59.000Z",
+    historicalReadSetJson,
+    patchDigest,
+  );
+  insertSucceededJob.run(
+    "legacy-v3-current",
+    workspaceKey,
+    "2026-07-27T00:00:00.000Z",
+    "2026-07-27T00:00:00.000Z",
+    "2026-07-27T00:00:01.000Z",
+    JSON.stringify(readSet),
+    patchDigest,
+  );
+  database.prepare("INSERT INTO meta(key, value) VALUES (?, ?), (?, ?)").run(
+    `bootstrap-committed-job:${workspaceKey}`,
+    "legacy-v3-current",
+    `bootstrap-committed-read-set-digest:${workspaceKey}`,
+    sha256CanonicalJson(readSet),
+  );
+  database.close();
+  return {
+    canonicalEdgeIds: Object.freeze(canonicalEdges.map((edge) => edge.id)),
+    canonicalEvidenceIds: Object.freeze(sourceSlice.evidenceUpserts.map((item) => item.id)),
+    canonicalPatchDigest: patch.patchDigest,
+    canonicalReadSetDigest: sha256CanonicalJson(patch.readSet),
+    canonicalTargetGraphDigest: patch.readSet.targetGraphDigest,
+    historicalPatchDigest: patchDigest,
+    historicalReadSetJson,
+    legacyEdgeIds: Object.freeze(legacyEdges.map((edge) => edge.id)),
+    legacyEvidenceIds: Object.freeze(legacyEvidence.map((item) => item.id)),
+    legacyTargetGraphDigest: targetGraphDigest,
+  };
+}
+
+/** 读取 migration 必须保持的八表应用状态，供 rollback 与幂等性逐字比较。 */
+function readApplicationState(database: RawSqliteDatabase): Record<string, unknown[]> {
+  return {
+    edges: database.prepare("SELECT * FROM edges ORDER BY rowid").all(),
+    evidence: database.prepare("SELECT * FROM evidence ORDER BY rowid").all(),
+    facts_ownership: database.prepare("SELECT * FROM facts_ownership ORDER BY rowid").all(),
+    jobs: database.prepare("SELECT * FROM jobs ORDER BY rowid").all(),
+    meta: database.prepare("SELECT * FROM meta ORDER BY rowid").all(),
+    nodes: database.prepare("SELECT * FROM nodes ORDER BY rowid").all(),
+    schema_migrations: database.prepare("SELECT * FROM schema_migrations ORDER BY rowid").all(),
+    workspace: database.prepare("SELECT * FROM workspace ORDER BY rowid").all(),
+  };
+}
+
+/** 精确八表集合是 v1-v4 共同边界，不允许 migration 引入 alias/dual-read 表。 */
+function readUserTables(database: RawSqliteDatabase): string[] {
+  return (database.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  `).all() as Array<{ name: string }>).map((row) => row.name);
+}
+
+/** ID 会重键，但业务时间字段必须在 migration 前后保持不变。 */
+function readTemporalState(database: RawSqliteDatabase): Record<string, unknown[]> {
+  return {
+    evidence: database.prepare(`
+      SELECT analyzer_version, source_file_id, range_start, range_end, detected_at
+      FROM evidence ORDER BY source_file_id, range_start, range_end
+    `).all(),
+    jobs: database.prepare(`
+      SELECT id, requested_at, started_at, completed_at
+      FROM jobs ORDER BY id
+    `).all(),
+    workspace: database.prepare(`
+      SELECT workspace_key, committed_at FROM workspace ORDER BY workspace_key
+    `).all(),
+  };
+}
+
+/** 构造真实 schema-v1 current，验证 v4 只重键且不补造现代提交证据。 */
+function seedLegacyV1CurrentDatabase(databasePath: string): {
+  canonicalEdgeIds: readonly string[];
+  legacyEdgeIds: readonly string[];
+} {
+  const graph = buildHierarchyGraph(workspaceKey, ["src/index.ts"]);
+  const legacyEdges = graph.edges.map((edge) => ({
+    ...edge,
+    id: buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      edge.fromId,
+      edge.relationType,
+      edge.toId,
+      edge.qualifier,
+    ),
+  }));
+  const rootId = buildGraphEntityId(workspaceKey, "workspace", "");
+  const database = new RawSqlite(databasePath);
+  applyBootstrapMigration(database as never);
+  database.prepare(`
+    INSERT INTO workspace(
+      workspace_key, committed_at, indexed_file_count, node_count, edge_count,
+      excluded_path_count, builtin_rules_version
+    ) VALUES (?, '2026-07-27T00:00:01.000Z', 1, ?, ?, 0, 'builtin-ignore-v1')
+  `).run(workspaceKey, graph.nodes.length, legacyEdges.length);
+  const insertNode = database.prepare(`
+    INSERT INTO nodes(id, workspace_key, kind, relative_path) VALUES (?, ?, ?, ?)
+  `);
+  for (const node of graph.nodes) {
+    insertNode.run(node.id, workspaceKey, node.kind, node.relativePath);
+  }
+  const insertEdge = database.prepare(`
+    INSERT INTO edges(id, workspace_key, from_id, relation_type, to_id, qualifier)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  for (const edge of legacyEdges) {
+    insertEdge.run(edge.id, workspaceKey, edge.fromId, edge.relationType, edge.toId, edge.qualifier);
+  }
+  const insertOwnership = database.prepare(`
+    INSERT INTO facts_ownership(fact_id, owner_key, workspace_key) VALUES (?, ?, ?)
+  `);
+  for (const factId of [...graph.nodes.map((node) => node.id), ...legacyEdges.map((edge) => edge.id)]) {
+    insertOwnership.run(factId, `hierarchy:${rootId}`, workspaceKey);
+  }
+  database.prepare(`
+    INSERT INTO jobs(
+      id, workspace_key, kind, state, requested_at, started_at, completed_at
+    ) VALUES (
+      'legacy-v1-current', ?, 'initial-index', 'succeeded',
+      '2026-07-27T00:00:00.000Z', '2026-07-27T00:00:00.000Z',
+      '2026-07-27T00:00:01.000Z'
+    )
+  `).run(workspaceKey);
+  database.prepare("INSERT INTO meta(key, value) VALUES (?, 'legacy-v1-current')").run(
+    `bootstrap-committed-job:${workspaceKey}`,
+  );
+  database.close();
+  return {
+    canonicalEdgeIds: Object.freeze(graph.edges.map((edge) => edge.id).sort()),
+    legacyEdgeIds: Object.freeze(legacyEdges.map((edge) => edge.id).sort()),
+  };
 }
 
 /** 构造一次含 Node built-in 依赖的完整 composite patch。 */
@@ -420,12 +754,15 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     database.close();
 
     await expect(openSqliteGraphStore({ databasePath, digestPort, workspaceKey }))
-      .rejects.toThrow(/ownership|Evidence|恢复|摘要/u);
+      .rejects.toThrow(/ownership|Evidence|恢复|摘要|targetGraphDigest|真实图事实/u);
   });
 
-  it("migrates to v3 and atomically persists module nodes, edges and source Evidence", async () => {
+  it("fresh-open converges through v3 to v4 and atomically persists module facts", async () => {
     const databasePath = await createDatabasePath();
     const store = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
+    const schema = new RawSqlite(databasePath, { readonly: true });
+    expect(databaseVersion(schema)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    schema.close();
     const snapshot = store.readCommittedSnapshot();
     const patch = createPatch(snapshot, "2026-07-27T00:00:00.000Z");
     store.createJob({
@@ -593,15 +930,30 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     const directoryId = buildGraphEntityId(workspaceKey, "directory", "src");
     const sourceId = buildGraphEntityId(workspaceKey, "file", "src/index.ts");
     const otherSourceId = buildGraphEntityId(workspaceKey, "file", "src/other.ts");
-    const containsDirectoryId = buildGraphEdgeId(workspaceKey, rootId, "contains", directoryId);
-    const containsSourceId = buildGraphEdgeId(workspaceKey, directoryId, "contains", sourceId);
-    const containsOtherId = buildGraphEdgeId(workspaceKey, directoryId, "contains", otherSourceId);
+    const containsDirectoryId = buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      rootId,
+      "contains",
+      directoryId,
+    );
+    const containsSourceId = buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      directoryId,
+      "contains",
+      sourceId,
+    );
+    const containsOtherId = buildLegacyGraphEdgeIdV0(
+      workspaceKey,
+      directoryId,
+      "contains",
+      otherSourceId,
+    );
     const moduleFromId = corruption === "source-kind" ? "node:path" : sourceId;
     const moduleRelationType = corruption === "invalid-qualifier" ? "exports" : "imports";
     const moduleQualifier = corruption === "invalid-qualifier"
       ? "reexport:%ZZ:name:value"
       : "value";
-    const moduleEdgeId = buildGraphEdgeId(
+    const moduleEdgeId = buildLegacyGraphEdgeIdV0(
       workspaceKey,
       moduleFromId,
       moduleRelationType,
@@ -834,6 +1186,7 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     store.close();
 
     const database = new RawSqlite(databasePath);
+    try {
     database.pragma("foreign_keys = OFF");
     const valid = database.prepare(`
       SELECT edge_id, source_file_id FROM evidence LIMIT 1
@@ -861,9 +1214,11 @@ describe("Story 1.5 SQLite module dependency storage", () => {
       VALUES ('evidence', ?, ?, ?)
     `).run(pollutedId, `source:typescript:${valid.source_file_id}`, otherWorkspaceKey);
 
-    expect(() => assertModuleDependencySchemaIntegrity(database as never))
+    expect(() => assertAd4ModuleDependencySchemaIntegrity(database as never))
       .toThrow(/workspace|Evidence|拓扑/u);
-    database.close();
+    } finally {
+      database.close();
+    }
   });
 
   it("rejects weakened CHECK expressions and closes runtime Evidence vocabularies", async () => {
@@ -942,6 +1297,7 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     store.close();
 
     const runtime = new RawSqlite(runtimePath);
+    try {
     const evidence = runtime.prepare(`
       SELECT id, edge_id, analyzer_version, source_file_id, range_start, range_end
       FROM evidence LIMIT 1
@@ -972,9 +1328,11 @@ describe("Story 1.5 SQLite module dependency storage", () => {
       UPDATE facts_ownership SET fact_id = ?
       WHERE fact_kind = 'evidence' AND fact_id = ?
     `).run(invalidEvidenceId, evidence.id);
-    expect(() => assertModuleDependencySchemaIntegrity(runtime as never))
+    expect(() => assertAd4ModuleDependencySchemaIntegrity(runtime as never))
       .toThrow(/Evidence|词汇|provenance|evidence_kind/u);
-    runtime.close();
+    } finally {
+      runtime.close();
+    }
   });
 
   it("re-reads absent bootstrap state after acquiring the IMMEDIATE lock", async () => {
@@ -1060,6 +1418,325 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     expect(databaseVersion(migrationDatabase)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
     competingDatabase.close();
     migrationDatabase.close();
+  });
+
+  it("converges absent/v1/v2/v3 to schema v4 with the exact eight application tables", async () => {
+    for (const sourceVersion of ["absent", "v1", "v2", "v3"] as const) {
+      const databasePath = await createDatabasePath();
+      const database = new RawSqlite(databasePath);
+      if (sourceVersion === "v1") {
+        applyBootstrapMigration(database as never);
+      } else if (sourceVersion === "v2") {
+        applyDeterministicCommitMigration(database as never);
+      } else if (sourceVersion === "v3") {
+        applyModuleDependencyMigration(database as never);
+      }
+
+      applyAd4EdgeIdentityMigration(database as never, { digestPort });
+
+      expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+      expect(readUserTables(database)).toEqual([
+        "edges",
+        "evidence",
+        "facts_ownership",
+        "jobs",
+        "meta",
+        "nodes",
+        "schema_migrations",
+        "workspace",
+      ]);
+      database.close();
+    }
+  });
+
+  it("rekeys edge, Evidence and ownership atomically while recomputing only current evidence", async () => {
+    const databasePath = await createDatabasePath();
+    const fixture = await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    const temporalBefore = readTemporalState(database);
+    const workspaceBefore = database.prepare(`
+      SELECT graph_revision, manifest_digest, input_digest, config_digest,
+             effective_ignore_digest, committed_at
+      FROM workspace WHERE workspace_key = ?
+    `).get(workspaceKey);
+
+    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+
+    expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect((database.prepare("SELECT id FROM edges ORDER BY id").all() as Array<{ id: string }>)
+      .map((row) => row.id)).toEqual([...fixture.canonicalEdgeIds].sort());
+    const migratedEvidence = database.prepare(`
+      SELECT id, edge_id FROM evidence ORDER BY id
+    `).all() as Array<{ edge_id: string; id: string }>;
+    expect(migratedEvidence.map((row) => row.id)).toEqual([...fixture.canonicalEvidenceIds].sort());
+    expect(migratedEvidence.every((row) => fixture.canonicalEdgeIds.includes(row.edge_id))).toBe(true);
+    const ownership = database.prepare(`
+      SELECT fact_kind, fact_id FROM facts_ownership
+      WHERE fact_kind IN ('edge', 'evidence') ORDER BY fact_kind, fact_id
+    `).all() as Array<{ fact_id: string; fact_kind: "edge" | "evidence" }>;
+    expect(ownership.some((row) => fixture.legacyEdgeIds.includes(row.fact_id))).toBe(false);
+    expect(ownership.some((row) => fixture.legacyEvidenceIds.includes(row.fact_id))).toBe(false);
+    expect(ownership.filter((row) => row.fact_kind === "edge")
+      .every((row) => fixture.canonicalEdgeIds.includes(row.fact_id))).toBe(true);
+    expect(ownership.filter((row) => row.fact_kind === "evidence")
+      .every((row) => fixture.canonicalEvidenceIds.includes(row.fact_id))).toBe(true);
+
+    const current = database.prepare(`
+      SELECT read_set_json, patch_digest FROM jobs WHERE id = 'legacy-v3-current'
+    `).get() as { patch_digest: string; read_set_json: string };
+    const currentReadSet = JSON.parse(current.read_set_json) as { targetGraphDigest: string };
+    const workspaceAfter = database.prepare(`
+      SELECT graph_revision, manifest_digest, input_digest, config_digest,
+             effective_ignore_digest, committed_at, patch_digest
+      FROM workspace WHERE workspace_key = ?
+    `).get(workspaceKey) as Record<string, unknown>;
+    const readSetMeta = database.prepare("SELECT value FROM meta WHERE key = ?").get(
+      `bootstrap-committed-read-set-digest:${workspaceKey}`,
+    ) as { value: string };
+    expect(currentReadSet.targetGraphDigest).toBe(fixture.canonicalTargetGraphDigest);
+    expect(currentReadSet.targetGraphDigest).not.toBe(fixture.legacyTargetGraphDigest);
+    expect(current.patch_digest).toBe(fixture.canonicalPatchDigest);
+    expect(workspaceAfter.patch_digest).toBe(fixture.canonicalPatchDigest);
+    expect(readSetMeta.value).toBe(fixture.canonicalReadSetDigest);
+    expect(workspaceAfter).toMatchObject(workspaceBefore as object);
+    expect(readTemporalState(database)).toEqual(temporalBefore);
+
+    const historical = database.prepare(`
+      SELECT read_set_json, patch_digest FROM jobs WHERE id = 'legacy-v3-historical'
+    `).get() as { patch_digest: string; read_set_json: string };
+    expect(historical).toEqual({
+      patch_digest: fixture.historicalPatchDigest,
+      read_set_json: fixture.historicalReadSetJson,
+    });
+    database.close();
+  });
+
+  it("keeps schema-v1 current evidence-less while rekeying its real hierarchy edges", async () => {
+    const databasePath = await createDatabasePath();
+    const fixture = seedLegacyV1CurrentDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+
+    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+
+    expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect((database.prepare("SELECT id FROM edges ORDER BY id").all() as Array<{ id: string }>)
+      .map((row) => row.id)).toEqual(fixture.canonicalEdgeIds);
+    expect((database.prepare("SELECT id FROM edges ORDER BY id").all() as Array<{ id: string }>)
+      .some((row) => fixture.legacyEdgeIds.includes(row.id))).toBe(false);
+    expect(database.prepare(`
+      SELECT read_set_json, patch_digest, legacy_schema_version
+      FROM jobs WHERE id = 'legacy-v1-current'
+    `).get()).toEqual({ legacy_schema_version: 1, patch_digest: null, read_set_json: null });
+    expect(database.prepare(`
+      SELECT graph_revision, manifest_digest, input_digest, config_digest,
+             effective_ignore_digest, patch_digest, committed_at
+      FROM workspace WHERE workspace_key = ?
+    `).get(workspaceKey)).toEqual({
+      committed_at: "2026-07-27T00:00:01.000Z",
+      config_digest: null,
+      effective_ignore_digest: null,
+      graph_revision: 1,
+      input_digest: null,
+      manifest_digest: null,
+      patch_digest: null,
+    });
+    expect(database.prepare("SELECT value FROM meta WHERE key = ?").get(
+      `bootstrap-committed-read-set-digest:${workspaceKey}`,
+    )).toBeUndefined();
+    database.close();
+  });
+
+  it.each(["edge", "ownership", "evidence", "metadata"] as const)(
+    "rolls back every authority table when v4 migration fails at %s",
+    async (faultStage) => {
+      const databasePath = await createDatabasePath();
+      await seedLegacyV3CompositeDatabase(databasePath);
+      const database = new RawSqlite(databasePath);
+      const before = readApplicationState(database);
+
+      expect(() => applyAd4EdgeIdentityMigration(database as never, {
+        digestPort,
+        faultInjector: ({ stage }) => {
+          if (stage === faultStage) {throw new Error(`injected v4 ${stage} failure`);}
+        },
+      })).toThrow(`injected v4 ${faultStage} failure`);
+
+      expect(databaseVersion(database)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
+      expect(readApplicationState(database)).toEqual(before);
+      database.close();
+    },
+  );
+
+  it.each([
+    "readset-base-zero",
+    "bootstrap-negative",
+    "status-empty",
+    "manifest-duplicate",
+    "ignore-invalid",
+    "ignore-generation-negative",
+    "analyzer-extra-field",
+    "fence-path-overlap",
+    "job-cas-mismatch",
+  ] as const)("rejects invalid v3 preflight before any schema-v4 mutation: %s", async (corruption) => {
+    const databasePath = await createDatabasePath();
+    const fixture = await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    if (corruption === "job-cas-mismatch") {
+      database.prepare(`
+        UPDATE jobs SET base_graph_revision = 1 WHERE id = 'legacy-v3-current'
+      `).run();
+    } else {
+      const persisted = database.prepare(`
+        SELECT read_set_json FROM jobs WHERE id = 'legacy-v3-current'
+      `).get() as { read_set_json: string };
+      const readSet = JSON.parse(persisted.read_set_json) as Record<string, unknown>;
+      const ignore = readSet.effectiveIgnoreSnapshot as Record<string, unknown>;
+      const analyzer = readSet.analyzerConfigSnapshot as Record<string, unknown>;
+      const fence = readSet.analyzerConfigFenceSnapshot as Record<string, unknown>;
+      if (corruption === "readset-base-zero") {
+        readSet.baseGraphRevision = 0;
+      } else if (corruption === "bootstrap-negative") {
+        readSet.bootstrapGeneration = -1;
+      } else if (corruption === "status-empty") {
+        readSet.statusEpoch = "";
+      } else if (corruption === "manifest-duplicate") {
+        const manifest = readSet.manifest as Array<Record<string, unknown>>;
+        readSet.manifest = [manifest[0]!, { ...manifest[0]! }];
+      } else if (corruption === "ignore-invalid") {
+        ignore.validity = "invalid";
+      } else if (corruption === "ignore-generation-negative") {
+        ignore.generation = -1;
+      } else if (corruption === "analyzer-extra-field") {
+        analyzer.unexpected = true;
+      } else {
+        const overlapping = { contentHash: "5".repeat(64), path: "tsconfig.json" };
+        analyzer.consultedFiles = [overlapping];
+        fence.blockedResolutionFiles = [overlapping];
+      }
+      database.prepare(`
+        UPDATE jobs SET read_set_json = ? WHERE id = 'legacy-v3-current'
+      `).run(JSON.stringify(readSet));
+    }
+    const before = readApplicationState(database);
+
+    expect(() => applyAd4EdgeIdentityMigration(database as never, { digestPort })).toThrow();
+
+    expect(databaseVersion(database)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
+    expect(readApplicationState(database)).toEqual(before);
+    expect((database.prepare("SELECT id FROM edges ORDER BY id").all() as Array<{ id: string }>)
+      .map((row) => row.id)).toEqual([...fixture.legacyEdgeIds].sort());
+    database.close();
+  });
+
+  it("returns GRAPH_EDGE_ID_COLLISION and rolls back when distinct tuples collide", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    const before = readApplicationState(database);
+    let failure: unknown;
+
+    try {
+      applyAd4EdgeIdentityMigration(database as never, {
+        digestPort,
+        faultInjector: ({ stage }) => {
+          if (stage === "edge") {
+            database.prepare("UPDATE temp.ad4_edge_rekey SET new_id = 'forced-collision'").run();
+          }
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(GraphEdgeIdCollisionError);
+    expect(failure).toMatchObject({ code: "GRAPH_EDGE_ID_COLLISION" });
+    expect(databaseVersion(database)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
+    expect(readApplicationState(database)).toEqual(before);
+    database.close();
+  });
+
+  it("is v4 reopen-idempotent and preserves every application row", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath);
+    let database = new RawSqlite(databasePath);
+    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+    const migrated = readApplicationState(database);
+    database.close();
+
+    const reopened = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
+    reopened.close();
+    database = new RawSqlite(databasePath);
+    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+
+    expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect(readApplicationState(database)).toEqual(migrated);
+    database.close();
+  });
+
+  it("preserves an invalid v3 backup as readonly schema-v3 evidence", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    const persisted = database.prepare(`
+      SELECT read_set_json FROM jobs WHERE id = 'legacy-v3-current'
+    `).get() as { read_set_json: string };
+    const readSet = JSON.parse(persisted.read_set_json) as Record<string, unknown>;
+    readSet.statusEpoch = "";
+    database.prepare(`
+      UPDATE jobs SET read_set_json = ? WHERE id = 'legacy-v3-current'
+    `).run(JSON.stringify(readSet));
+    database.close();
+
+    await expect(openSqliteGraphStore({ databasePath, digestPort, workspaceKey })).rejects.toThrow();
+
+    const entries = await readdir(path.dirname(databasePath));
+    const backupName = entries.find((entry) =>
+      /^graph\.sqlite\.failed-existing-\d+(?:-\d+)?\.bak$/u.test(entry));
+    if (backupName === undefined) {throw new Error("v3 migration failure backup 缺失。");}
+    const backup = new RawSqlite(path.join(path.dirname(databasePath), backupName), { readonly: true });
+    try {
+      expect(databaseVersion(backup)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
+      expect(String(backup.pragma("integrity_check", { simple: true })).toLowerCase()).toBe("ok");
+      expect(() => backup.prepare("INSERT INTO meta(key, value) VALUES ('x', 'y')").run())
+        .toThrow();
+    } finally {
+      backup.close();
+    }
+  });
+
+  it("keeps a concurrent WAL reader on complete v3 until the v4 transaction commits", async () => {
+    const databasePath = await createDatabasePath();
+    const fixture = await seedLegacyV3CompositeDatabase(databasePath);
+    const migrationDatabase = new RawSqlite(databasePath);
+    migrationDatabase.pragma("journal_mode = WAL");
+    const reader = new RawSqlite(databasePath, { readonly: true });
+    let observedDuringMigration: { edgeIds: string[]; version: number } | undefined;
+
+    try {
+      applyAd4EdgeIdentityMigration(migrationDatabase as never, {
+        digestPort,
+        faultInjector: ({ stage }) => {
+          if (stage === "evidence") {
+            observedDuringMigration = {
+              edgeIds: (reader.prepare("SELECT id FROM edges ORDER BY id").all() as Array<{ id: string }>)
+                .map((row) => row.id),
+              version: databaseVersion(reader),
+            };
+          }
+        },
+      });
+
+      expect(observedDuringMigration).toEqual({
+        edgeIds: [...fixture.legacyEdgeIds].sort(),
+        version: MODULE_DEPENDENCY_SCHEMA_VERSION,
+      });
+      expect(databaseVersion(reader)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+      expect((reader.prepare("SELECT id FROM edges ORDER BY id").all() as Array<{ id: string }>)
+        .map((row) => row.id)).toEqual([...fixture.canonicalEdgeIds].sort());
+    } finally {
+      reader.close();
+      migrationDatabase.close();
+    }
   });
 });
 

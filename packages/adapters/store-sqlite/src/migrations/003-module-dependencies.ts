@@ -3,6 +3,7 @@ import { isSupportedSourceFile } from "@codegraph/application";
 import {
   buildGraphEdgeId,
   buildGraphEntityId,
+  buildLegacyGraphEdgeIdV0,
   buildModuleEvidenceId,
   buildNpmPackagePurl,
   buildUnresolvedNpmPackagePurl,
@@ -231,10 +232,24 @@ function assertLegacyV2Ownership(database: Database.Database): void {
 
 /** v3 打开时交叉校验外键、身份、拓扑与多态 ownership。 */
 export function assertModuleDependencySchemaIntegrity(database: Database.Database): void {
+  assertModuleDependencySchemaIntegrityWithEdgeBuilder(database, buildLegacyGraphEdgeIdV0, "v3");
+}
+
+/** v4 复用同一精确 Schema/拓扑检查，但关系身份切换为 AD-4 v1。 */
+export function assertAd4ModuleDependencySchemaIntegrity(database: Database.Database): void {
+  assertModuleDependencySchemaIntegrityWithEdgeBuilder(database, buildGraphEdgeId, "v4");
+}
+
+/** 仅身份算法按 schema 版本切换，其余八表、Evidence 与 ownership 合同完全共享。 */
+function assertModuleDependencySchemaIntegrityWithEdgeBuilder(
+  database: Database.Database,
+  edgeIdBuilder: typeof buildGraphEdgeId,
+  schemaLabel: "v3" | "v4",
+): void {
   assertExactV3Schema(database);
   assertNoForeignKeyViolation(database);
   assertCanonicalNodes(database);
-  assertCanonicalEdges(database);
+  assertCanonicalEdges(database, edgeIdBuilder, schemaLabel);
   assertCanonicalEvidence(database);
   assertOwnership(database);
   assertHierarchyTopology(database);
@@ -288,7 +303,11 @@ function assertCanonicalNodes(database: Database.Database): void {
 }
 
 /** 所有关系 ID 继续绑定 workspace、方向、端点、类型与 qualifier。 */
-function assertCanonicalEdges(database: Database.Database): void {
+function assertCanonicalEdges(
+  database: Database.Database,
+  edgeIdBuilder: typeof buildGraphEdgeId,
+  schemaLabel: "v3" | "v4",
+): void {
   const rows = database.prepare(`
     SELECT id, workspace_key, from_id, relation_type, to_id, qualifier FROM edges
   `).iterate() as Iterable<{
@@ -302,7 +321,7 @@ function assertCanonicalEdges(database: Database.Database): void {
   for (const row of rows) {
     if (
       !["contains", "exports", "imports"].includes(row.relation_type) ||
-      row.id !== buildGraphEdgeId(
+      row.id !== edgeIdBuilder(
         row.workspace_key,
         row.from_id,
         row.relation_type as "contains" | "exports" | "imports",
@@ -316,7 +335,7 @@ function assertCanonicalEdges(database: Database.Database): void {
           row.qualifier,
         ))
     ) {
-      throw new Error("SQLite v3 包含非规范 module edge qualifier 或 edge 身份。");
+      throw new Error(`SQLite ${schemaLabel} 包含非规范 module edge qualifier 或 edge 身份。`);
     }
   }
 }
