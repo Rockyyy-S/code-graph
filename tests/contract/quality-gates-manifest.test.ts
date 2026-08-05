@@ -11,11 +11,97 @@ import {
   runArchitectureRequired,
 } from "../../scripts/ci/run-architecture-required.mjs";
 import {
+  assertTypeScriptModuleAnalysisBuildTopology,
   TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST,
+  VITEST_REPORT_MAX_BYTES,
+  verifyTypeScriptModuleAnalysis,
 } from "../../scripts/ci/verify-typescript-module-analysis-v1.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const temporaryRoots: string[] = [];
+
+type VitestAssertionStatus = "disabled" | "failed" | "passed" | "pending" | "skipped" | "todo";
+
+interface FakeProcessResult {
+  error?: Error;
+  output: Array<string | null>;
+  pid: number;
+  signal: NodeJS.Signals | null;
+  status: number | null;
+  stderr: string;
+  stdout: string;
+}
+
+/** 构造与 Vitest JSON reporter 同形的最小完整运行结果。 */
+function createVitestReport(statuses: readonly VitestAssertionStatus[]): string {
+  const passed = statuses.filter((status) => status === "passed").length;
+  const failed = statuses.filter((status) => status === "failed").length;
+  const pending = statuses.filter(
+    (status) => status === "pending" || status === "skipped" || status === "disabled",
+  ).length;
+  const todo = statuses.filter((status) => status === "todo").length;
+  const hasNonPassing = failed > 0 || pending > 0 || todo > 0;
+
+  return JSON.stringify({
+    numFailedTestSuites: failed > 0 ? 1 : 0,
+    numFailedTests: failed,
+    numPassedTestSuites: hasNonPassing ? 0 : 1,
+    numPassedTests: passed,
+    numPendingTestSuites: failed === 0 && (pending > 0 || todo > 0) ? 1 : 0,
+    numPendingTests: pending,
+    numTodoTests: todo,
+    numTotalTestSuites: 1,
+    numTotalTests: statuses.length,
+    success: !hasNonPassing,
+    testResults: [{
+      assertionResults: statuses.map((status) => ({ status })),
+    }],
+  });
+}
+
+/** 构造固定数量全部通过的 reporter 输出。 */
+function createPassingVitestReport(testCount: number): string {
+  return createVitestReport(Array.from({ length: testCount }, () => "passed" as const));
+}
+
+/** 构造已正常退出且携带 reporter stdout 的受控进程结果。 */
+function createProcessResult(stdout = "", overrides: Partial<FakeProcessResult> = {}): FakeProcessResult {
+  const result = {
+    output: [null, stdout, ""],
+    pid: 1,
+    signal: null,
+    status: 0,
+    stderr: "",
+    stdout,
+    ...overrides,
+  };
+  return {
+    ...result,
+    output: [null, result.stdout, result.stderr],
+  };
+}
+
+/**
+ * 通过真实 verifier 编排入口注入受控子进程结果，证明计数权威没有停留在静态 manifest。
+ */
+function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, FakeProcessResult> = new Map()) {
+  const expectedCounts = [273, 45, 6] as const;
+  let vitestIndex = 0;
+  const executePnpm = vi.fn((args: string[]) => {
+    if (!args.includes("vitest")) {
+      return createProcessResult();
+    }
+    const currentIndex = vitestIndex;
+    vitestIndex += 1;
+    return overrides.get(currentIndex)
+      ?? createProcessResult(createPassingVitestReport(expectedCounts[currentIndex]!));
+  });
+
+  return {
+    executePnpm,
+    status: verifyTypeScriptModuleAnalysis({ executePnpm }),
+  };
+}
 
 const expectedGates = [
   ["basic-security", ["pnpm", "basic-security"], "security"],
@@ -174,6 +260,7 @@ const expectedGates = [
 ] as const;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -203,20 +290,25 @@ describe("quality-gates.v1 registry", () => {
         "@codegraph/service-client",
         "@codegraph/adapter-analyzer-typescript",
         "@codegraph/adapter-git-local",
+        "@codegraph/adapter-host-path-posix-native",
         "@codegraph/adapter-store-sqlite",
         "@codegraph/graph-service",
       ],
-      contractTests: ["tests/contract/graph-service-process.test.ts"],
+      contractShards: [{
+        expectedTestCount: 6,
+        shardId: "graph-service-process",
+        tests: ["tests/contract/graph-service-process.test.ts"],
+      }],
       unitShards: [
         {
-          expectedTestCount: 272,
+          expectedTestCount: 273,
           shardId: "default-unit",
           tests: originalUnitTests.filter(
             (testPath) => testPath !== "tests/unit/sqlite-module-dependencies.test.ts",
           ),
         },
         {
-          expectedTestCount: 25,
+          expectedTestCount: 45,
           shardId: "sqlite-module-dependencies",
           tests: ["tests/unit/sqlite-module-dependencies.test.ts"],
         },
@@ -233,7 +325,11 @@ describe("quality-gates.v1 registry", () => {
     expect(new Set(unitTests).size).toBe(unitTests.length);
     expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
     expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(297);
+      .toBe(318);
+    expect([
+      ...unitShards,
+      ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
+    ].reduce((total, { expectedTestCount }) => total + expectedTestCount, 0)).toBe(324);
   });
 
   it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {
@@ -251,6 +347,7 @@ describe("quality-gates.v1 registry", () => {
         "@codegraph/service-client",
         "@codegraph/adapter-analyzer-typescript",
         "@codegraph/adapter-git-local",
+        "@codegraph/adapter-host-path-posix-native",
         "@codegraph/adapter-store-sqlite",
       ]],
     ]);
@@ -261,6 +358,122 @@ describe("quality-gates.v1 registry", () => {
           .toBeLessThan(order.get(dependent)!);
       }
     }
+
+    expect(() => assertTypeScriptModuleAnalysisBuildTopology(
+      buildFilters.filter((filter) => filter !== "@codegraph/adapter-host-path-posix-native"),
+    )).toThrow(/BUILD_TOPOLOGY_INVALID/u);
+    expect(() => assertTypeScriptModuleAnalysisBuildTopology([
+      ...buildFilters.filter((filter) => filter !== "@codegraph/adapter-host-path-posix-native"),
+      "@codegraph/adapter-host-path-posix-native",
+    ])).toThrow(/BUILD_TOPOLOGY_INVALID/u);
+  });
+
+  it("consumes exact 273 + 45 unit and 6 contract runtime attestations", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { executePnpm, status } = runStoryVerifierWithOverrides();
+
+    expect(status).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("273/273 tests passed");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("45/45 tests passed");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("6/6 tests passed");
+
+    const commands = executePnpm.mock.calls.map(([args]) => args);
+    const buildFilters = commands
+      .filter((args) => args[0] === "--filter")
+      .map((args) => args[1]);
+    expect(buildFilters).toEqual(TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.buildFilters);
+    expect(buildFilters.indexOf("@codegraph/adapter-host-path-posix-native"))
+      .toBeLessThan(buildFilters.indexOf("@codegraph/graph-service"));
+
+    const vitestCommands = commands.filter((args) => args.includes("vitest"));
+    expect(vitestCommands).toHaveLength(3);
+    expect(vitestCommands.every((args) => args.includes("--reporter=json"))).toBe(true);
+  });
+
+  it.each([
+    ["default unit", 0, 272],
+    ["SQLite unit", 1, 44],
+    ["contract", 2, 5],
+  ] as const)("rejects reduced %s runtime totals", (_label, shardIndex, reducedCount) => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const overrides = new Map<number, FakeProcessResult>([
+      [shardIndex, createProcessResult(createPassingVitestReport(reducedCount))],
+    ]);
+
+    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_COUNT_MISMATCH");
+  });
+
+  it.each([
+    [
+      "failed",
+      createProcessResult(createVitestReport([
+        ...Array.from({ length: 272 }, () => "passed" as const),
+        "failed",
+      ])),
+      "VITEST_FAILED",
+    ],
+    [
+      "pending",
+      createProcessResult(createVitestReport([
+        ...Array.from({ length: 272 }, () => "passed" as const),
+        "pending",
+      ])),
+      "VITEST_NONPASSING",
+    ],
+    [
+      "skipped",
+      createProcessResult(createVitestReport([
+        ...Array.from({ length: 272 }, () => "passed" as const),
+        "skipped",
+      ])),
+      "VITEST_NONPASSING",
+    ],
+    [
+      "todo",
+      createProcessResult(createVitestReport([
+        ...Array.from({ length: 272 }, () => "passed" as const),
+        "todo",
+      ])),
+      "VITEST_NONPASSING",
+    ],
+    ["malformed", createProcessResult("{not-json"), "VITEST_REPORT_MALFORMED"],
+    ["empty", createProcessResult("  \r\n"), "VITEST_REPORT_EMPTY"],
+    [
+      "oversized",
+      createProcessResult("x".repeat(VITEST_REPORT_MAX_BYTES + 1)),
+      "VITEST_REPORT_OVERSIZED",
+    ],
+    [
+      "abnormal termination",
+      createProcessResult(createPassingVitestReport(273), { signal: "SIGTERM", status: null }),
+      "VITEST_ABNORMAL_TERMINATION",
+    ],
+  ] as const)("fails closed on %s reporter evidence", (_label, result, expectedCode) => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const overrides = new Map<number, FakeProcessResult>([[0, result]]);
+
+    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain(expectedCode);
+  });
+
+  it("fails closed when reporter assertion details do not cover the aggregate total", () => {
+    const report = JSON.parse(createPassingVitestReport(273)) as {
+      testResults: Array<{ assertionResults: unknown[] }>;
+    };
+    report.testResults[0]!.assertionResults.pop();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const overrides = new Map<number, FakeProcessResult>([
+      [0, createProcessResult(JSON.stringify(report))],
+    ]);
+
+    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_REPORT_INCOMPLETE");
   });
 
   it("登记唯一、升序且由本地 runner 始终执行的二十六项 blocking gate", async () => {

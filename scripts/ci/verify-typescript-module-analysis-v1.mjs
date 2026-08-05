@@ -4,6 +4,9 @@ import path from "node:path";
 import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+/** JSON reporter 的 stdout/stderr 各自最多保留 4 MiB，避免异常测试无限占用内存。 */
+export const VITEST_REPORT_MAX_BYTES = 4 * 1024 * 1024;
+
 /** Story verifier 的固定清单由 contract 回归锁定，禁止静默缩小。 */
 export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
   /** clean checkout 不含 dist，必须按 project reference 拓扑先构建所有被依赖包。 */
@@ -14,16 +17,23 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
     "@codegraph/service-client",
     "@codegraph/adapter-analyzer-typescript",
     "@codegraph/adapter-git-local",
+    "@codegraph/adapter-host-path-posix-native",
     "@codegraph/adapter-store-sqlite",
     "@codegraph/graph-service",
   ]),
-  contractTests: Object.freeze([
-    "tests/contract/graph-service-process.test.ts",
+  contractShards: Object.freeze([
+    Object.freeze({
+      expectedTestCount: 6,
+      shardId: "graph-service-process",
+      tests: Object.freeze([
+        "tests/contract/graph-service-process.test.ts",
+      ]),
+    }),
   ]),
   /** 按数组顺序串行启动独立 Vitest 进程，隔离 SQLite 锁与构建后并行资源竞争。 */
   unitShards: Object.freeze([
     Object.freeze({
-      expectedTestCount: 272,
+      expectedTestCount: 273,
       shardId: "default-unit",
       tests: Object.freeze([
         "tests/unit/analyzer-config-capture.test.ts",
@@ -40,7 +50,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
       ]),
     }),
     Object.freeze({
-      expectedTestCount: 25,
+      expectedTestCount: 45,
       shardId: "sqlite-module-dependencies",
       tests: Object.freeze([
         "tests/unit/sqlite-module-dependencies.test.ts",
@@ -51,49 +61,304 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
 });
 
 /**
- * 构建真实 Worker 产物并运行 Story 1.5 不可缩小的模块分析回归集。
+ * 锁定 graph-service clean-checkout 所需的 POSIX adapter 构建前置。
+ *
+ * @param {readonly string[]} buildFilters 待校验的构建过滤器。
+ * @throws {Error} 过滤器重复、缺失或顺序错误时抛出稳定错误。
  */
-export function verifyTypeScriptModuleAnalysis() {
+export function assertTypeScriptModuleAnalysisBuildTopology(buildFilters) {
+  const uniqueFilters = new Set(buildFilters);
+  const posixAdapter = "@codegraph/adapter-host-path-posix-native";
+  const graphService = "@codegraph/graph-service";
+  const posixIndex = buildFilters.indexOf(posixAdapter);
+  const graphServiceIndex = buildFilters.indexOf(graphService);
+
+  if (uniqueFilters.size !== buildFilters.length
+    || posixIndex < 0
+    || graphServiceIndex < 0
+    || posixIndex >= graphServiceIndex) {
+    throw new Error(
+      "[typescript-module-analysis-v1] BUILD_TOPOLOGY_INVALID: POSIX adapter 必须唯一存在且先于 graph-service 构建。",
+    );
+  }
+}
+
+/**
+ * 解析并证明单个 Vitest JSON reporter 输出的完整性与精确运行数量。
+ *
+ * @param {string | Buffer | Uint8Array} output Vitest reporter stdout。
+ * @param {{ expectedTestCount: number; shardId: string }} authority 固定 shard 权威。
+ * @returns {{ failed: number; passed: number; pending: number; skipped: number; todo: number; total: number }}
+ * @throws {Error} 输出为空、超限、格式错误、计数不一致或存在非通过测试时抛出稳定错误。
+ */
+export function attestVitestJsonReport(output, authority) {
+  const shardId = typeof authority?.shardId === "string" && authority.shardId.length > 0
+    ? authority.shardId
+    : "unknown-shard";
+  if (!Number.isSafeInteger(authority?.expectedTestCount) || authority.expectedTestCount < 0) {
+    throw createAttestationError(shardId, "VITEST_AUTHORITY_INVALID", "expectedTestCount 必须是非负安全整数。");
+  }
+
+  const outputBuffer = toOutputBuffer(output, shardId);
+  if (outputBuffer.byteLength > VITEST_REPORT_MAX_BYTES) {
+    throw createAttestationError(
+      shardId,
+      "VITEST_REPORT_OVERSIZED",
+      `reporter 输出超过 ${VITEST_REPORT_MAX_BYTES} bytes。`,
+    );
+  }
+  if (outputBuffer.byteLength === 0 || outputBuffer.toString("utf8").trim().length === 0) {
+    throw createAttestationError(shardId, "VITEST_REPORT_EMPTY", "reporter 未输出 JSON。");
+  }
+
+  let report;
+  try {
+    report = JSON.parse(outputBuffer.toString("utf8"));
+  } catch {
+    throw createAttestationError(shardId, "VITEST_REPORT_MALFORMED", "reporter 输出不是单个有效 JSON 文档。");
+  }
+  if (!isRecord(report) || report.success !== true && report.success !== false) {
+    throw createAttestationError(shardId, "VITEST_REPORT_SCHEMA_INVALID", "reporter 根对象或 success 字段无效。");
+  }
+
+  const rootCounts = {
+    failed: readReportCount(report, "numFailedTests", shardId),
+    passed: readReportCount(report, "numPassedTests", shardId),
+    pending: readReportCount(report, "numPendingTests", shardId),
+    todo: readReportCount(report, "numTodoTests", shardId),
+    total: readReportCount(report, "numTotalTests", shardId),
+  };
+  const suiteCounts = {
+    failed: readReportCount(report, "numFailedTestSuites", shardId),
+    passed: readReportCount(report, "numPassedTestSuites", shardId),
+    pending: readReportCount(report, "numPendingTestSuites", shardId),
+    total: readReportCount(report, "numTotalTestSuites", shardId),
+  };
+  if (rootCounts.passed + rootCounts.failed + rootCounts.pending + rootCounts.todo !== rootCounts.total
+    || suiteCounts.passed + suiteCounts.failed + suiteCounts.pending !== suiteCounts.total) {
+    throw createAttestationError(shardId, "VITEST_REPORT_INCOMPLETE", "reporter 汇总计数无法闭合。");
+  }
+  if (!Array.isArray(report.testResults)) {
+    throw createAttestationError(shardId, "VITEST_REPORT_SCHEMA_INVALID", "testResults 必须是数组。");
+  }
+
+  const derivedCounts = {
+    failed: 0,
+    passed: 0,
+    pending: 0,
+    skipped: 0,
+    todo: 0,
+    total: 0,
+  };
+  for (const testResult of report.testResults) {
+    if (!isRecord(testResult) || !Array.isArray(testResult.assertionResults)) {
+      throw createAttestationError(shardId, "VITEST_REPORT_SCHEMA_INVALID", "assertionResults 必须完整存在。");
+    }
+    for (const assertion of testResult.assertionResults) {
+      if (!isRecord(assertion) || typeof assertion.status !== "string") {
+        throw createAttestationError(shardId, "VITEST_REPORT_SCHEMA_INVALID", "测试状态字段无效。");
+      }
+      derivedCounts.total += 1;
+      switch (assertion.status) {
+        case "passed":
+          derivedCounts.passed += 1;
+          break;
+        case "failed":
+          derivedCounts.failed += 1;
+          break;
+        case "pending":
+          derivedCounts.pending += 1;
+          break;
+        case "skipped":
+        case "disabled":
+          derivedCounts.skipped += 1;
+          break;
+        case "todo":
+          derivedCounts.todo += 1;
+          break;
+        default:
+          throw createAttestationError(
+            shardId,
+            "VITEST_REPORT_SCHEMA_INVALID",
+            `未知测试状态 ${assertion.status}。`,
+          );
+      }
+    }
+  }
+
+  if (derivedCounts.total !== rootCounts.total
+    || derivedCounts.passed !== rootCounts.passed
+    || derivedCounts.failed !== rootCounts.failed
+    || derivedCounts.pending + derivedCounts.skipped !== rootCounts.pending
+    || derivedCounts.todo !== rootCounts.todo) {
+    throw createAttestationError(shardId, "VITEST_REPORT_INCOMPLETE", "逐项状态与 reporter 汇总不一致。");
+  }
+  if (rootCounts.total !== authority.expectedTestCount) {
+    throw createAttestationError(
+      shardId,
+      "VITEST_COUNT_MISMATCH",
+      `expected=${authority.expectedTestCount} actual=${rootCounts.total}。`,
+    );
+  }
+  if (rootCounts.failed > 0) {
+    throw createAttestationError(shardId, "VITEST_FAILED", `failed=${rootCounts.failed}。`);
+  }
+  if (rootCounts.pending > 0 || rootCounts.todo > 0) {
+    throw createAttestationError(
+      shardId,
+      "VITEST_NONPASSING",
+      `pendingOrSkipped=${rootCounts.pending} todo=${rootCounts.todo}。`,
+    );
+  }
+  if (!report.success || rootCounts.passed !== rootCounts.total || suiteCounts.failed > 0 || suiteCounts.pending > 0) {
+    throw createAttestationError(shardId, "VITEST_REPORT_INCOMPLETE", "成功标记、suite 与测试汇总不一致。");
+  }
+
+  return Object.freeze({ ...derivedCounts });
+}
+
+/**
+ * 构建真实 Worker 产物并运行 Story 1.5 不可缩小的模块分析回归集。
+ *
+ * @param {{ executePnpm?: typeof runPnpm }} [dependencies] 测试可注入的受控命令执行边界。
+ * @returns {number} 0 表示所有构建与运行时证明均通过。
+ */
+export function verifyTypeScriptModuleAnalysis(dependencies = {}) {
+  const executePnpm = dependencies.executePnpm ?? runPnpm;
+  try {
+    assertTypeScriptModuleAnalysisBuildTopology(
+      TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.buildFilters,
+    );
+  } catch (error) {
+    console.error(toStableErrorMessage(error));
+    return 1;
+  }
+
   for (const filter of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.buildFilters) {
-    const status = runPnpm(["--filter", filter, "build"]);
-    if (status !== 0) {return status;}
+    const result = executePnpm(["--filter", filter, "build"], { captureOutput: false });
+    if (!didProcessExitSuccessfully(result)) {
+      console.error(
+        `[typescript-module-analysis-v1] BUILD_FAILED: ${filter} 未成功构建。`,
+      );
+      return 1;
+    }
   }
+
   for (const shard of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards) {
-    const unitStatus = runPnpm([
-      "exec",
-      "vitest",
-      "run",
-      "--config",
-      "vitest.config.ts",
-      ...shard.tests,
-    ]);
-    if (unitStatus !== 0) {return unitStatus;}
+    if (runVitestShard(executePnpm, "vitest.config.ts", shard) !== 0) {
+      return 1;
+    }
   }
-  return runPnpm([
+  for (const shard of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards) {
+    if (runVitestShard(executePnpm, "vitest.contract.config.ts", shard) !== 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/** 使用机器可解析 reporter 运行并证明单个固定 shard。 */
+function runVitestShard(executePnpm, configPath, shard) {
+  const result = executePnpm([
     "exec",
     "vitest",
     "run",
     "--config",
-    "vitest.contract.config.ts",
-    ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractTests,
-  ]);
+    configPath,
+    "--reporter=json",
+    ...shard.tests,
+  ], { captureOutput: true });
+
+  try {
+    assertVitestTermination(result, shard.shardId);
+    const attestation = attestVitestJsonReport(result.stdout, shard);
+    console.log(
+      `[typescript-module-analysis-v1:${shard.shardId}] ${attestation.passed}/${attestation.total} tests passed。`,
+    );
+    return 0;
+  } catch (error) {
+    console.error(toStableErrorMessage(error));
+    return 1;
+  }
 }
 
-/** 使用冻结 pnpm 入口运行单个固定 argv。 */
-function runPnpm(args) {
+/** 使用冻结 pnpm 入口运行单个固定 argv，并只为 reporter 使用有界捕获。 */
+function runPnpm(args, options = {}) {
   const invocation = createPnpmInvocation(process.env.npm_execpath, args);
-  const result = spawnSync(invocation.executable, invocation.args, {
+  return spawnSync(invocation.executable, invocation.args, {
     cwd: repositoryRoot,
+    encoding: options.captureOutput === true ? "utf8" : undefined,
     env: process.env,
-    stdio: "inherit",
+    maxBuffer: options.captureOutput === true ? VITEST_REPORT_MAX_BYTES : undefined,
+    stdio: options.captureOutput === true ? ["ignore", "pipe", "pipe"] : "inherit",
     windowsHide: true,
     windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
   });
-  if (result.error !== undefined) {
-    console.error("TypeScript 模块分析 Gate 无法启动。Fix: 检查 pnpm 与测试运行环境。");
-    return 1;
+}
+
+/** 校验 Vitest 子进程没有启动失败、非零退出或异常终止。 */
+function assertVitestTermination(result, shardId) {
+  if (result?.error !== undefined) {
+    throw createAttestationError(shardId, "VITEST_CAPTURE_FAILED", "测试进程启动或有界输出捕获失败。");
   }
-  return result.status ?? 1;
+  if (result?.signal !== undefined && result.signal !== null) {
+    throw createAttestationError(
+      shardId,
+      "VITEST_ABNORMAL_TERMINATION",
+      `signal=${String(result.signal)}。`,
+    );
+  }
+  if (result?.status !== 0) {
+    throw createAttestationError(
+      shardId,
+      "VITEST_EXIT_NONZERO",
+      `status=${String(result?.status ?? "null")}。`,
+    );
+  }
+}
+
+/** 判断普通构建命令是否正常以 0 退出。 */
+function didProcessExitSuccessfully(result) {
+  return result?.error === undefined
+    && (result?.signal === undefined || result.signal === null)
+    && result?.status === 0;
+}
+
+/** 将 reporter 输出统一为 Buffer，以字节长度实施平台无关上界。 */
+function toOutputBuffer(output, shardId) {
+  if (typeof output === "string") {
+    return Buffer.from(output, "utf8");
+  }
+  if (Buffer.isBuffer(output) || output instanceof Uint8Array) {
+    return Buffer.from(output);
+  }
+  throw createAttestationError(shardId, "VITEST_REPORT_SCHEMA_INVALID", "reporter stdout 类型无效。");
+}
+
+/** 从 reporter 根对象读取非负安全整数。 */
+function readReportCount(report, field, shardId) {
+  const value = report[field];
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw createAttestationError(shardId, "VITEST_REPORT_SCHEMA_INVALID", `${field} 必须是非负安全整数。`);
+  }
+  return value;
+}
+
+/** 判断值是否为非数组对象。 */
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 创建包含稳定代码与 shard 身份的错误。 */
+function createAttestationError(shardId, code, detail) {
+  return new Error(`[typescript-module-analysis-v1:${shardId}] ${code}: ${detail}`);
+}
+
+/** 将未知异常收敛为稳定、无堆栈的用户可见错误。 */
+function toStableErrorMessage(error) {
+  return error instanceof Error
+    ? error.message
+    : "[typescript-module-analysis-v1] UNKNOWN_FAILURE: 未知验证错误。";
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
