@@ -1798,4 +1798,36 @@ describe("index job runtime", () => {
 
     expect(helperClose).toHaveBeenCalledTimes(1);
   });
+
+  it("retries a transient host identity helper close rejection before closing the store once", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const storeClose = vi.spyOn(store, "close");
+    const helperClose = vi.fn()
+      .mockRejectedValueOnce(new Error("transient helper close failure"))
+      .mockResolvedValueOnce(undefined);
+    const runtime = createIndexJobRuntime({
+      closeHostPathIdentityHelper: helperClose,
+      hostPathIdentityBroker: runtimeHostPathIdentityBroker,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-host-helper-close-retry",
+      statusEpoch: "epoch-host-helper-close-retry",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    await expect(runtime.close()).rejects.toThrow("transient helper close failure");
+    expect(helperClose).toHaveBeenCalledTimes(1);
+    expect(storeClose).not.toHaveBeenCalled();
+
+    await expect(runtime.close()).resolves.toBeUndefined();
+    await expect(runtime.close()).resolves.toBeUndefined();
+
+    expect(helperClose).toHaveBeenCalledTimes(2);
+    expect(storeClose).toHaveBeenCalledTimes(1);
+  });
 });

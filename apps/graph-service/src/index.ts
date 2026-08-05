@@ -100,7 +100,7 @@ class PersistentWin32HostPathIdentityHelperController {
   readonly #spawnProcess: (scriptPath: string) => ChildProcessWithoutNullStreams;
   readonly #queue: PendingWin32HostPathIdentityCapture[] = [];
   #active: PendingWin32HostPathIdentityCapture | null = null;
-  #closePromise: Promise<void> | null = null;
+  #shutdownCompletion: Promise<void> | null = null;
   #closed = false;
   #draining = false;
   #process: Win32HostPathIdentityProcessState | null = null;
@@ -169,17 +169,18 @@ class PersistentWin32HostPathIdentityHelperController {
     };
   }
 
-  /** 幂等关闭 helper，并在固定 200ms 内等待进程句柄与自有临时根收敛。 */
+  /**
+   * 底层 shutdown 只启动一次；每次 close 独立执行 200ms 有界等待，
+   * 避免首次等待超时永久污染稍后已经收敛的 helper 终态。
+   */
   public close(): Promise<void> {
-    if (this.#closePromise === null) {
-      this.#closed = true;
-      this.#closePromise = waitForWin32HelperWithinLimit(
-        this.#shutdown(),
-        WIN32_HOST_IDENTITY_CLOSE_TIMEOUT_MS,
-        "HOST_PATH_HELPER_CLOSE_TIMEOUT",
-      );
-    }
-    return this.#closePromise;
+    this.#closed = true;
+    this.#shutdownCompletion ??= this.#shutdown();
+    return waitForWin32HelperWithinLimit(
+      this.#shutdownCompletion,
+      WIN32_HOST_IDENTITY_CLOSE_TIMEOUT_MS,
+      "HOST_PATH_HELPER_CLOSE_TIMEOUT",
+    );
   }
 
   /** 只有收到响应或淘汰当前进程后才会派发下一项。 */

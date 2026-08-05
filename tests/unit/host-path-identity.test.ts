@@ -884,6 +884,89 @@ describe("host path identity broker", () => {
     expect(first.proofDigest).not.toBe(second.proofDigest);
   });
 
+  it("allows a later close to observe helper shutdown after the first bounded wait times out", async () => {
+    vi.useFakeTimers();
+    let helper: ReturnType<typeof createServiceScopedWin32HostPathIdentityHelper> | undefined;
+    let scriptPath: string | undefined;
+    try {
+      const child = new EventEmitter() as EventEmitter & {
+        kill: ReturnType<typeof vi.fn<() => boolean>>;
+        stderr: PassThrough;
+        stdin: PassThrough;
+        stdout: PassThrough;
+      };
+      child.stderr = new PassThrough();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.kill = vi.fn(() => {
+        setTimeout(() => child.emit("close", 0, null), 250);
+        return true;
+      });
+      child.stdin.once("data", (chunk: Buffer) => {
+        const envelope = JSON.parse(chunk.toString("utf8")) as {
+          request: { candidates: HostPathSnapshotCandidateV1[]; captureNonce: string };
+          requestId: string;
+        };
+        child.stdout.write(`${JSON.stringify({
+          capture: {
+            capability: supportedCapability,
+            captureNonce: envelope.request.captureNonce,
+            items: envelope.request.candidates.map(({ candidateIndex }) => ({
+              candidateIndex,
+              objectId: "file-object-0010",
+            })),
+            rootObjectId: "root-object-0001",
+            status: "complete",
+            volumeId: "volume-win32-0001",
+          },
+          requestId: envelope.requestId,
+        })}\n`);
+      });
+      const spawnProcess = vi.fn((createdScriptPath: string) => {
+        scriptPath = createdScriptPath;
+        return child as never;
+      });
+      helper = createServiceScopedWin32HostPathIdentityHelper({ spawnProcess });
+      await expect(helper.capture({
+        candidates: [{
+          absolutePath: "C:\\repo\\a.ts",
+          candidateIndex: 0,
+          logicalPath: "a.ts",
+          trustedPath: "C:\\repo\\a.ts",
+        }],
+        captureNonce: "capture-nonce-delayed-close",
+        indexingRoot: "C:\\repo",
+        platform: "win32",
+      })).resolves.toMatchObject({ status: "complete" });
+      expect(scriptPath).toBeDefined();
+      expect(readFileSync(scriptPath!, "utf8")).toContain("Invoke-CodeGraphHostIdentityCapture");
+
+      const firstClose = helper.close();
+      const firstCloseExpectation = expect(firstClose).rejects.toMatchObject({
+        code: "HOST_PATH_HELPER_CLOSE_TIMEOUT",
+      });
+      await vi.advanceTimersByTimeAsync(200);
+      await firstCloseExpectation;
+
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(helper.close()).resolves.toBeUndefined();
+
+      expect(child.kill).toHaveBeenCalledTimes(1);
+      expect(helper.readDiagnostics()).toMatchObject({
+        pendingRequests: 0,
+        processRunning: false,
+      });
+      expect(() => readFileSync(scriptPath!, "utf8")).toThrow();
+    } finally {
+      await vi.runAllTimersAsync();
+      await helper?.close().catch(() => undefined);
+      if (scriptPath !== undefined) {
+        rmSync(path.dirname(scriptPath), { force: true, recursive: true });
+      }
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed on an out-of-order helper response and rebuilds for the next request", async () => {
     /** 创建可被协议测试精确控制 close 时机的内存子进程。 */
     const createChild = () => {

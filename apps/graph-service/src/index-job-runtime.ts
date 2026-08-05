@@ -244,17 +244,36 @@ export function createIndexJobRuntime(
   let closing = false;
   let currentRun: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
-  let hostPathClosePromise: Promise<void> | null = null;
+  let hostPathCloseAttempt: Promise<void> | null = null;
+  let hostPathClosed = false;
   let storeClosed = false;
   let runAbortController: AbortController | null = null;
 
-  /** helper close 只启动一次，并允许 beginShutdown 立即中断在途 capture。 */
+  /**
+   * 同一在途 helper close attempt 可以共享；仅 transient rejection 后清除 attempt cache，
+   * 让后续 runtime.close 重新观察底层收敛，成功后仍保持 service-instance 级幂等。
+   */
   const closeHostPathIdentity = (): Promise<void> => {
-    if (hostPathClosePromise === null) {
-      hostPathClosePromise = Promise.resolve()
-        .then(() => options.closeHostPathIdentityHelper?.());
+    if (hostPathClosed) {
+      return Promise.resolve();
     }
-    return hostPathClosePromise;
+    if (hostPathCloseAttempt === null) {
+      const operation = Promise.resolve()
+        .then(() => options.closeHostPathIdentityHelper?.());
+      const trackedAttempt = operation.then(
+        () => {
+          hostPathClosed = true;
+        },
+        (error: unknown) => {
+          if (hostPathCloseAttempt === trackedAttempt) {
+            hostPathCloseAttempt = null;
+          }
+          throw error;
+        },
+      );
+      hostPathCloseAttempt = trackedAttempt;
+    }
+    return hostPathCloseAttempt;
   };
 
   /** 在返回 shutdown accepted 前同步关闭 Job 接收门禁。 */
