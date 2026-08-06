@@ -5,6 +5,9 @@ import { ESLint } from "eslint";
 import { describe, expect, it } from "vitest";
 import contractVitestConfig from "../../vitest.contract.config.js";
 import unitVitestConfig from "../../vitest.config.js";
+import processLifecycleVitestConfig, {
+  PROCESS_LIFECYCLE_BUDGET,
+} from "../../vitest.process-deadline.config.js";
 import { validateRepositoryContract } from "../../scripts/contracts/validate-repository-contract.mjs";
 
 const repositoryRoot = path.resolve(
@@ -30,12 +33,24 @@ type ProjectTestConfig = {
 
 type RootTestConfig = {
   allowOnly?: boolean;
+  exclude?: string[];
   fileParallelism?: boolean;
+  include?: string[];
+  isolate?: boolean;
+  maxWorkers?: number | string;
+  name?: string;
   passWithNoTests?: boolean;
+  pool?: string;
   projects?: Array<{ test?: ProjectTestConfig }>;
   reporters?: unknown[];
   testTimeout?: number;
 };
+
+const unitIncludePatterns = [
+  "tests/unit/**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+  "apps/**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+  "packages/**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+];
 
 function getTestConfig(config: unknown): RootTestConfig {
   return (config as { test?: RootTestConfig }).test ?? {};
@@ -47,6 +62,7 @@ describe("real root quality commands", () => {
       "eslint.config.mjs",
       "tsconfig.quality.json",
       "vitest.config.ts",
+      "vitest.process-deadline.config.ts",
       "vitest.contract.config.ts",
       "scripts/quality/run-workspace-script.mjs",
       "scripts/quality/check-test-markers.mjs",
@@ -68,46 +84,69 @@ describe("real root quality commands", () => {
   });
 
   it("keeps Vitest fail-closed for empty suites and excludes failure fixtures", async () => {
-    const unitConfig = await readText("vitest.config.ts");
-    const contractConfig = await readText("vitest.contract.config.ts");
+    const [unitConfig, processLifecycleConfig, contractConfig, packageSource] =
+      await Promise.all([
+        readText("vitest.config.ts"),
+        readText("vitest.process-deadline.config.ts"),
+        readText("vitest.contract.config.ts"),
+        readText("package.json"),
+      ]);
+    const scripts = (JSON.parse(packageSource) as { scripts: Record<string, string> })
+      .scripts;
 
     const unitTestConfig = getTestConfig(unitVitestConfig);
+    const processLifecycleTestConfig = getTestConfig(processLifecycleVitestConfig);
     const contractTestConfig = getTestConfig(contractVitestConfig);
-    const unitProjects = unitTestConfig.projects?.map((project) => project.test ?? {}) ?? [];
     const contractProjects = contractTestConfig.projects?.map((project) => project.test ?? {}) ?? [];
 
+    expect(scripts.unit).toBe(
+      "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
+    );
+    expect(scripts["process-lifecycle"]).toBe(
+      "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.process-deadline.config.ts",
+    );
     expect(unitTestConfig).toMatchObject({
       allowOnly: false,
+      exclude: ["tests/fixtures/**", "tests/unit/process-deadline.test.ts"],
+      include: unitIncludePatterns,
+      name: "unit",
       passWithNoTests: false,
       testTimeout: 10_000,
     });
+    expect(unitTestConfig.projects).toBeUndefined();
+    expect(processLifecycleTestConfig).toMatchObject({
+      allowOnly: false,
+      exclude: ["tests/fixtures/**"],
+      fileParallelism: false,
+      include: ["tests/unit/process-deadline.test.ts"],
+      isolate: true,
+      maxWorkers: 1,
+      name: "process-lifecycle",
+      passWithNoTests: false,
+      pool: "forks",
+      testTimeout: PROCESS_LIFECYCLE_BUDGET.testTimeoutMs,
+    });
+    expect(PROCESS_LIFECYCLE_BUDGET).toMatchObject({
+      declaredTestBudgetMs: 139_000,
+      expectedTestCount: 10,
+      gateTimeoutMs: 180_000,
+    });
+    expect(
+      PROCESS_LIFECYCLE_BUDGET.gateTimeoutMs -
+        PROCESS_LIFECYCLE_BUDGET.declaredTestBudgetMs,
+    ).toBeGreaterThanOrEqual(PROCESS_LIFECYCLE_BUDGET.requiredMarginMs);
     expect(contractTestConfig).toMatchObject({
       allowOnly: false,
       fileParallelism: false,
       passWithNoTests: false,
       testTimeout: 10_000,
     });
-    expect(unitProjects).toHaveLength(2);
     expect(contractProjects).toHaveLength(2);
-    expect(unitProjects.map((project) => project.name)).toEqual([
-      "unit",
-      "unit-process-deadline",
-    ]);
     expect(contractProjects.map((project) => project.name)).toEqual([
       "contract-portable",
       "contract-graph-service-process",
     ]);
-    expect(unitProjects.map((project) => project.sequence?.groupOrder)).toEqual([0, 1]);
     expect(contractProjects.map((project) => project.sequence?.groupOrder)).toEqual([0, 1]);
-    expect(unitProjects[1]).toMatchObject({
-      allowOnly: false,
-      fileParallelism: false,
-      include: ["tests/unit/process-deadline.test.ts"],
-      isolate: true,
-      maxWorkers: 1,
-      pool: "forks",
-      testTimeout: 10_000,
-    });
     expect(contractProjects[1]).toMatchObject({
       allowOnly: false,
       fileParallelism: false,
@@ -118,12 +157,15 @@ describe("real root quality commands", () => {
       testTimeout: 10_000,
     });
     expect(unitConfig).toContain("tests/fixtures/**");
+    expect(processLifecycleConfig).toContain("tests/fixtures/**");
     expect(contractConfig).toContain("tests/fixtures/**");
     expect(unitConfig).toContain("apps/**/*");
     expect(unitConfig).toContain("packages/**/*");
     expect(unitConfig).toContain("fail-on-skipped-reporter");
     expect(contractConfig).toContain("fail-on-skipped-reporter");
-    expect(`${unitConfig}\n${contractConfig}`).not.toContain("passWithNoTests: true");
+    expect(`${unitConfig}\n${processLifecycleConfig}\n${contractConfig}`).not.toContain(
+      "passWithNoTests: true",
+    );
   });
 
   it("applies lint rules to product JavaScript and TSX", async () => {

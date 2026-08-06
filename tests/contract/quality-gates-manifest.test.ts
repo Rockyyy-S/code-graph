@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,10 @@ import {
   VITEST_REPORT_MAX_BYTES,
   verifyTypeScriptModuleAnalysis,
 } from "../../scripts/ci/verify-typescript-module-analysis-v1.mjs";
+import unitVitestConfig from "../../vitest.config.js";
+import processLifecycleVitestConfig, {
+  PROCESS_LIFECYCLE_BUDGET,
+} from "../../vitest.process-deadline.config.js";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const temporaryRoots: string[] = [];
@@ -220,6 +224,7 @@ const expectedGates = [
   ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
   ["planning-traceability", ["pnpm", "planning-trace"], "architecture-po"],
+  ["process-lifecycle", ["pnpm", "process-lifecycle"], "qa"],
   [
     "public-gate-definition-v1",
     ["node", "scripts/contracts/verify-public-gate-definition-v1.mjs", "--capability", "schema:gateDefinitionV1Schema", "--test", "tests/unit/public-gate-definition-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-definition-v1.json", "--evidence-id", "public-capability:schema:gateDefinitionV1Schema"],
@@ -476,7 +481,42 @@ describe("quality-gates.v1 registry", () => {
     expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_REPORT_INCOMPLETE");
   });
 
-  it("登记唯一、升序且由本地 runner 始终执行的二十六项 blocking gate", async () => {
+  it("将普通 unit 与独立 process lifecycle blocking gate 的配置和预算锁定", async () => {
+    const packageJson = JSON.parse(
+      await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
+    ) as { scripts: Record<string, string> };
+    const processTestSource = await readFile(
+      path.join(repositoryRoot, "tests/unit/process-deadline.test.ts"),
+      "utf8",
+    );
+
+    expect(packageJson.scripts.unit).toBe(
+      "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
+    );
+    expect(packageJson.scripts["process-lifecycle"]).toBe(
+      "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.process-deadline.config.ts",
+    );
+    expect(unitVitestConfig.test?.projects).toBeUndefined();
+    expect(unitVitestConfig.test?.exclude).toContain("tests/unit/process-deadline.test.ts");
+    expect(processLifecycleVitestConfig.test).toMatchObject({
+      fileParallelism: false,
+      include: ["tests/unit/process-deadline.test.ts"],
+      maxWorkers: 1,
+      name: "process-lifecycle",
+      passWithNoTests: false,
+      pool: "forks",
+      testTimeout: PROCESS_LIFECYCLE_BUDGET.testTimeoutMs,
+    });
+    expect(processTestSource.match(/\bit\s*\(/gu)).toHaveLength(
+      PROCESS_LIFECYCLE_BUDGET.expectedTestCount,
+    );
+    expect(
+      PROCESS_LIFECYCLE_BUDGET.gateTimeoutMs -
+        PROCESS_LIFECYCLE_BUDGET.declaredTestBudgetMs,
+    ).toBeGreaterThanOrEqual(PROCESS_LIFECYCLE_BUDGET.requiredMarginMs);
+  });
+
+  it("登记唯一、升序且由本地 runner 始终执行的二十七项 blocking gate", async () => {
     const loaded = await loadQualityGateRegistry(repositoryRoot);
     const expectedGateIds = expectedGates.map(([gateId]) => gateId);
     const workflowShas = new Set<string>(loaded.registry.gates.map(({

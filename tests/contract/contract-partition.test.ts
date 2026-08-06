@@ -3,6 +3,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import portableVitestConfig from "../../vitest.contract.config.js";
 import unitVitestConfig from "../../vitest.config.js";
+import processLifecycleVitestConfig, {
+  PROCESS_LIFECYCLE_BUDGET,
+} from "../../vitest.process-deadline.config.js";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const contractRoot = path.join(repositoryRoot, "tests/contract");
@@ -25,7 +28,18 @@ type ProjectTestConfig = {
   name?: string;
   pool?: string;
   sequence?: { groupOrder?: number };
+  testTimeout?: number;
 };
+
+type RootTestConfig = ProjectTestConfig & {
+  passWithNoTests?: boolean;
+  projects?: Array<{ test?: ProjectTestConfig }>;
+};
+
+/** 直接读取单配置 test 根，避免把独立 blocking gate 重新解释为 unit 子 project。 */
+function getTestConfig(config: unknown): RootTestConfig {
+  return (config as { test?: RootTestConfig }).test ?? {};
+}
 
 function getProjects(config: unknown): ProjectTestConfig[] {
   const projects = (config as {
@@ -80,31 +94,44 @@ describe("contract execution partitions", () => {
     const all = await collectUnitTests();
     const ordinary = all.filter((file) => file !== processDeadlinePath);
     const deadline = all.filter((file) => file === processDeadlinePath);
-    const [ordinaryProject, deadlineProject] = getProjects(unitVitestConfig);
+    const ordinaryUnit = getTestConfig(unitVitestConfig);
+    const processLifecycle = getTestConfig(processLifecycleVitestConfig);
 
     expect(all.length).toBeGreaterThan(1);
     expect(new Set(all).size).toBe(all.length);
     expect(deadline).toEqual([processDeadlinePath]);
     expect([...ordinary, ...deadline].sort()).toEqual(all);
     expect(ordinary.filter((file) => file === processDeadlinePath)).toEqual([]);
-    expect(ordinaryProject).toMatchObject({
+    expect(ordinaryUnit.projects).toBeUndefined();
+    expect(ordinaryUnit).toMatchObject({
       allowOnly: false,
       exclude: ["tests/fixtures/**", processDeadlinePath],
       include: unitIncludePatterns,
       name: "unit",
-      sequence: { groupOrder: 0 },
+      passWithNoTests: false,
+      testTimeout: 10_000,
     });
-    expect(deadlineProject).toMatchObject({
+    expect(processLifecycle).toMatchObject({
       allowOnly: false,
       exclude: ["tests/fixtures/**"],
       fileParallelism: false,
       include: [processDeadlinePath],
       isolate: true,
       maxWorkers: 1,
-      name: "unit-process-deadline",
+      name: "process-lifecycle",
+      passWithNoTests: false,
       pool: "forks",
-      sequence: { groupOrder: 1 },
+      testTimeout: PROCESS_LIFECYCLE_BUDGET.testTimeoutMs,
     });
+    expect(PROCESS_LIFECYCLE_BUDGET).toMatchObject({
+      declaredTestBudgetMs: 139_000,
+      expectedTestCount: 10,
+      gateTimeoutMs: 180_000,
+    });
+    expect(
+      PROCESS_LIFECYCLE_BUDGET.gateTimeoutMs -
+        PROCESS_LIFECYCLE_BUDGET.declaredTestBudgetMs,
+    ).toBeGreaterThanOrEqual(PROCESS_LIFECYCLE_BUDGET.requiredMarginMs);
 
     const allContracts = await collectContractTests();
     const portable = allContracts.filter(

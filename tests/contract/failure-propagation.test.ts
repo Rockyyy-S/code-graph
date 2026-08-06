@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   ARCHITECTURE_GATE_TIMEOUT_MS,
@@ -27,6 +29,20 @@ function executionResult(status: "fail" | "invalid" | "pass") {
         ? { kind: "spawn-error" as const, stableCode: "ENOENT" }
         : { code: status === "pass" ? 0 : 23, kind: "exit" as const },
   };
+}
+
+/** 读取并解析 runner 结构化诊断，保持测试只依赖公开文件合同。 */
+async function readRunnerDiagnostic(outputRoot: string): Promise<unknown> {
+  return JSON.parse(
+    await readFile(path.join(outputRoot, "runner-diagnostic.json"), "utf8"),
+  ) as unknown;
+}
+
+/** 断言本轮没有 unexpected runner diagnostic，防止旧 artifact 冒充当前结果。 */
+async function expectRunnerDiagnosticAbsent(outputRoot: string): Promise<void> {
+  await expect(
+    access(path.join(outputRoot, "runner-diagnostic.json")),
+  ).rejects.toMatchObject({ code: "ENOENT" });
 }
 
 describe("architecture-required failure propagation", () => {
@@ -143,6 +159,163 @@ describe("architecture-required failure propagation", () => {
     expect(result.exitCode).toBe(1);
     expect(result.summary.invalidGateIds).toEqual(QUALITY_GATES);
     expect(result.gates.every(({ status }) => status === "invalid")).toBe(true);
+  });
+
+  it("execute 提前抛错时发布独立 diagnostic，且不保留伪造完整 evidence", async () => {
+    const outputRoot = await mkdtemp(
+      path.join(tmpdir(), "architecture-runner-execute-throw-"),
+    );
+    const injectedError = Object.assign(new Error("execute fixture exploded"), {
+      cause: new Error("fixture cause"),
+      code: "EEXECUTE_FIXTURE",
+    });
+    try {
+      await writeFile(path.join(outputRoot, "gate-evidence.json"), "{}\n", "utf8");
+
+      await expect(
+        runArchitectureRequired({
+          execute: async () => {
+            throw injectedError;
+          },
+          outputRoot,
+        }),
+      ).rejects.toBe(injectedError);
+
+      expect(await readRunnerDiagnostic(outputRoot)).toEqual({
+        currentGateId: QUALITY_GATES[0],
+        error: {
+          cause: {
+            code: null,
+            message: "fixture cause",
+            name: "Error",
+          },
+          code: "EEXECUTE_FIXTURE",
+          message: "execute fixture exploded",
+          name: "Error",
+          stackSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+        gateRegistryDigest: loadedRegistry.gateRegistryDigest,
+        invocationId: expect.stringMatching(
+          /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u,
+        ),
+        outputRoot: path.resolve(outputRoot),
+        phase: "gate-execution",
+        process: {
+          execPath: process.execPath,
+          npm_execpath: process.env.npm_execpath ?? null,
+        },
+        recordedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
+        schema: "runner-diagnostic",
+        schemaVersion: 1,
+      });
+      await expect(
+        access(path.join(outputRoot, "gate-evidence.json")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(outputRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("artifact publication 抛错时发布 diagnostic 并保持 library rejection", async () => {
+    const outputRoot = await mkdtemp(
+      path.join(tmpdir(), "architecture-runner-artifact-throw-"),
+    );
+    const injectedError = Object.assign(new Error("artifact fixture exploded"), {
+      code: "EARTIFACT_FIXTURE",
+    });
+    const publishArtifacts = vi.fn(async () => {
+      throw injectedError;
+    });
+    try {
+      await expect(
+        runArchitectureRequired({
+          execute: async () => executionResult("pass"),
+          outputRoot,
+          publishArtifacts,
+        }),
+      ).rejects.toBe(injectedError);
+
+      expect(publishArtifacts).toHaveBeenCalledTimes(1);
+      expect(await readRunnerDiagnostic(outputRoot)).toMatchObject({
+        currentGateId: null,
+        error: {
+          cause: null,
+          code: "EARTIFACT_FIXTURE",
+          message: "artifact fixture exploded",
+          name: "Error",
+        },
+        gateRegistryDigest: loadedRegistry.gateRegistryDigest,
+        phase: "artifact-publication",
+        schema: "runner-diagnostic",
+        schemaVersion: 1,
+      });
+      await expect(
+        access(path.join(outputRoot, "gate-evidence.json")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(outputRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("普通 gate exit 1 仍发布完整 result evidence，且不误报 unexpected exception", async () => {
+    const outputRoot = await mkdtemp(
+      path.join(tmpdir(), "architecture-runner-normal-failure-"),
+    );
+    const failingGateId = QUALITY_GATES[0]!;
+    try {
+      const result = await runArchitectureRequired({
+        execute: async (gateId: string) =>
+          executionResult(gateId === failingGateId ? "fail" : "pass"),
+        outputRoot,
+      });
+      const artifact = JSON.parse(
+        await readFile(path.join(outputRoot, "gate-evidence.json"), "utf8"),
+      ) as {
+        exitCode: number;
+        gateRegistryDigest: string;
+        gates: Array<{ gateId: string; output: unknown; status: string }>;
+        summary: { failedGateIds: string[] };
+      };
+
+      expect(result.exitCode).toBe(1);
+      expect(result.summary.failedGateIds).toEqual([failingGateId]);
+      expect(artifact.exitCode).toBe(1);
+      expect(artifact.gateRegistryDigest).toBe(loadedRegistry.gateRegistryDigest);
+      expect(artifact.summary.failedGateIds).toEqual([failingGateId]);
+      expect(artifact.gates).toHaveLength(QUALITY_GATES.length);
+      expect(artifact.gates.every(({ output }) => output !== undefined)).toBe(true);
+      await expectRunnerDiagnosticAbsent(outputRoot);
+    } finally {
+      await rm(outputRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("正常成功会清除旧 diagnostic，并仅发布本次完整 evidence", async () => {
+    const outputRoot = await mkdtemp(
+      path.join(tmpdir(), "architecture-runner-success-"),
+    );
+    try {
+      await writeFile(
+        path.join(outputRoot, "runner-diagnostic.json"),
+        '{"schema":"stale"}\n',
+        "utf8",
+      );
+
+      const result = await runArchitectureRequired({
+        execute: async () => executionResult("pass"),
+        outputRoot,
+      });
+      const artifact = JSON.parse(
+        await readFile(path.join(outputRoot, "gate-evidence.json"), "utf8"),
+      ) as { exitCode: number; gates: unknown[] };
+
+      expect(result.exitCode).toBe(0);
+      expect(artifact.exitCode).toBe(0);
+      expect(artifact.gates).toHaveLength(QUALITY_GATES.length);
+      await expectRunnerDiagnosticAbsent(outputRoot);
+    } finally {
+      await rm(outputRoot, { force: true, recursive: true });
+    }
   });
 
   it("以绝对 deadline 终止挂起 gate 并返回稳定 invalid", async () => {

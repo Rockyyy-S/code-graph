@@ -11,34 +11,10 @@ const unitIncludes = [
 export default defineConfig({
   test: {
     allowOnly: false,
+    exclude: ["tests/fixtures/**", processDeadlineTest],
+    include: unitIncludes,
+    name: "unit",
     passWithNoTests: false,
-    projects: [
-      {
-        test: {
-          allowOnly: false,
-          exclude: ["tests/fixtures/**", processDeadlineTest],
-          include: unitIncludes,
-          name: "unit",
-          sequence: { groupOrder: 0 },
-          testTimeout: 10_000,
-        },
-      },
-      {
-        test: {
-          allowOnly: false,
-          exclude: ["tests/fixtures/**"],
-          fileParallelism: false,
-          include: [processDeadlineTest],
-          isolate: true,
-          maxWorkers: 1,
-          name: "unit-process-deadline",
-          pool: "forks",
-          /** 后置独立 project 阻止 deadline 子进程与普通 unit worker 争用同一宿主资源。 */
-          sequence: { groupOrder: 1 },
-          testTimeout: 10_000,
-        },
-      },
-    ],
     reporters: ["default", new FailOnSkippedReporter()],
     testTimeout: 10_000,
   },

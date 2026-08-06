@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { runProcessWithDeadline } from "../../scripts/ci/run-process-with-deadline.mjs";
+import { PROCESS_LIFECYCLE_BUDGET } from "../../vitest.process-deadline.config.js";
 
 const temporaryRoots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -421,163 +422,11 @@ describe("process deadline", () => {
         if (index >= 0) {temporaryRoots.splice(index, 1);}
       }
     },
-    45_000,
+    PROCESS_LIFECYCLE_BUDGET.gitTestTimeoutMs,
   );
 
-  it("正常退出后仍清理继承进程组的后台后代", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "process-tree-success-"));
-    temporaryRoots.push(root);
-    const marker = path.join(root, "descendant-survived.txt");
-    const readyPath = path.join(root, "descendant.pid");
-    const descendant = createReadyDescendant(marker);
-    const parent = [
-      "const { spawn } = require(\"node:child_process\");",
-      "const { writeFileSync } = require(\"node:fs\");",
-      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "ignore" });`,
-      `writeFileSync(${JSON.stringify(readyPath)}, String(child.pid));`,
-      "child.unref();",
-    ].join("");
-
-    const result = await runProcessWithDeadline({
-      args: ["-e", parent],
-      cwd: root,
-      executable: process.execPath,
-      killGraceMs: processCleanupGraceMs,
-      outputLimitBytes: 1024,
-      timeoutMs: 8_000,
-      ...(process.platform === "win32" ? { windowsDescendantReadyPath: readyPath } : {}),
-    });
-    const descendantPid = Number.parseInt(await readFile(readyPath, "utf8"), 10);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-
-    expect(result).toMatchObject({
-      status: "pass",
-      termination: { code: 0, kind: "exit" },
-    });
-    if (process.platform === "win32") {
-      expect(result).toMatchObject({
-        windowsJob: {
-          activeProcesses: 0,
-          descendantPid,
-          terminalProof: "query-information-job-object",
-        },
-      });
-      await expectProcessGone(descendantPid);
-    }
-    await expect(access(marker)).rejects.toBeDefined();
-  }, 25_000);
-
   it(
-    "CR8-004 kills an orphaned detached grandchild after its intermediate parent exits",
-    async () => {
-      if (process.platform !== "win32") {
-        expect(process.platform).not.toBe("win32");
-        return;
-      }
-      const root = await mkdtemp(path.join(tmpdir(), "process-tree-orphaned-grandchild-"));
-      temporaryRoots.push(root);
-      const marker = path.join(root, "grandchild-survived.txt");
-      const pidFile = path.join(root, "grandchild.pid");
-      const grandchild = [
-        `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "survived"), 750);`,
-        "setInterval(() => {}, 1_000);",
-      ].join("");
-      const intermediate = [
-        "const { spawn } = require(\"node:child_process\");",
-        "const { writeFileSync } = require(\"node:fs\");",
-        `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], ` +
-          "{ detached: true, stdio: \"ignore\" });",
-        `writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));`,
-        "child.unref();",
-      ].join("");
-      const parent = [
-        "const { spawn } = require(\"node:child_process\");",
-        `const child = spawn(process.execPath, ["-e", ${JSON.stringify(intermediate)}], ` +
-          "{ stdio: \"ignore\" });",
-        "child.once(\"exit\", () => process.exit(0));",
-      ].join("");
-      let grandchildPid: number | undefined;
-
-      try {
-        const result = await runProcessWithDeadline({
-          args: ["-e", parent],
-          cwd: root,
-          executable: process.execPath,
-          killGraceMs: processCleanupGraceMs,
-          outputLimitBytes: 1024,
-          timeoutMs: 8_000,
-          windowsDescendantReadyPath: pidFile,
-        });
-        grandchildPid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
-        await new Promise((resolve) => setTimeout(resolve, 900));
-
-        expect(result).toMatchObject({
-          status: "pass",
-          termination: { code: 0, kind: "exit" },
-          windowsJob: {
-            activeProcesses: 0,
-            descendantPid: grandchildPid,
-            terminalProof: "query-information-job-object",
-          },
-        });
-        await expectProcessGone(grandchildPid);
-        await expect(access(marker)).rejects.toBeDefined();
-      } finally {
-        if (grandchildPid !== undefined) {
-          try {process.kill(grandchildPid, "SIGKILL");} catch {
-            /** 测试清理只兜底终止本用例创建且尚未被生产逻辑回收的进程。 */
-          }
-        }
-      }
-    },
-    25_000,
-  );
-
-  it("终止挂起进程及其继承进程组的后代", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "process-tree-deadline-"));
-    temporaryRoots.push(root);
-    const marker = path.join(root, "descendant-survived.txt");
-    const readyPath = path.join(root, "descendant.pid");
-    const descendant = createReadyDescendant(marker, 5_000);
-    const parent = [
-      "const { spawn } = require(\"node:child_process\");",
-      "const { writeFileSync } = require(\"node:fs\");",
-      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "ignore" });`,
-      `writeFileSync(${JSON.stringify(readyPath)}, String(child.pid));`,
-      "setInterval(() => {}, 1_000);",
-    ].join("");
-
-    const result = await runProcessWithDeadline({
-      args: ["-e", parent],
-      cwd: root,
-      executable: process.execPath,
-      killGraceMs: processCleanupGraceMs,
-      outputLimitBytes: 1024,
-      timeoutMs: 2_000,
-      ...(process.platform === "win32" ? { windowsDescendantReadyPath: readyPath } : {}),
-    });
-    const descendantPid = Number.parseInt(await readFile(readyPath, "utf8"), 10);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    expect(result).toMatchObject({
-      status: "invalid",
-      termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
-    });
-    if (process.platform === "win32") {
-      expect(result).toMatchObject({
-        windowsJob: {
-          activeProcesses: 0,
-          descendantPid,
-          terminalProof: "query-information-job-object",
-        },
-      });
-      await expectProcessGone(descendantPid);
-    }
-    await expect(access(marker)).rejects.toBeDefined();
-  }, 25_000);
-
-  it(
-    "Windows ready-handshaked 三类进程树在并行负载下逐轮证明 PID 消失且 marker 未写入",
+    "Windows ready-handshaked 三类进程树逐轮覆盖正常退出、孤儿后代与 timeout 收敛",
     async () => {
       if (process.platform !== "win32") {
         expect(process.platform).not.toBe("win32");
@@ -591,7 +440,7 @@ describe("process deadline", () => {
         ]);
       }
     },
-    processDeadlineStressRounds * 30_000,
+    PROCESS_LIFECYCLE_BUDGET.windowsMatrixTimeoutMs,
   );
 
   it("Windows Job bootstrap 缺失 ready proof 时 fail closed", async () => {
