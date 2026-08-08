@@ -17,6 +17,12 @@ import {
   VITEST_REPORT_MAX_BYTES,
   verifyTypeScriptModuleAnalysis,
 } from "../../scripts/ci/verify-typescript-module-analysis-v1.mjs";
+import { attestVitestJsonReport } from "../../scripts/ci/attest-vitest-json-report.mjs";
+import {
+  PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY,
+  PROCESS_LIFECYCLE_CHILD_TIMEOUT_MS,
+  verifyProcessLifecycle,
+} from "../../scripts/ci/verify-process-lifecycle.mjs";
 import unitVitestConfig from "../../vitest.config.js";
 import processLifecycleVitestConfig, {
   PROCESS_LIFECYCLE_BUDGET,
@@ -26,6 +32,20 @@ const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const temporaryRoots: string[] = [];
 
 type VitestAssertionStatus = "disabled" | "failed" | "passed" | "pending" | "skipped" | "todo";
+
+interface VitestAuthority {
+  attestationVersion: number;
+  expectedSuiteCount: number;
+  expectedTestCount: number;
+  expectedTestResults: readonly {
+    filePath: string;
+    suites: readonly {
+      ancestorTitles: readonly string[];
+      expectedAssertionCount: number;
+    }[];
+  }[];
+  shardId: string;
+}
 
 interface FakeProcessResult {
   cleanupComplete: boolean;
@@ -43,8 +63,17 @@ interface FakeProcessResult {
   timedOut: boolean;
 }
 
-/** 构造与 Vitest JSON reporter 同形的最小完整运行结果。 */
-function createVitestReport(statuses: readonly VitestAssertionStatus[]): string {
+/** 由独立 authority 构造与 Vitest JSON reporter 同形的完整运行结果。 */
+function createVitestReport(
+  authority: VitestAuthority,
+  statuses: readonly VitestAssertionStatus[] = Array.from(
+    { length: authority.expectedTestCount },
+    () => "passed" as const,
+  ),
+): string {
+  if (statuses.length !== authority.expectedTestCount) {
+    throw new Error("测试 fixture 的 assertion 数必须先与 authority 闭合。");
+  }
   const passed = statuses.filter((status) => status === "passed").length;
   const failed = statuses.filter((status) => status === "failed").length;
   const pending = statuses.filter(
@@ -52,27 +81,70 @@ function createVitestReport(statuses: readonly VitestAssertionStatus[]): string 
   ).length;
   const todo = statuses.filter((status) => status === "todo").length;
   const hasNonPassing = failed > 0 || pending > 0 || todo > 0;
+  let assertionIndex = 0;
+  const testResults = authority.expectedTestResults.map((expectedResult) => {
+    const assertionResults = expectedResult.suites.flatMap((suite) =>
+      Array.from({ length: suite.expectedAssertionCount }, () => {
+        const status = statuses[assertionIndex]!;
+        assertionIndex += 1;
+        return { ancestorTitles: [...suite.ancestorTitles], status };
+      }));
+    return {
+      assertionResults,
+      name: path.join(repositoryRoot, expectedResult.filePath),
+      status: assertionResults.some(({ status }) => status === "failed")
+        ? "failed"
+        : assertionResults.some(({ status }) => status !== "passed")
+          ? "pending"
+          : "passed",
+    };
+  });
+  const failedSuites = failed > 0 ? 1 : 0;
+  const pendingSuites = failed === 0 && (pending > 0 || todo > 0) ? 1 : 0;
 
   return JSON.stringify({
-    numFailedTestSuites: failed > 0 ? 1 : 0,
+    numFailedTestSuites: failedSuites,
     numFailedTests: failed,
-    numPassedTestSuites: hasNonPassing ? 0 : 1,
+    numPassedTestSuites: authority.expectedSuiteCount - failedSuites - pendingSuites,
     numPassedTests: passed,
-    numPendingTestSuites: failed === 0 && (pending > 0 || todo > 0) ? 1 : 0,
+    numPendingTestSuites: pendingSuites,
     numPendingTests: pending,
     numTodoTests: todo,
-    numTotalTestSuites: 1,
+    numTotalTestSuites: authority.expectedSuiteCount,
     numTotalTests: statuses.length,
     success: !hasNonPassing,
-    testResults: [{
-      assertionResults: statuses.map((status) => ({ status })),
-    }],
+    testResults,
   });
 }
 
-/** 构造固定数量全部通过的 reporter 输出。 */
-function createPassingVitestReport(testCount: number): string {
-  return createVitestReport(Array.from({ length: testCount }, () => "passed" as const));
+/** 构造 authority 对应的全部通过 reporter 输出。 */
+function createPassingVitestReport(authority: VitestAuthority): string {
+  return createVitestReport(authority);
+}
+
+/** 只改变 root/detail assertion 总数，供 49/51 与上下漂移 fail-closed 回归使用。 */
+function createDriftedVitestReport(authority: VitestAuthority, actualTestCount: number): string {
+  const report = JSON.parse(createPassingVitestReport(authority)) as {
+    numPassedTests: number;
+    numTotalTests: number;
+    testResults: Array<{ assertionResults: Array<{ ancestorTitles: string[]; status: "passed" }> }>;
+  };
+  const lastAssertions = report.testResults.at(-1)!.assertionResults;
+  if (actualTestCount === authority.expectedTestCount - 1) {
+    lastAssertions.pop();
+  } else if (actualTestCount === authority.expectedTestCount + 1) {
+    lastAssertions.push({
+      ancestorTitles: [
+        ...authority.expectedTestResults.at(-1)!.suites.at(-1)!.ancestorTitles,
+      ],
+      status: "passed",
+    });
+  } else {
+    throw new Error("漂移 fixture 只允许 authority 上下各一条。");
+  }
+  report.numPassedTests = actualTestCount;
+  report.numTotalTests = actualTestCount;
+  return JSON.stringify(report);
 }
 
 /** 构造已正常退出且携带 reporter stdout 的受控进程结果。 */
@@ -92,12 +164,16 @@ function createProcessResult(stdout = "", overrides: Partial<FakeProcessResult> 
   };
 }
 
+const storyShardAuthorities = [
+  ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards,
+  ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
+] as readonly VitestAuthority[];
+const defaultUnitAuthority = storyShardAuthorities[0]!;
+
 /**
  * 通过真实 verifier 编排入口注入受控子进程结果，证明计数权威没有停留在静态 manifest。
  */
 async function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, FakeProcessResult> = new Map()) {
-  /** 独立写死 273 + 50 + 6，禁止从被测 manifest 或 reporter 反推期望值。 */
-  const expectedCounts = [273, 50, 6] as const;
   let vitestIndex = 0;
   const executePnpm = vi.fn(async (args: string[]) => {
     if (!args.includes("vitest")) {
@@ -106,7 +182,7 @@ async function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, Fake
     const currentIndex = vitestIndex;
     vitestIndex += 1;
     return overrides.get(currentIndex)
-      ?? createProcessResult(createPassingVitestReport(expectedCounts[currentIndex]!));
+      ?? createProcessResult(createPassingVitestReport(storyShardAuthorities[currentIndex]!));
   });
 
   return {
@@ -295,7 +371,7 @@ describe("quality-gates.v1 registry", () => {
       "tests/unit/typescript-module-resolution.test.ts",
       "tests/unit/typescript-module-syntax.test.ts",
     ] as const;
-    expect(TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST).toEqual({
+    expect(TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST).toMatchObject({
       buildFilters: [
         "@codegraph/domain",
         "@codegraph/contracts",
@@ -307,30 +383,16 @@ describe("quality-gates.v1 registry", () => {
         "@codegraph/adapter-store-sqlite",
         "@codegraph/graph-service",
       ],
-      contractShards: [{
-        expectedTestCount: 6,
-        shardId: "graph-service-process",
-        tests: ["tests/contract/graph-service-process.test.ts"],
-      }],
-      unitShards: [
-        {
-          expectedTestCount: 273,
-          shardId: "default-unit",
-          tests: originalUnitTests.filter(
-            (testPath) => testPath !== "tests/unit/sqlite-module-dependencies.test.ts",
-          ),
-        },
-        {
-          expectedTestCount: 50,
-          shardId: "sqlite-module-dependencies",
-          tests: ["tests/unit/sqlite-module-dependencies.test.ts"],
-        },
-      ],
-      version: 1,
+      version: 2,
     });
 
     const unitShards = TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards;
-    const unitTests = unitShards.flatMap(({ tests }) => tests);
+    const allShards = [
+      ...unitShards,
+      ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
+    ];
+    const unitTests = unitShards.flatMap(({ expectedTestResults }) =>
+      expectedTestResults.map(({ filePath }) => filePath));
     expect(unitShards.map(({ shardId }) => shardId)).toEqual([
       "default-unit",
       "sqlite-module-dependencies",
@@ -339,15 +401,72 @@ describe("quality-gates.v1 registry", () => {
     expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
     expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
       .toBe(323);
-    expect([
-      ...unitShards,
-      ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
-    ].reduce((total, { expectedTestCount }) => total + expectedTestCount, 0)).toBe(329);
+    expect(allShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
+      .toBe(329);
+    /** 这些 suite/assertion 值来自冻结前真实 reporter，禁止从当前待验证输出临时派生。 */
+    expect(allShards.map((shard) => ({
+      attestationVersion: shard.attestationVersion,
+      expectedSuiteCount: shard.expectedSuiteCount,
+      expectedTestCount: shard.expectedTestCount,
+      results: shard.expectedTestResults.map((result) => ({
+        filePath: result.filePath,
+        suites: result.suites.map((suite) => ({
+          ancestorTitles: suite.ancestorTitles,
+          expectedAssertionCount: suite.expectedAssertionCount,
+        })),
+      })),
+      shardId: shard.shardId,
+    }))).toEqual([
+      {
+        attestationVersion: 1,
+        expectedSuiteCount: 22,
+        expectedTestCount: 273,
+        results: [
+          ["tests/unit/analyzer-config-capture.test.ts", "Story 1.5 Analyzer configuration capture", 53],
+          ["tests/unit/analyzer-config-snapshot.test.ts", "Story 1.5 analyzer config snapshot", 8],
+          ["tests/unit/composite-graph-patch.test.ts", "Story 1.5 composite graph patch", 5],
+          ["tests/unit/index-job-runtime.test.ts", "index job runtime", 30],
+          ["tests/unit/index-read-set.test.ts", "index read-set provider", 41],
+          ["tests/unit/module-dependency-domain.test.ts", "Story 1.5 module dependency domain", 6],
+          ["tests/unit/module-fact-batch.test.ts", "Story 1.5 source module FactBatch", 3],
+          ["tests/unit/sqlite-graph-store.test.ts", "sqlite graph store", 79],
+          ["tests/unit/typescript-analyzer-worker.test.ts", "Story 1.5 TypeScript Analyzer Worker", 18],
+          ["tests/unit/typescript-module-resolution.test.ts", "Story 1.5 module target priority", 17],
+          ["tests/unit/typescript-module-syntax.test.ts", "Story 1.5 AD-24 TypeScript syntax mapping", 13],
+        ].map(([filePath, ancestorTitle, expectedAssertionCount]) => ({
+          filePath,
+          suites: [{ ancestorTitles: [ancestorTitle], expectedAssertionCount }],
+        })),
+        shardId: "default-unit",
+      },
+      {
+        attestationVersion: 1,
+        expectedSuiteCount: 2,
+        expectedTestCount: 50,
+        results: [{
+          filePath: "tests/unit/sqlite-module-dependencies.test.ts",
+          suites: [{
+            ancestorTitles: ["Story 1.5 SQLite module dependency storage"],
+            expectedAssertionCount: 50,
+          }],
+        }],
+        shardId: "sqlite-module-dependencies",
+      },
+      {
+        attestationVersion: 1,
+        expectedSuiteCount: 2,
+        expectedTestCount: 6,
+        results: [{
+          filePath: "tests/contract/graph-service-process.test.ts",
+          suites: [{ ancestorTitles: ["real graph-service process"], expectedAssertionCount: 6 }],
+        }],
+        shardId: "graph-service-process",
+      },
+    ]);
     const verifierSource = await readFile(
       path.join(repositoryRoot, "scripts/ci/verify-typescript-module-analysis-v1.mjs"),
       "utf8",
     );
-    /** PF-A 只锁定有界执行，不在本切片提前处理 suite cardinality。 */
     expect(TYPESCRIPT_VERIFIER_CHILD_TIMEOUT_MS).toBe(120_000);
     expect(verifierSource).toContain("runProcessWithDeadline");
     expect(verifierSource).not.toMatch(/\bspawnSync\s*\(/u);
@@ -396,9 +515,10 @@ describe("quality-gates.v1 registry", () => {
 
     expect(status).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("273/273 tests passed");
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("50/50 tests passed");
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("6/6 tests passed");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("273/273 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("50/50 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("6/6 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("22/22 suites");
 
     const commands = executePnpm.mock.calls.map(([args]) => args);
     const buildFilters = commands
@@ -435,7 +555,10 @@ describe("quality-gates.v1 registry", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([
-      [shardIndex, createProcessResult(createPassingVitestReport(reducedCount))],
+      [shardIndex, createProcessResult(createDriftedVitestReport(
+        storyShardAuthorities[shardIndex]!,
+        reducedCount,
+      ))],
     ]);
 
     expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
@@ -446,7 +569,7 @@ describe("quality-gates.v1 registry", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([
-      [1, createProcessResult(createPassingVitestReport(51))],
+      [1, createProcessResult(createDriftedVitestReport(storyShardAuthorities[1]!, 51))],
     ]);
 
     expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
@@ -456,7 +579,7 @@ describe("quality-gates.v1 registry", () => {
   it.each([
     [
       "failed",
-      createProcessResult(createVitestReport([
+      createProcessResult(createVitestReport(defaultUnitAuthority, [
         ...Array.from({ length: 272 }, () => "passed" as const),
         "failed",
       ])),
@@ -464,7 +587,7 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "pending",
-      createProcessResult(createVitestReport([
+      createProcessResult(createVitestReport(defaultUnitAuthority, [
         ...Array.from({ length: 272 }, () => "passed" as const),
         "pending",
       ])),
@@ -472,7 +595,7 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "skipped",
-      createProcessResult(createVitestReport([
+      createProcessResult(createVitestReport(defaultUnitAuthority, [
         ...Array.from({ length: 272 }, () => "passed" as const),
         "skipped",
       ])),
@@ -480,7 +603,7 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "todo",
-      createProcessResult(createVitestReport([
+      createProcessResult(createVitestReport(defaultUnitAuthority, [
         ...Array.from({ length: 272 }, () => "passed" as const),
         "todo",
       ])),
@@ -495,7 +618,7 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "abnormal termination",
-      createProcessResult(createPassingVitestReport(273), {
+      createProcessResult(createPassingVitestReport(defaultUnitAuthority), {
         status: "fail",
         termination: { kind: "signal", signalName: "SIGTERM" },
       }),
@@ -503,7 +626,7 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "deadline timeout",
-      createProcessResult(createPassingVitestReport(273), {
+      createProcessResult(createPassingVitestReport(defaultUnitAuthority), {
         signalEscalation: ["SIGTERM", "SIGKILL"],
         status: "invalid",
         termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
@@ -513,7 +636,7 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "unproven cleanup",
-      createProcessResult(createPassingVitestReport(273), {
+      createProcessResult(createPassingVitestReport(defaultUnitAuthority), {
         cleanupComplete: false,
         containment: null,
         residualProcessTree: 1,
@@ -533,7 +656,7 @@ describe("quality-gates.v1 registry", () => {
   });
 
   it("fails closed when reporter assertion details do not cover the aggregate total", async () => {
-    const report = JSON.parse(createPassingVitestReport(273)) as {
+    const report = JSON.parse(createPassingVitestReport(defaultUnitAuthority)) as {
       testResults: Array<{ assertionResults: unknown[] }>;
     };
     report.testResults[0]!.assertionResults.pop();
@@ -544,15 +667,84 @@ describe("quality-gates.v1 registry", () => {
     ]);
 
     expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
-    expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_REPORT_INCOMPLETE");
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_SUITE_ASSERTION_MISMATCH");
+  });
+
+  it.each([
+    ["lower", -1],
+    ["upper", 1],
+  ] as const)("rejects %s suite-count drift", (_label, delta) => {
+    const report = JSON.parse(createPassingVitestReport(defaultUnitAuthority)) as {
+      numPassedTestSuites: number;
+      numTotalTestSuites: number;
+    };
+    report.numPassedTestSuites += delta;
+    report.numTotalTestSuites += delta;
+
+    expect(() => attestVitestJsonReport(
+      JSON.stringify(report),
+      defaultUnitAuthority,
+      { repositoryRoot },
+    )).toThrow(/VITEST_SUITE_COUNT_MISMATCH/u);
+  });
+
+  it.each([
+    ["missing", (results: unknown[]) => results.pop()],
+    ["extra", (results: unknown[]) => results.push(structuredClone(results[0]))],
+  ] as const)("rejects %s testResult even when root totals remain unchanged", (_label, mutate) => {
+    const report = JSON.parse(createPassingVitestReport(defaultUnitAuthority)) as {
+      testResults: unknown[];
+    };
+    mutate(report.testResults);
+
+    expect(() => attestVitestJsonReport(
+      JSON.stringify(report),
+      defaultUnitAuthority,
+      { repositoryRoot },
+    )).toThrow(/VITEST_TEST_RESULT_COUNT_MISMATCH/u);
+  });
+
+  it.each([
+    ["missing", (assertions: Array<{ ancestorTitles: string[] }>) => {
+      for (const assertion of assertions) {
+        assertion.ancestorTitles = [];
+      }
+    }],
+    ["extra", (assertions: Array<{ ancestorTitles: string[] }>) => {
+      assertions[0]!.ancestorTitles = ["extra suite"];
+    }],
+  ] as const)("rejects %s suite topology", (_label, mutate) => {
+    const report = JSON.parse(createPassingVitestReport(defaultUnitAuthority)) as {
+      testResults: Array<{ assertionResults: Array<{ ancestorTitles: string[] }> }>;
+    };
+    mutate(report.testResults[0]!.assertionResults);
+
+    expect(() => attestVitestJsonReport(
+      JSON.stringify(report),
+      defaultUnitAuthority,
+      { repositoryRoot },
+    )).toThrow(/VITEST_SUITE_ASSERTION_MISMATCH/u);
+  });
+
+  it("rejects assertion movement while suite and assertion root totals stay unchanged", () => {
+    const report = JSON.parse(createPassingVitestReport(defaultUnitAuthority)) as {
+      testResults: Array<{ assertionResults: Array<{ ancestorTitles: string[] }> }>;
+    };
+    report.testResults[0]!.assertionResults[0]!.ancestorTitles = ["moved suite"];
+
+    expect(() => attestVitestJsonReport(
+      JSON.stringify(report),
+      defaultUnitAuthority,
+      { repositoryRoot },
+    )).toThrow(/VITEST_SUITE_ASSERTION_MISMATCH/u);
   });
 
   it("将普通 unit 与独立 process lifecycle blocking gate 的配置和预算锁定", async () => {
     const packageJson = JSON.parse(
       await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
     ) as { scripts: Record<string, string> };
-    const processTestSource = await readFile(
-      path.join(repositoryRoot, "tests/unit/process-deadline.test.ts"),
+    const processVerifierSource = await readFile(
+      path.join(repositoryRoot, "scripts/ci/verify-process-lifecycle.mjs"),
       "utf8",
     );
 
@@ -560,8 +752,22 @@ describe("quality-gates.v1 registry", () => {
       "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
     );
     expect(packageJson.scripts["process-lifecycle"]).toBe(
-      "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.process-deadline.config.ts",
+      "node scripts/ci/verify-process-lifecycle.mjs",
     );
+    expect(PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY).toEqual({
+      attestationVersion: 1,
+      expectedSuiteCount: 2,
+      expectedTestCount: 15,
+      expectedTestResults: [{
+        filePath: "tests/unit/process-deadline.test.ts",
+        suites: [{ ancestorTitles: ["process deadline"], expectedAssertionCount: 15 }],
+      }],
+      shardId: "process-lifecycle",
+    });
+    expect(PROCESS_LIFECYCLE_CHILD_TIMEOUT_MS).toBe(PROCESS_LIFECYCLE_BUDGET.gateTimeoutMs);
+    expect(processVerifierSource).toContain("--reporter=json");
+    expect(processVerifierSource).toContain("attestVitestJsonReport");
+    expect(processVerifierSource).not.toMatch(/match\s*\(.*\\bit/du);
     expect(unitVitestConfig.test?.projects).toBeUndefined();
     expect(unitVitestConfig.test?.exclude).toContain("tests/unit/process-deadline.test.ts");
     expect(processLifecycleVitestConfig.test).toMatchObject({
@@ -573,13 +779,56 @@ describe("quality-gates.v1 registry", () => {
       pool: "forks",
       testTimeout: PROCESS_LIFECYCLE_BUDGET.testTimeoutMs,
     });
-    expect(processTestSource.match(/\bit\s*\(/gu)).toHaveLength(
-      PROCESS_LIFECYCLE_BUDGET.expectedTestCount,
-    );
     expect(
       PROCESS_LIFECYCLE_BUDGET.gateTimeoutMs -
         PROCESS_LIFECYCLE_BUDGET.declaredTestBudgetMs,
     ).toBeGreaterThanOrEqual(PROCESS_LIFECYCLE_BUDGET.requiredMarginMs);
+  });
+
+  it("process-lifecycle consumes the real reporter and PF-A bounded terminal proof", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const executeNode = vi.fn(async (_args: string[]) => createProcessResult());
+    const executePnpm = vi.fn(async (_args: string[]) => createProcessResult(
+      createPassingVitestReport(PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY),
+    ));
+
+    expect(await verifyProcessLifecycle({ executeNode, executePnpm })).toBe(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("15/15 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("2/2 suites");
+    expect(executePnpm.mock.calls[0]?.[0]).toContain("--reporter=json");
+  });
+
+  it.each([
+    ["it.each", "it.each([[1], [2]])('row', () => undefined)"],
+    ["alias", "const caseOf = it; caseOf('alias', () => undefined)"],
+    ["dynamic", "for (const row of rows) it(row.name, row.run)"],
+    ["non-executed-text", "const sample = `it('not executed', () => {})`"],
+  ] as const)("ignores %s source fixture and fails on runtime reporter drift", (_label, sourceFixture) => {
+    expect(sourceFixture.length).toBeGreaterThan(0);
+    expect(() => attestVitestJsonReport(
+      createDriftedVitestReport(PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY, 14),
+      PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY,
+      { repositoryRoot },
+    )).toThrow(/VITEST_COUNT_MISMATCH/u);
+  });
+
+  it("process-lifecycle rejects unproven cleanup even with a valid reporter", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const executeNode = vi.fn(async () => createProcessResult());
+    const executePnpm = vi.fn(async () => createProcessResult(
+      createPassingVitestReport(PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY),
+      {
+        cleanupComplete: false,
+        residualProcessTree: 1,
+        status: "invalid",
+        streamsDrained: false,
+        termination: { kind: "spawn-error", stableCode: "EPROCESSCLEANUP" },
+      },
+    ));
+
+    expect(await verifyProcessLifecycle({ executeNode, executePnpm })).toBe(1);
   });
 
   it("登记唯一、升序且由本地 runner 始终执行的二十七项 blocking gate", async () => {

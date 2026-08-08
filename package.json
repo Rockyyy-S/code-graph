@@ -12,7 +12,7 @@
     "type": "node scripts/quality/run-workspace-script.mjs type && tsc --noEmit -p tsconfig.quality.json",
     "lint": "eslint . --max-warnings=0 --no-warn-ignored --format ./scripts/quality/relative-eslint-formatter.mjs && node scripts/quality/check-test-markers.mjs",
     "unit": "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
-    "process-lifecycle": "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.process-deadline.config.ts",
+    "process-lifecycle": "node scripts/ci/verify-process-lifecycle.mjs",
     "build": "node scripts/quality/run-workspace-script.mjs build",
     "contract": "vitest run --config vitest.contract.config.ts",
     "dependency-boundary": "node scripts/architecture/check-dependency-boundaries.mjs",

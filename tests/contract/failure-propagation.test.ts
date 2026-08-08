@@ -8,6 +8,7 @@ import {
   loadProviderEvaluation,
   QUALITY_GATES,
   runArchitectureRequired,
+  sanitizeDiagnosticText,
 } from "../../scripts/ci/run-architecture-required.mjs";
 import { DEFAULT_PROCESS_CLEANUP_GRACE_MS } from "../../scripts/ci/run-process-with-deadline.mjs";
 import { loadQualityGateRegistry } from "../../scripts/ci/load-quality-gates.mjs";
@@ -182,9 +183,14 @@ describe("architecture-required failure propagation", () => {
       ).rejects.toBe(injectedError);
 
       expect(await readRunnerDiagnostic(outputRoot)).toEqual({
+        artifactOutput: {
+          kind: "external",
+          pathSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
         currentGateId: QUALITY_GATES[0],
         error: {
           cause: {
+            cause: null,
             code: null,
             message: "fixture cause",
             name: "Error",
@@ -198,15 +204,16 @@ describe("architecture-required failure propagation", () => {
         invocationId: expect.stringMatching(
           /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u,
         ),
-        outputRoot: path.resolve(outputRoot),
         phase: "gate-execution",
         process: {
-          execPath: process.execPath,
-          npm_execpath: process.env.npm_execpath ?? null,
+          packageManagerExecutable: process.env.npm_execpath === undefined
+            ? null
+            : process.env.npm_execpath.replaceAll("\\", "/").split("/").at(-1),
+          runtimeExecutable: process.execPath.replaceAll("\\", "/").split("/").at(-1),
         },
         recordedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
         schema: "runner-diagnostic",
-        schemaVersion: 1,
+        schemaVersion: 2,
       });
       await expect(
         access(path.join(outputRoot, "gate-evidence.json")),
@@ -247,13 +254,89 @@ describe("architecture-required failure propagation", () => {
         gateRegistryDigest: loadedRegistry.gateRegistryDigest,
         phase: "artifact-publication",
         schema: "runner-diagnostic",
-        schemaVersion: 1,
+        schemaVersion: 2,
       });
       await expect(
         access(path.join(outputRoot, "gate-evidence.json")),
       ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(outputRoot, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    ["Windows drive", "failed at C:\\repo\\cache\\tool.exe"],
+    ["UNC", "failed at \\\\server\\share\\cache\\tool.exe"],
+    ["POSIX", "failed at /home/user/cache/tool.mjs"],
+    ["file URL", "failed at file:///C:/repo/cache/tool.mjs"],
+    ["mixed separators", "failed at D:\\repo/cache\\tool.mjs"],
+  ] as const)("sanitizes %s absolute path text", (_label, message) => {
+    const sanitized = sanitizeDiagnosticText(message);
+
+    expect(sanitized).toContain("[absolute-path]");
+    expect(sanitized).not.toContain("repo");
+    expect(sanitized).not.toContain("cache");
+    expect(sanitized).not.toContain("tool.mjs");
+    expect(sanitized).not.toContain("tool.exe");
+  });
+
+  it("sanitizes nested causes before publishing runner diagnostic", async () => {
+    const outputRoot = await mkdtemp(
+      path.join(tmpdir(), "architecture-runner-private-cause-"),
+    );
+    const deepest = new Error("file:///C:/repo/cache/deep.mjs");
+    const nested = Object.assign(new Error("\\\\server\\share\\nested\\tool.exe"), {
+      cause: deepest,
+    });
+    const injectedError = Object.assign(new Error("/home/user/repository/top.mjs"), {
+      cause: nested,
+      code: "EPRIVATE_FIXTURE",
+    });
+    try {
+      await expect(
+        runArchitectureRequired({
+          execute: async () => {
+            throw injectedError;
+          },
+          outputRoot,
+        }),
+      ).rejects.toBe(injectedError);
+
+      const diagnosticText = JSON.stringify(await readRunnerDiagnostic(outputRoot));
+      expect(diagnosticText.match(/\[absolute-path\]/gu)?.length).toBeGreaterThanOrEqual(3);
+      for (const leaked of [
+        "C:/repo/cache/deep.mjs",
+        "server\\share\\nested",
+        "/home/user/repository/top.mjs",
+        path.resolve(outputRoot),
+        process.execPath,
+        process.env.npm_execpath,
+      ]) {
+        if (leaked !== undefined) {
+          expect(diagnosticText).not.toContain(leaked);
+        }
+      }
+    } finally {
+      await rm(outputRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("sanitizes diagnostic write-failure marker without publishing outputRoot", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "architecture-runner-marker-"));
+    const blockedOutputRoot = path.join(root, "blocked-output-root");
+    await writeFile(blockedOutputRoot, "not-a-directory", "utf8");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await expect(runArchitectureRequired({ outputRoot: blockedOutputRoot })).rejects.toThrow();
+
+      const marker = stderrSpy.mock.calls.map(([chunk]) => String(chunk)).join("");
+      expect(marker).toContain("@@ARCHITECTURE_RUNNER_DIAGNOSTIC_WRITE_FAILED_V1@@");
+      expect(marker).toContain("\"schemaVersion\":2");
+      expect(marker).toContain("[absolute-path]");
+      expect(marker).not.toContain(path.resolve(blockedOutputRoot));
+      expect(marker).not.toContain(root);
+    } finally {
+      await rm(root, { force: true, recursive: true });
     }
   });
 

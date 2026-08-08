@@ -239,23 +239,22 @@ async function publishRunnerDiagnostic(context, error) {
       ? error.stack
       : `${errorSummary.name}: ${errorSummary.message}`;
   const diagnostic = {
+    artifactOutput: describeOutputRoot(context.outputRoot),
     currentGateId: context.currentGateId,
     error: {
       ...errorSummary,
-      cause: summarizeCause(error),
       stackSha256: sha256Hex(Buffer.from(stackSource, "utf8")),
     },
     gateRegistryDigest: context.gateRegistryDigest,
     invocationId: context.invocationId,
-    outputRoot: context.outputRoot,
     phase: context.phase,
     process: {
-      execPath: process.execPath,
-      npm_execpath: process.env.npm_execpath ?? null,
+      packageManagerExecutable: safeBasename(process.env.npm_execpath),
+      runtimeExecutable: safeBasename(process.execPath),
     },
     recordedAt: new Date().toISOString(),
     schema: "runner-diagnostic",
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
   const targetPath = path.join(context.outputRoot, runnerDiagnosticFileName);
   const temporaryPath = path.join(
@@ -275,43 +274,52 @@ async function publishRunnerDiagnostic(context, error) {
   }
 }
 
-/** 将 Error 或非 Error throw 收敛为无循环、可序列化的稳定摘要。 */
-function summarizeError(error) {
+/** 将 Error/cause 收敛为有界、无循环且已净化绝对路径的稳定摘要。 */
+function summarizeError(error, state = { depth: 0, seen: new Set() }) {
+  if (state.depth >= 4) {
+    return { cause: null, code: null, message: "[cause-depth-limit]", name: "Error" };
+  }
+  if (typeof error === "object" && error !== null) {
+    if (state.seen.has(error)) {
+      return { cause: null, code: null, message: "[cause-cycle]", name: "Error" };
+    }
+    state.seen.add(error);
+  }
   if (error instanceof Error) {
     return {
+      cause: error.cause === undefined
+        ? null
+        : summarizeError(error.cause, { depth: state.depth + 1, seen: state.seen }),
       code: normalizeErrorCode(error.code),
-      message: error.message,
-      name: error.name,
+      message: sanitizeDiagnosticText(error.message),
+      name: sanitizeDiagnosticText(error.name),
     };
   }
   return {
+    cause: null,
     code: null,
-    message: String(error),
+    message: sanitizeDiagnosticText(String(error)),
     name: "NonErrorThrown",
   };
 }
 
-/** cause 只投影一层摘要，避免任意对象循环或泄露超量上下文。 */
-function summarizeCause(error) {
-  return error instanceof Error && error.cause !== undefined
-    ? summarizeError(error.cause)
-    : null;
-}
-
 /** error.code 只接受可稳定字符串化的标量。 */
 function normalizeErrorCode(code) {
-  return typeof code === "string" || typeof code === "number" ? String(code) : null;
+  const normalized = typeof code === "string" || typeof code === "number" ? String(code) : null;
+  return normalized !== null && /^[a-z0-9_.-]{1,64}$/iu.test(normalized)
+    ? normalized
+    : null;
 }
 
 /** diagnostic 自身无法写入时向真实 stderr 发布稳定 fail-closed marker。 */
 function emitDiagnosticWriteFailureMarker(context, originalError, publicationError) {
   const marker = {
+    artifactOutput: describeOutputRoot(context.outputRoot),
     currentGateId: context.currentGateId,
     originalError: summarizeError(originalError),
-    outputRoot: context.outputRoot,
     phase: context.phase,
     publicationError: summarizeError(publicationError),
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
   try {
     process.stderr.write(
@@ -320,6 +328,53 @@ function emitDiagnosticWriteFailureMarker(context, originalError, publicationErr
   } catch {
     // stderr 本身不可写时仍重新抛出原异常，禁止 marker 失败改变 library 终态。
   }
+}
+
+/**
+ * 净化用户可见 diagnostic 文本中的 Windows、UNC、POSIX 与 file URL 绝对路径。
+ *
+ * @param {unknown} value 任意错误文本。
+ * @returns {string} 仅保留稳定占位符的文本。
+ */
+export function sanitizeDiagnosticText(value) {
+  let text = String(value);
+  const placeholder = "[absolute-path]";
+  text = text.replace(/\bfile:\/\/\/?[^\s"'<>]+/giu, placeholder);
+  text = text.replace(/(?<![a-z0-9_])[a-z]:[\\/][^\s"'<>|]+/giu, placeholder);
+  text = text.replace(/(?<![:a-z0-9_])(?:\\\\|\/\/)[^\\/\s"'<>|]+[\\/][^\s"'<>|]+/giu, placeholder);
+  text = text.replace(
+    /(^|[\s([{=,:;])\/(?:[^/\s"'<>|]+\/)*[^/\s"'<>|]+/gu,
+    (_match, prefix) => `${prefix}${placeholder}`,
+  );
+  return text;
+}
+
+/** 对外部发布根只暴露枚举与稳定摘要；仓库内发布根仅暴露相对路径。 */
+function describeOutputRoot(outputRoot) {
+  const relative = path.relative(repositoryRoot, outputRoot);
+  if (relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)) {
+    return {
+      kind: "repository-relative",
+      path: relative.replaceAll(path.sep, "/"),
+    };
+  }
+  if (relative === "") {
+    return { kind: "repository-relative", path: "." };
+  }
+  return {
+    kind: "external",
+    pathSha256: sha256Hex(Buffer.from(path.resolve(outputRoot), "utf8")),
+  };
+}
+
+/** 进程字段只发布 basename，禁止泄露 cache/interpreter 的完整入口路径。 */
+function safeBasename(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return null;
+  }
+  const segments = value.replaceAll("\\", "/").split("/").filter(Boolean);
+  return sanitizeDiagnosticText(segments.at(-1) ?? "unknown");
 }
 
 /** 总 deadline 耗尽后让剩余 gate 稳定 invalid，并继续生成完整诊断 artifact。 */
@@ -414,7 +469,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     process.exitCode = result.exitCode;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : "architecture-required 未知错误。");
+    console.error(
+      error instanceof Error
+        ? sanitizeDiagnosticText(error.message)
+        : "architecture-required 未知错误。",
+    );
     process.exitCode = 1;
   }
 }
