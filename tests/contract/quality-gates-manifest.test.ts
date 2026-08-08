@@ -23,6 +23,8 @@ import {
   PROCESS_LIFECYCLE_CHILD_TIMEOUT_MS,
   verifyProcessLifecycle,
 } from "../../scripts/ci/verify-process-lifecycle.mjs";
+import { HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST } from
+  "../../scripts/ci/verify-host-path-posix-helper-v1.mjs";
 import unitVitestConfig from "../../vitest.config.js";
 import processLifecycleVitestConfig, {
   PROCESS_LIFECYCLE_BUDGET,
@@ -164,6 +166,28 @@ function createProcessResult(stdout = "", overrides: Partial<FakeProcessResult> 
   };
 }
 
+/** 严格提取 hosted POSIX workflow 的 pull_request.paths，避免 YAML 宽松解析掩盖顺序或重复。 */
+function parsePullRequestPaths(source: string): string[] {
+  const lines = source.replaceAll("\r\n", "\n").split("\n");
+  const pullRequestIndex = lines.indexOf("  pull_request:");
+  const pathsIndex = lines.indexOf("    paths:", pullRequestIndex + 1);
+  if (pullRequestIndex < 0 || pathsIndex !== pullRequestIndex + 1) {
+    throw new Error("host-path-posix-linux workflow 缺少规范 pull_request.paths。");
+  }
+  const triggerPaths: string[] = [];
+  for (let index = pathsIndex + 1; index < lines.length; index += 1) {
+    const match = /^      - "([^"]+)"$/u.exec(lines[index]!);
+    if (match === null) {
+      break;
+    }
+    triggerPaths.push(match[1]!);
+  }
+  if (triggerPaths.length === 0 || new Set(triggerPaths).size !== triggerPaths.length) {
+    throw new Error("host-path-posix-linux pull_request.paths 必须非空且无重复。");
+  }
+  return triggerPaths;
+}
+
 const storyShardAuthorities = [
   ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards,
   ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
@@ -295,6 +319,10 @@ const expectedGates = [
       ".github/workflows/host-path-posix-linux.yml",
       "Cargo.lock",
       "Cargo.toml",
+      "apps/graph-service/package.json",
+      "apps/graph-service/src/host-path-identity.ts",
+      "apps/graph-service/src/index-job-runtime.ts",
+      "apps/graph-service/src/index.ts",
       "ci/quality-gates.v1.yaml",
       "packages/adapters/host-path-posix-native/**",
       "packaging/linux/**",
@@ -304,6 +332,7 @@ const expectedGates = [
       "tests/contract/quality-gates-manifest.test.ts",
       "tests/platform/linux-host-path-helper/**",
       "tests/unit/host-path-posix-capability.test.ts",
+      "tests/unit/index-job-runtime.test.ts",
     ],
   ],
   ["lint", ["pnpm", "lint"], "dev-enablement"],
@@ -400,9 +429,9 @@ describe("quality-gates.v1 registry", () => {
     expect(new Set(unitTests).size).toBe(unitTests.length);
     expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
     expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(323);
+      .toBe(325);
     expect(allShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(329);
+      .toBe(331);
     /** 这些 suite/assertion 值来自冻结前真实 reporter，禁止从当前待验证输出临时派生。 */
     expect(allShards.map((shard) => ({
       attestationVersion: shard.attestationVersion,
@@ -420,12 +449,12 @@ describe("quality-gates.v1 registry", () => {
       {
         attestationVersion: 1,
         expectedSuiteCount: 22,
-        expectedTestCount: 273,
+        expectedTestCount: 275,
         results: [
           ["tests/unit/analyzer-config-capture.test.ts", "Story 1.5 Analyzer configuration capture", 53],
           ["tests/unit/analyzer-config-snapshot.test.ts", "Story 1.5 analyzer config snapshot", 8],
           ["tests/unit/composite-graph-patch.test.ts", "Story 1.5 composite graph patch", 5],
-          ["tests/unit/index-job-runtime.test.ts", "index job runtime", 30],
+          ["tests/unit/index-job-runtime.test.ts", "index job runtime", 32],
           ["tests/unit/index-read-set.test.ts", "index read-set provider", 41],
           ["tests/unit/module-dependency-domain.test.ts", "Story 1.5 module dependency domain", 6],
           ["tests/unit/module-fact-batch.test.ts", "Story 1.5 source module FactBatch", 3],
@@ -508,14 +537,14 @@ describe("quality-gates.v1 registry", () => {
     ])).toThrow(/BUILD_TOPOLOGY_INVALID/u);
   });
 
-  it("consumes exact 273 + 50 unit and 6 contract runtime attestations", async () => {
+  it("consumes exact 275 + 50 unit and 6 contract runtime attestations", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { executePnpm, status } = await runStoryVerifierWithOverrides();
 
     expect(status).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("273/273 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("275/275 tests");
     expect(logSpy.mock.calls.flat().join(" ")).toContain("50/50 tests");
     expect(logSpy.mock.calls.flat().join(" ")).toContain("6/6 tests");
     expect(logSpy.mock.calls.flat().join(" ")).toContain("22/22 suites");
@@ -548,7 +577,7 @@ describe("quality-gates.v1 registry", () => {
   });
 
   it.each([
-    ["default unit lower drift", 0, 272],
+    ["default unit lower drift", 0, 274],
     ["SQLite unit lower drift", 1, 49],
     ["contract lower drift", 2, 5],
   ] as const)("rejects %s runtime totals", async (_label, shardIndex, reducedCount) => {
@@ -580,7 +609,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "failed",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 272 }, () => "passed" as const),
+        ...Array.from({ length: 274 }, () => "passed" as const),
         "failed",
       ])),
       "VITEST_FAILED",
@@ -588,7 +617,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "pending",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 272 }, () => "passed" as const),
+        ...Array.from({ length: 274 }, () => "passed" as const),
         "pending",
       ])),
       "VITEST_NONPASSING",
@@ -596,7 +625,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "skipped",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 272 }, () => "passed" as const),
+        ...Array.from({ length: 274 }, () => "passed" as const),
         "skipped",
       ])),
       "VITEST_NONPASSING",
@@ -604,7 +633,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "todo",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 272 }, () => "passed" as const),
+        ...Array.from({ length: 274 }, () => "passed" as const),
         "todo",
       ])),
       "VITEST_NONPASSING",
@@ -764,6 +793,18 @@ describe("quality-gates.v1 registry", () => {
       }],
       shardId: "process-lifecycle",
     });
+    expect(PROCESS_LIFECYCLE_BUDGET).toEqual({
+      declaredTestBudgetMs: 140_000,
+      expectedTestCount: 15,
+      fastTestCount: 13,
+      gateTimeoutMs: 180_000,
+      gitTestTimeoutMs: 45_000,
+      requiredMarginMs: 30_000,
+      testTimeoutMs: 5_000,
+      windowsMatrixTimeoutMs: 30_000,
+    });
+    expect(PROCESS_LIFECYCLE_BUDGET.expectedTestCount)
+      .toBe(PROCESS_LIFECYCLE_ATTESTATION_AUTHORITY.expectedTestCount);
     expect(PROCESS_LIFECYCLE_CHILD_TIMEOUT_MS).toBe(PROCESS_LIFECYCLE_BUDGET.gateTimeoutMs);
     expect(processVerifierSource).toContain("--reporter=json");
     expect(processVerifierSource).toContain("attestVitestJsonReport");
@@ -847,6 +888,14 @@ describe("quality-gates.v1 registry", () => {
     }));
     expect(workflowShas.size).toBe(1);
     const workflowSha = [...workflowShas][0]!;
+    const workflowTriggerPaths = parsePullRequestPaths(await readFile(
+      path.join(repositoryRoot, ".github/workflows/host-path-posix-linux.yml"),
+      "utf8",
+    ));
+    const posixGate = loaded.registry.gates.find(
+      ({ gateDefinition }: { gateDefinition: { gateId: string } }) =>
+        gateDefinition.gateId === "host-path-posix-helper-v1",
+    );
 
     expect(loaded.gateRegistryDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(loaded.registry.gates).toHaveLength(expectedGates.length);
@@ -866,6 +915,10 @@ describe("quality-gates.v1 registry", () => {
         triggerPaths !== undefined,
       );
     });
+    expect(workflowTriggerPaths).toEqual([
+      ...HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST.triggerPaths,
+    ]);
+    expect(posixGate?.gateDefinition.triggerPaths).toEqual(workflowTriggerPaths);
 
     expect(QUALITY_GATES).toEqual(expectedGateIds);
     const execute = vi.fn(async () => ({

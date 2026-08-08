@@ -27,6 +27,7 @@ import {
   createVerifiedIndexJobRuntime as createVerifiedIndexJobRuntimeProduction,
   type CreateIndexJobRuntimeOptions,
   GraphServiceRequestError,
+  markHostPathIdentityShutdownDiagnostic,
   MAX_PENDING_EXPLICIT_JOBS,
   MAX_STARTUP_READ_SET_STABILITY_ATTEMPTS,
   MAX_STALE_REQUEUE_ATTEMPTS,
@@ -599,6 +600,86 @@ describe("index job runtime", () => {
     await expect(runtime.close()).resolves.toBeUndefined();
     expect(runtime.getStatus().lastIndexJob).toMatchObject({ state: "cancelled" });
     expect(markJobCancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps shutdown cancellation primary while helper close failure remains secondary", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const markJobCancelled = vi.spyOn(store, "markJobCancelled");
+    const markJobFailed = vi.spyOn(store, "markJobFailed");
+    const helperClose = vi.fn()
+      .mockRejectedValueOnce(new Error("secondary helper close failure"))
+      .mockResolvedValueOnce(undefined);
+    const scan = vi.fn(async ({ signal }: { signal?: AbortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          reject(markHostPathIdentityShutdownDiagnostic(Object.assign(
+            new Error("helper read failed during shutdown"),
+            { code: "HOST_PATH_CAPTURE_PROCESS_FAILED" },
+          )));
+        }, { once: true });
+      }));
+    const runtime = createIndexJobRuntime({
+      closeHostPathIdentityHelper: helperClose,
+      closeTimeoutMs: 100,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      scan,
+      serviceInstanceId: "instance-helper-shutdown-dominance",
+      statusEpoch: "epoch-helper-shutdown-dominance",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+
+    runtime.startJob({ kind: "rebuild" });
+    await vi.waitFor(() => expect(scan).toHaveBeenCalledTimes(1));
+    await expect(runtime.close()).rejects.toThrow("secondary helper close failure");
+    await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+      state: "cancelled",
+    }));
+    expect(markJobCancelled).toHaveBeenCalledTimes(1);
+    expect(markJobFailed).not.toHaveBeenCalled();
+
+    await expect(runtime.close()).resolves.toBeUndefined();
+    expect(helperClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a non-aborted helper diagnostic as an independent failed terminal state", async () => {
+    const fixture = await createFixture();
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const markJobCancelled = vi.spyOn(store, "markJobCancelled");
+    const markJobFailed = vi.spyOn(store, "markJobFailed");
+    const runtime = createIndexJobRuntime({
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      scan: async () => {
+        throw Object.assign(
+          new Error("independent helper read failure"),
+          { code: "HOST_PATH_CAPTURE_PROCESS_FAILED" },
+        );
+      },
+      serviceInstanceId: "instance-helper-independent-failure",
+      statusEpoch: "epoch-helper-independent-failure",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(() => expect(runtime.getStatus().lastIndexJob).toMatchObject({
+        error: { code: "GRAPH_WRITE_FAILED" },
+        state: "failed",
+      }));
+      expect(markJobCancelled).not.toHaveBeenCalled();
+      expect(markJobFailed).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("does not enter SQLite running state when shutdown cancels a queued Job", async () => {

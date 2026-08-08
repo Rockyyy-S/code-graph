@@ -3,8 +3,8 @@ import FailOnSkippedReporter from "./scripts/quality/fail-on-skipped-reporter.mj
 
 const gateTimeoutMs = 180_000;
 const requiredMarginMs = 30_000;
-const fastTestCount = 8;
-const testTimeoutMs = 8_000;
+const fastTestCount = 13;
+const testTimeoutMs = 5_000;
 const gitTestTimeoutMs = 45_000;
 const windowsMatrixTimeoutMs = 30_000;
 const declaredTestBudgetMs =

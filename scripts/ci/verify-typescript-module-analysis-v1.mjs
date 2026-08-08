@@ -58,7 +58,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
     Object.freeze({
       attestationVersion: 1,
       expectedSuiteCount: 22,
-      expectedTestCount: 273,
+      expectedTestCount: 275,
       expectedTestResults: Object.freeze([
         Object.freeze({
           filePath: "tests/unit/analyzer-config-capture.test.ts",
@@ -85,7 +85,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
           filePath: "tests/unit/index-job-runtime.test.ts",
           suites: Object.freeze([Object.freeze({
             ancestorTitles: Object.freeze(["index job runtime"]),
-            expectedAssertionCount: 30,
+            expectedAssertionCount: 32,
           })]),
         }),
         Object.freeze({

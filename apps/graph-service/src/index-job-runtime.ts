@@ -59,6 +59,26 @@ export const MAX_STARTUP_READ_SET_STABILITY_ATTEMPTS = 8;
 
 /** runtime 单次关闭等待当前扫描结束的默认硬界限。 */
 export const DEFAULT_RUNTIME_CLOSE_TIMEOUT_MS = 200;
+const HOST_PATH_IDENTITY_SHUTDOWN_DIAGNOSTIC = Symbol.for(
+  "codegraph.host-path-identity.shutdown-diagnostic",
+);
+
+/** 仅供 helper 生命周期边界和确定性测试写入 shutdown 因果，不进入外部合同。 */
+export function markHostPathIdentityShutdownDiagnostic<T extends Error>(error: T): T {
+  Object.defineProperty(error, HOST_PATH_IDENTITY_SHUTDOWN_DIAGNOSTIC, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return error;
+}
+
+/** 识别明确由 shutdown 触发的 helper 附加诊断，禁止仅按错误文本猜测。 */
+function isHostPathIdentityShutdownDiagnostic(error: unknown): error is Error {
+  return error instanceof Error &&
+    (error as Error & Record<symbol, unknown>)[HOST_PATH_IDENTITY_SHUTDOWN_DIAGNOSTIC] === true;
+}
 
 /** 服务端连接共享的 runtime 边界。 */
 export interface GraphServiceRuntime {
@@ -417,7 +437,13 @@ export function createIndexJobRuntime(
     } catch (error) {
       const completedAt = timestampAtOrAfter(now(), startedAt);
       if (signal.aborted &&
-        (error instanceof WorkspaceScanCancelledError || isAbortError(error))) {
+        (error instanceof WorkspaceScanCancelledError ||
+          isAbortError(error) ||
+          isHostPathIdentityShutdownDiagnostic(error))) {
+        /**
+         * shutdown 因果标记只让 helper close/read 错误降为附加诊断；close() 仍可传播该
+         * 生命周期错误，但 Job 的主终态由已观察的 abort 决定，不能被覆盖成 failed。
+         */
         try {
           if (staleObserved) {
             options.store.markJobCancelledAndWorkspaceStale(jobId, completedAt);
@@ -430,7 +456,7 @@ export function createIndexJobRuntime(
         state.publishCancelledJob(jobId, completedAt);
         return;
       }
-  const mustPersistStale = staleObserved ||
+      const mustPersistStale = staleObserved ||
         error instanceof WorkspaceScanError ||
         error instanceof WorkspaceIgnoreConfigChangedError ||
         isAnalyzerFailure(error);

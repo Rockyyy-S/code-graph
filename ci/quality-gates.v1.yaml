@@ -197,6 +197,10 @@
           ".github/workflows/host-path-posix-linux.yml",
           "Cargo.lock",
           "Cargo.toml",
+          "apps/graph-service/package.json",
+          "apps/graph-service/src/host-path-identity.ts",
+          "apps/graph-service/src/index-job-runtime.ts",
+          "apps/graph-service/src/index.ts",
           "ci/quality-gates.v1.yaml",
           "packages/adapters/host-path-posix-native/**",
           "packaging/linux/**",
@@ -205,14 +209,15 @@
           "tests/contract/host-path-posix-helper-protocol.test.ts",
           "tests/contract/quality-gates-manifest.test.ts",
           "tests/platform/linux-host-path-helper/**",
-          "tests/unit/host-path-posix-capability.test.ts"
+          "tests/unit/host-path-posix-capability.test.ts",
+          "tests/unit/index-job-runtime.test.ts"
         ],
         "command": ["node", "scripts/ci/verify-host-path-posix-helper-v1.mjs"],
         "capabilityOwner": "security",
         "blocking": true,
         "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@67b35a8c1516759c680c5835c1956cdd623f7476#host-path-posix-helper-v1"
       },
-      "gateDefinitionDigest": "edcfd1e8aa7d2a50c15f4c26d16b2ab98fd77789ac0c64cf4856053ea6482ae4"
+      "gateDefinitionDigest": "ce2776b88cf8ce943917725ab303920b0a961a968552e5078657a661ffaf82a6"
     },
     {
       "gateDefinition": {

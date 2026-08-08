@@ -124,8 +124,8 @@ describe("contract execution partitions", () => {
       testTimeout: PROCESS_LIFECYCLE_BUDGET.testTimeoutMs,
     });
     expect(PROCESS_LIFECYCLE_BUDGET).toMatchObject({
-      declaredTestBudgetMs: 139_000,
-      expectedTestCount: 10,
+      declaredTestBudgetMs: 140_000,
+      expectedTestCount: 15,
       gateTimeoutMs: 180_000,
     });
     expect(

@@ -51,6 +51,10 @@ export const HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST = Object.freeze({
     ".github/workflows/host-path-posix-linux.yml",
     "Cargo.lock",
     "Cargo.toml",
+    "apps/graph-service/package.json",
+    "apps/graph-service/src/host-path-identity.ts",
+    "apps/graph-service/src/index-job-runtime.ts",
+    "apps/graph-service/src/index.ts",
     "ci/quality-gates.v1.yaml",
     "packages/adapters/host-path-posix-native/**",
     "packaging/linux/**",
@@ -60,6 +64,7 @@ export const HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST = Object.freeze({
     "tests/contract/quality-gates-manifest.test.ts",
     "tests/platform/linux-host-path-helper/**",
     "tests/unit/host-path-posix-capability.test.ts",
+    "tests/unit/index-job-runtime.test.ts",
   ]),
   version: 1,
 });
@@ -70,13 +75,16 @@ export async function verifyHostPathPosixHelperV1() {
   await validateGateRegistration();
   runCargo(["metadata", "--locked", "--offline", "--format-version", "1"], true);
   runPnpm(["--filter", "@codegraph/adapter-host-path-posix-native", "type"]);
+  runPnpm(["--filter", "@codegraph/graph-service", "type"]);
   runPnpm([
     "exec", "vitest", "run", "--config", "vitest.config.ts",
     "tests/unit/host-path-posix-capability.test.ts",
+    "tests/unit/index-job-runtime.test.ts",
   ]);
   runPnpm([
     "exec", "vitest", "run", "--config", "vitest.contract.config.ts",
     "tests/contract/host-path-posix-helper-protocol.test.ts",
+    "tests/contract/quality-gates-manifest.test.ts",
   ]);
   runPnpm([
     "exec", "vitest", "run", "--config",
@@ -173,6 +181,9 @@ async function validateStaticClosure() {
     "packages/adapters/host-path-posix-native/src/linux-helper.ts",
   );
   assertIncludes(linuxHelper, [
+    "createInstalledLinuxSnapshotHelperBindingV1",
+    "verifySignature(",
+    "bridgeBinarySha256 !== provenance.bridgeBinarySha256",
     "stdio: [\"pipe\", \"pipe\", \"pipe\", input.rootFd]",
     "shell: false",
     "O_DIRECTORY",
@@ -186,6 +197,18 @@ async function validateStaticClosure() {
   if (/CAP_SYS_ADMIN|setuid|sudo\b/u.test(linuxHelper)) {
     throw new Error("Node bridge 不得获取或请求特权。 ");
   }
+  const graphServiceComposition = await readText("apps/graph-service/src/index.ts");
+  assertIncludes(graphServiceComposition, [
+    "createProductionHostPathIdentityComposition",
+    "loadInstalledLinuxBinding ?? createInstalledLinuxSnapshotHelperBindingV1",
+    "posixNative: binding",
+    "platform: options.platform",
+  ], "graph-service POSIX composition");
+  const indexJobRuntime = await readText("apps/graph-service/src/index-job-runtime.ts");
+  assertIncludes(indexJobRuntime, [
+    "isHostPathIdentityShutdownDiagnostic(error)",
+    "state.publishCancelledJob(jobId, completedAt)",
+  ], "graph-service cancellation dominance");
 
   for (const [sourcePath, expectedDigest] of Object.entries(
     HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST.lockedAdapterDigests,
@@ -246,6 +269,11 @@ async function validateStaticClosure() {
     "cargo fetch --locked",
     "node scripts/ci/verify-host-path-posix-helper-v1.mjs",
   ], "Linux workflow Rust bootstrap");
+  const workflowTriggerPaths = parsePullRequestPaths(workflow);
+  if (JSON.stringify(workflowTriggerPaths) !==
+    JSON.stringify(HOST_PATH_POSIX_HELPER_VERIFIER_MANIFEST.triggerPaths)) {
+    throw new Error("Linux workflow pull_request.paths 与 POSIX verifier manifest 不一致。 ");
+  }
   if (/\bsudo\b|\bsystemctl\b|\b(?:mount|umount|fsfreeze)\s/u.test(workflow)) {
     throw new Error("普通 hosted workflow 禁止 snapshot/mount/freeze/systemd 安装或提权。 ");
   }
@@ -259,6 +287,34 @@ async function validateStaticClosure() {
   if (JSON.stringify(actualRustFiles) !== JSON.stringify(expectedRustFiles)) {
     throw new Error("Rust source closure 与 verifier manifest 不一致。 ");
   }
+}
+
+/**
+ * 严格提取 dedicated Linux workflow 的 pull_request.paths，拒绝重复、乱序外结构或动态值。
+ *
+ * @param {string} source workflow 原始文本。
+ * @returns {string[]} 声明顺序不变的路径集合。
+ */
+function parsePullRequestPaths(source) {
+  const lines = source.replaceAll("\r\n", "\n").split("\n");
+  const pullRequestIndex = lines.indexOf("  pull_request:");
+  const pathsIndex = lines.indexOf("    paths:", pullRequestIndex + 1);
+  if (pullRequestIndex < 0 || pathsIndex !== pullRequestIndex + 1) {
+    throw new Error("Linux workflow 缺少规范 pull_request.paths。 ");
+  }
+  const triggerPaths = [];
+  for (let index = pathsIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    const match = /^      - "([^"]+)"$/u.exec(line);
+    if (match === null) {
+      break;
+    }
+    triggerPaths.push(match[1]);
+  }
+  if (triggerPaths.length === 0 || new Set(triggerPaths).size !== triggerPaths.length) {
+    throw new Error("Linux workflow pull_request.paths 必须非空且无重复。 ");
+  }
+  return triggerPaths;
 }
 
 async function validateGateRegistration() {

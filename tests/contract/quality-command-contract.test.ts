@@ -71,6 +71,8 @@ describe("real root quality commands", () => {
       "scripts/contracts/validate-repository-contract.mjs",
       "scripts/ci/run-architecture-required.mjs",
       "scripts/ci/load-quality-gates.mjs",
+      "scripts/ci/verify-process-lifecycle.mjs",
+      "scripts/ci/attest-vitest-json-report.mjs",
       "scripts/planning/check-planning-traceability.mjs",
       "scripts/security/check-basic-security.mjs",
       "ci/quality-gates.v1.yaml",
@@ -103,7 +105,7 @@ describe("real root quality commands", () => {
       "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.config.ts",
     );
     expect(scripts["process-lifecycle"]).toBe(
-      "node scripts/quality/check-test-markers.mjs && vitest run --config vitest.process-deadline.config.ts",
+      "node scripts/ci/verify-process-lifecycle.mjs",
     );
     expect(unitTestConfig).toMatchObject({
       allowOnly: false,
@@ -127,8 +129,8 @@ describe("real root quality commands", () => {
       testTimeout: PROCESS_LIFECYCLE_BUDGET.testTimeoutMs,
     });
     expect(PROCESS_LIFECYCLE_BUDGET).toMatchObject({
-      declaredTestBudgetMs: 139_000,
-      expectedTestCount: 10,
+      declaredTestBudgetMs: 140_000,
+      expectedTestCount: 15,
       gateTimeoutMs: 180_000,
     });
     expect(

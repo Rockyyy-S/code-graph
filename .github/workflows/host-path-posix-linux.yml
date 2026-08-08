@@ -6,14 +6,20 @@ on:
       - ".github/workflows/host-path-posix-linux.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "apps/graph-service/package.json"
+      - "apps/graph-service/src/host-path-identity.ts"
+      - "apps/graph-service/src/index-job-runtime.ts"
+      - "apps/graph-service/src/index.ts"
       - "ci/quality-gates.v1.yaml"
-      - "rust-toolchain.toml"
       - "packages/adapters/host-path-posix-native/**"
       - "packaging/linux/**"
+      - "rust-toolchain.toml"
       - "scripts/ci/verify-host-path-posix-helper-v1.mjs"
       - "tests/contract/host-path-posix-helper-protocol.test.ts"
+      - "tests/contract/quality-gates-manifest.test.ts"
       - "tests/platform/linux-host-path-helper/**"
       - "tests/unit/host-path-posix-capability.test.ts"
+      - "tests/unit/index-job-runtime.test.ts"
   push:
     branches: [main]
 

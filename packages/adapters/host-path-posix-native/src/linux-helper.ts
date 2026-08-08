@@ -1,7 +1,9 @@
 import { spawn, type StdioOptions } from "node:child_process";
-import { createHash } from "node:crypto";
-import { constants, open } from "node:fs/promises";
+import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
+import { access, constants, open, readFile } from "node:fs/promises";
 import path from "node:path";
+import { TextDecoder } from "node:util";
+import type { HostPathPosixTrustedProvenanceV1 } from "./capability.js";
 import {
   HOST_PATH_POSIX_ABI_VERSION,
   HOST_PATH_POSIX_PROTOCOL_VERSION,
@@ -23,7 +25,7 @@ export const LINUX_HELPER_MAX_FRAME_BYTES = 2 * 1024 * 1024;
 export const LINUX_HELPER_MAX_DEADLINE_MS = 60_000;
 
 const LINUX_HELPER_PROVIDER_ID = "codegraph-linux-snapshot-helper-v1";
-const LINUX_HELPER_INSTALL_PATHS = Object.freeze({
+export const LINUX_HELPER_INSTALL_PATHS_V1 = Object.freeze({
   bridgeExecutable: "/usr/libexec/codegraph-host-path-bridge",
   keyPath: "/etc/codegraph-host-path/client.key",
   provenancePath: "/usr/share/codegraph-host-path/provenance.json",
@@ -103,6 +105,135 @@ export interface LinuxSnapshotHelperProviderOptionsV1 {
   socketPath: string;
 }
 
+/** 已校验安装材料后交给 graph-service 组合根的真实 Linux binding。 */
+export interface InstalledLinuxSnapshotHelperBindingV1 {
+  provider: HostPathPosixNativeProviderV1;
+  trustedProvenance: readonly HostPathPosixTrustedProvenanceV1[];
+}
+
+/** 仅为确定性测试替换只读安装探测；生产始终使用固定路径和真实文件系统。 */
+export interface CreateInstalledLinuxSnapshotHelperBindingOptionsV1 {
+  ensureAccess?: (filePath: string, mode: number) => Promise<void>;
+  platform?: NodeJS.Platform;
+  readBytes?: (filePath: string) => Promise<Buffer>;
+}
+
+/** Linux helper 安装材料无法形成受信任 binding 时的稳定 fail-closed 错误。 */
+export class LinuxSnapshotHelperInitializationError extends Error {
+  public override readonly cause: unknown;
+  public readonly code = "LINUX_HELPER_INITIALIZATION_FAILED";
+
+  public constructor(cause: unknown = undefined) {
+    super("Linux host-path snapshot helper 初始化失败。");
+    this.name = "LinuxSnapshotHelperInitializationError";
+    this.cause = cause;
+  }
+}
+
+interface InstalledLinuxHelperProvenanceV2 {
+  bridgeBinarySha256: string;
+  daemonBinarySha256: string;
+  manifestSha256: string;
+  schemaVersion: typeof LINUX_HELPER_PROVENANCE_SCHEMA_VERSION;
+  signature: string;
+  signatureKeyId: string;
+  signerId: string;
+}
+
+/**
+ * 从固定安装布局创建 production binding。
+ *
+ * Node 在开放服务前验证 canonical manifest、Ed25519 签名与 bridge 摘要；bridge/daemon
+ * 仍会在每次执行时重新验证自身文件身份，因此路径替换不会静默降级为弱能力。
+ */
+export async function createInstalledLinuxSnapshotHelperBindingV1(
+  options: CreateInstalledLinuxSnapshotHelperBindingOptionsV1 = {},
+): Promise<InstalledLinuxSnapshotHelperBindingV1> {
+  if ((options.platform ?? process.platform) !== "linux") {
+    throw new LinuxSnapshotHelperInitializationError();
+  }
+  const readBytes = options.readBytes ?? ((filePath: string) => readFile(filePath));
+  const ensureAccess = options.ensureAccess ??
+    ((filePath: string, mode: number) => access(filePath, mode));
+  try {
+    const provenanceBytes = await readBytes(LINUX_HELPER_INSTALL_PATHS_V1.provenancePath);
+    const provenance = parseInstalledLinuxHelperProvenanceV2(provenanceBytes);
+    const publicKeyBytes = decodeInstalledHexFile(
+      await readBytes(LINUX_HELPER_INSTALL_PATHS_V1.publicKeyPath),
+      32,
+      "release public key",
+    );
+    const payload = {
+      bridgeBinarySha256: provenance.bridgeBinarySha256,
+      daemonBinarySha256: provenance.daemonBinarySha256,
+      schemaVersion: provenance.schemaVersion,
+      signatureKeyId: provenance.signatureKeyId,
+      signerId: provenance.signerId,
+    };
+    if (sha256Canonical(payload) !== provenance.manifestSha256) {
+      throw new Error("Linux helper provenance manifest digest 不匹配。");
+    }
+    const publicKey = createPublicKey({
+      format: "der",
+      key: Buffer.concat([
+        Buffer.from("302a300506032b6570032100", "hex"),
+        publicKeyBytes,
+      ]),
+      type: "spki",
+    });
+    if (!verifySignature(
+      null,
+      Buffer.from(canonicalJson(payload), "utf8"),
+      publicKey,
+      Buffer.from(provenance.signature, "hex"),
+    )) {
+      throw new Error("Linux helper provenance 签名无效。");
+    }
+    const bridgeBytes = await readBytes(LINUX_HELPER_INSTALL_PATHS_V1.bridgeExecutable);
+    const bridgeBinarySha256 = createHash("sha256").update(bridgeBytes).digest("hex");
+    if (bridgeBinarySha256 !== provenance.bridgeBinarySha256) {
+      throw new Error("Linux helper bridge 摘要与签名 provenance 不匹配。");
+    }
+    await Promise.all([
+      ensureAccess(
+        LINUX_HELPER_INSTALL_PATHS_V1.bridgeExecutable,
+        constants.R_OK | constants.X_OK,
+      ),
+      ensureAccess(LINUX_HELPER_INSTALL_PATHS_V1.keyPath, constants.R_OK),
+      ensureAccess(
+        LINUX_HELPER_INSTALL_PATHS_V1.socketPath,
+        constants.R_OK | constants.W_OK,
+      ),
+    ]);
+    const trustedProvenance = Object.freeze<HostPathPosixTrustedProvenanceV1>({
+      authorityKind: "privileged-helper",
+      binarySha256: bridgeBinarySha256,
+      entitlement: "linux-filesystem-snapshot",
+      platform: "linux",
+      primitiveKind: "filesystem-snapshot",
+      providerId: LINUX_HELPER_PROVIDER_ID,
+      provenanceKind: "signed-privileged-helper",
+      signerId: provenance.signerId,
+    });
+    return Object.freeze({
+      provider: createLinuxSnapshotHelperProviderV1({
+        bridgeBinarySha256,
+        bridgeExecutable: LINUX_HELPER_INSTALL_PATHS_V1.bridgeExecutable,
+        keyPath: LINUX_HELPER_INSTALL_PATHS_V1.keyPath,
+        provenancePath: LINUX_HELPER_INSTALL_PATHS_V1.provenancePath,
+        publicKeyPath: LINUX_HELPER_INSTALL_PATHS_V1.publicKeyPath,
+        signerId: provenance.signerId,
+        socketPath: LINUX_HELPER_INSTALL_PATHS_V1.socketPath,
+      }),
+      trustedProvenance: Object.freeze([trustedProvenance]),
+    });
+  } catch (error) {
+    throw error instanceof LinuxSnapshotHelperInitializationError
+      ? error
+      : new LinuxSnapshotHelperInitializationError(error);
+  }
+}
+
 /** 只为 Linux snapshot-only helper 构造既有 strict strong capability。 */
 export function createLinuxSnapshotHelperCapabilityV1(input: {
   binarySha256: string;
@@ -170,8 +301,8 @@ export function createLinuxHelperBridgeInvocationV1(input: {
       throw new Error(`${label} 必须是 canonical Linux 绝对路径。`);
     }
   }
-  for (const [field, expected] of Object.entries(LINUX_HELPER_INSTALL_PATHS)) {
-    if (input[field as keyof typeof LINUX_HELPER_INSTALL_PATHS] !== expected) {
+  for (const [field, expected] of Object.entries(LINUX_HELPER_INSTALL_PATHS_V1)) {
+    if (input[field as keyof typeof LINUX_HELPER_INSTALL_PATHS_V1] !== expected) {
       throw new Error(`Linux helper ${field} 必须匹配固定安装布局。`);
     }
   }
@@ -606,6 +737,56 @@ function relativeBeneath(root: string, candidate: string): string {
     throw new Error("Linux helper 候选路径不在 indexing root 内。");
   }
   return relative;
+}
+
+/** provenance 文件只接受 Rust helper 同一 canonical JSON 形状与单个可选 LF。 */
+function parseInstalledLinuxHelperProvenanceV2(
+  bytes: Buffer,
+): InstalledLinuxHelperProvenanceV2 {
+  const source = decodeCanonicalUtf8File(bytes, "provenance manifest");
+  const value: unknown = JSON.parse(source);
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "bridgeBinarySha256",
+      "daemonBinarySha256",
+      "manifestSha256",
+      "schemaVersion",
+      "signature",
+      "signatureKeyId",
+      "signerId",
+    ]) ||
+    !isSha256(value.bridgeBinarySha256) ||
+    !isSha256(value.daemonBinarySha256) ||
+    !isSha256(value.manifestSha256) ||
+    value.schemaVersion !== LINUX_HELPER_PROVENANCE_SCHEMA_VERSION ||
+    typeof value.signature !== "string" ||
+    !/^[a-f0-9]{128}$/u.test(value.signature) ||
+    !isStableToken(value.signatureKeyId) ||
+    !isStableToken(value.signerId) ||
+    canonicalJson(value) !== source
+  ) {
+    throw new Error("Linux helper provenance manifest 非法或非 canonical JSON。");
+  }
+  return value as unknown as InstalledLinuxHelperProvenanceV2;
+}
+
+/** 固定安装文本只允许严格 UTF-8，并至多剥离一个 LF。 */
+function decodeCanonicalUtf8File(bytes: Buffer, label: string): string {
+  const payload = bytes.at(-1) === 0x0a ? bytes.subarray(0, -1) : bytes;
+  if (payload.length === 0 || payload.at(-1) === 0x0d || payload.includes(0x00)) {
+    throw new Error(`Linux helper ${label} 编码非法。`);
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(payload);
+}
+
+/** 固定安装 key 文件只接受指定长度的小写十六进制。 */
+function decodeInstalledHexFile(bytes: Buffer, expectedBytes: number, label: string): Buffer {
+  const value = decodeCanonicalUtf8File(bytes, label);
+  if (value.length !== expectedBytes * 2 || !/^[a-f0-9]+$/u.test(value)) {
+    throw new Error(`Linux helper ${label} 形状非法。`);
+  }
+  return Buffer.from(value, "hex");
 }
 
 /** 当前 ABI 只使用整数、字符串、布尔、null、数组与普通对象。 */

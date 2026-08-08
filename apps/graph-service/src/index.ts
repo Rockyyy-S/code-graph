@@ -8,6 +8,10 @@ import { createErrorV1, sha256CanonicalJson } from "@codegraph/contracts";
 import { openSqliteGraphStore } from "@codegraph/adapter-store-sqlite";
 import { createTypeScriptAnalyzer } from "@codegraph/adapter-analyzer-typescript";
 import {
+  createInstalledLinuxSnapshotHelperBindingV1,
+  type InstalledLinuxSnapshotHelperBindingV1,
+} from "@codegraph/adapter-host-path-posix-native/linux-helper";
+import {
   bootstrapServiceInstance,
   GraphServiceStartupError,
   type OwnedServiceInstance,
@@ -34,6 +38,9 @@ const WIN32_HOST_IDENTITY_CLOSE_TIMEOUT_MS = 200;
 const WIN32_HOST_IDENTITY_OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const WIN32_HOST_IDENTITY_INPUT_LIMIT_BYTES = MAX_HOST_PATH_BATCH_BYTES + (64 * 1024);
 const WIN32_HOST_IDENTITY_MAX_PENDING_REQUESTS = 8;
+const HOST_PATH_IDENTITY_SHUTDOWN_DIAGNOSTIC = Symbol.for(
+  "codegraph.host-path-identity.shutdown-diagnostic",
+);
 
 type Win32HostPathIdentityCaptureRequest = Parameters<
   HostPathIdentitySnapshotProvider["capture"]
@@ -120,9 +127,8 @@ class PersistentWin32HostPathIdentityHelperController {
     request: Win32HostPathIdentityCaptureRequest,
   ): Promise<HostPathSnapshotCaptureV1> {
     if (this.#closed) {
-      return Promise.reject(createWin32HelperError(
+      return Promise.reject(createWin32HelperShutdownError(
         "Windows host identity helper is closed",
-        "HOST_PATH_IDENTITY_HELPER_CLOSED",
       ));
     }
     if (this.#queue.length + (this.#active === null ? 0 : 1) >=
@@ -206,10 +212,14 @@ class PersistentWin32HostPathIdentityHelperController {
         }
         if (this.#closed || state.invalidated || this.#process !== state) {
           this.#active = null;
-          pending.reject(createWin32HelperError(
-            "Windows host identity helper became unavailable before dispatch",
-            "HOST_PATH_CAPTURE_PROCESS_FAILED",
-          ));
+          pending.reject(this.#closed
+            ? createWin32HelperShutdownError(
+                "Windows host identity helper closed before dispatch",
+              )
+            : createWin32HelperError(
+                "Windows host identity helper became unavailable before dispatch",
+                "HOST_PATH_CAPTURE_PROCESS_FAILED",
+              ));
           continue;
         }
         this.#stdoutBuffer = Buffer.alloc(0);
@@ -245,9 +255,8 @@ class PersistentWin32HostPathIdentityHelperController {
       }
       await this.#process.closed;
       if (this.#closed) {
-        throw createWin32HelperError(
+        throw createWin32HelperShutdownError(
           "Windows host identity helper closed before rebuild",
-          "HOST_PATH_IDENTITY_HELPER_CLOSED",
         );
       }
       return this.#ensureStarted();
@@ -271,9 +280,8 @@ class PersistentWin32HostPathIdentityHelperController {
         flag: "wx",
       });
       if (this.#closed) {
-        throw createWin32HelperError(
+        throw createWin32HelperShutdownError(
           "Windows host identity helper closed during startup",
-          "HOST_PATH_IDENTITY_HELPER_CLOSED",
         );
       }
       const child = this.#spawnProcess(scriptPath);
@@ -445,9 +453,8 @@ class PersistentWin32HostPathIdentityHelperController {
 
   /** 关闭时拒绝全部请求、终止当前进程并等待其 close+teardown。 */
   async #shutdown(): Promise<void> {
-    const error = createWin32HelperError(
+    const error = createWin32HelperShutdownError(
       "Windows host identity helper is closing",
-      "HOST_PATH_IDENTITY_HELPER_CLOSED",
     );
     this.#rejectQueued(error);
     const pending = this.#active;
@@ -668,6 +675,25 @@ function createWin32HelperError(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
+/** 以跨模块共享 Symbol 标记 shutdown 因果，不修改被摘要锁定的 broker 模块。 */
+function markHostPathIdentityShutdownDiagnostic<T extends Error>(error: T): T {
+  Object.defineProperty(error, HOST_PATH_IDENTITY_SHUTDOWN_DIAGNOSTIC, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return error;
+}
+
+/** shutdown 主动拒绝的 helper I/O 使用进程内因果标记，避免按竞态时序猜测。 */
+function createWin32HelperShutdownError(message: string): Error {
+  return markHostPathIdentityShutdownDiagnostic(createWin32HelperError(
+    message,
+    "HOST_PATH_IDENTITY_HELPER_CLOSED",
+  ));
+}
+
 /** 未知异常在穿越 helper 生命周期边界前收敛为稳定 Error。 */
 function normalizeWin32HelperError(error: unknown): Error {
   return error instanceof Error
@@ -707,6 +733,60 @@ export interface StartGraphServiceOptions {
   platform?: NodeJS.Platform;
 }
 
+/** production 组合结果只暴露 broker 所需 provider 与可选 helper 生命周期。 */
+export interface ProductionHostPathIdentityComposition {
+  closeHostPathIdentityHelper?: () => Promise<void>;
+  snapshotProvider: HostPathIdentitySnapshotProvider;
+}
+
+/** 仅为跨平台单测替换固定 factory；生产调用不传任何替代依赖。 */
+export interface CreateProductionHostPathIdentityCompositionOptions {
+  caseSensitiveFileNames: boolean;
+  createWin32Helper?: () => ServiceScopedWin32HostPathIdentityHelper;
+  loadInstalledLinuxBinding?: () => Promise<InstalledLinuxSnapshotHelperBindingV1>;
+  platform: NodeJS.Platform;
+}
+
+/**
+ * 为唯一 graph-service 组合根选择真实宿主身份能力。
+ *
+ * Linux 必须先完成签名安装 binding 初始化；失败直接拒绝启动。Darwin 在没有真实
+ * provider 时保持 capability-missing，禁止伪造强能力或静默回退；Win32 保留现有 helper。
+ */
+export async function createProductionHostPathIdentityComposition(
+  options: CreateProductionHostPathIdentityCompositionOptions,
+): Promise<ProductionHostPathIdentityComposition> {
+  if (options.platform === "win32") {
+    const helper = (options.createWin32Helper ?? createServiceScopedWin32HostPathIdentityHelper)();
+    return {
+      closeHostPathIdentityHelper: helper.close,
+      snapshotProvider: createDefaultHostPathIdentitySnapshotProvider({
+        captureWindows: helper.capture,
+        caseSensitiveFileNames: options.caseSensitiveFileNames,
+        platform: options.platform,
+      }),
+    };
+  }
+  if (options.platform === "linux") {
+    const binding = await (
+      options.loadInstalledLinuxBinding ?? createInstalledLinuxSnapshotHelperBindingV1
+    )();
+    return {
+      snapshotProvider: createDefaultHostPathIdentitySnapshotProvider({
+        caseSensitiveFileNames: options.caseSensitiveFileNames,
+        platform: options.platform,
+        posixNative: binding,
+      }),
+    };
+  }
+  return {
+    snapshotProvider: createDefaultHostPathIdentitySnapshotProvider({
+      caseSensitiveFileNames: options.caseSensitiveFileNames,
+      platform: options.platform,
+    }),
+  };
+}
+
 /**
  * 启动本机 IPC 图谱服务，并在开放握手前完成 SQLite/ignore/runtime 屏障。
  */
@@ -736,24 +816,22 @@ export async function startGraphService(
          */
         const platform = options.platform ?? process.platform;
         const caseSensitiveFileNames = isFileSystemCaseSensitive(indexingRoot);
-        const hostPathIdentityHelper = platform === "win32"
-          ? createServiceScopedWin32HostPathIdentityHelper()
-          : null;
-        const hostPathIdentitySnapshotProvider = createDefaultHostPathIdentitySnapshotProvider({
-          caseSensitiveFileNames,
-          platform,
-          ...(hostPathIdentityHelper === null
-            ? {}
-            : { captureWindows: hostPathIdentityHelper.capture }),
-        });
-        const hostPathIdentityBroker = new HostPathIdentityBroker({
-          caseSensitiveFileNames,
-          indexingRoot,
-          maxCandidates: MAX_HOST_PATH_CANDIDATES,
-          platform,
-          snapshotProvider: hostPathIdentitySnapshotProvider,
-        });
+        let closeHostPathIdentityHelper: (() => Promise<void>) | undefined;
         try {
+          const hostPathIdentityComposition =
+            await createProductionHostPathIdentityComposition({
+              caseSensitiveFileNames,
+              platform,
+            });
+          closeHostPathIdentityHelper =
+            hostPathIdentityComposition.closeHostPathIdentityHelper;
+          const hostPathIdentityBroker = new HostPathIdentityBroker({
+            caseSensitiveFileNames,
+            indexingRoot,
+            maxCandidates: MAX_HOST_PATH_CANDIDATES,
+            platform,
+            snapshotProvider: hostPathIdentityComposition.snapshotProvider,
+          });
           store = await openSqliteGraphStore({
             databasePath: path.join(options.paths.workspaceDirectory, "graph.sqlite"),
             digestPort: { digest: sha256CanonicalJson },
@@ -762,9 +840,9 @@ export async function startGraphService(
           const ignoreState = await createInitialIgnoreState(indexingRoot);
           return await createVerifiedIndexJobRuntime({
             analyzer,
-            ...(hostPathIdentityHelper === null
+            ...(closeHostPathIdentityHelper === undefined
               ? {}
-              : { closeHostPathIdentityHelper: hostPathIdentityHelper.close }),
+              : { closeHostPathIdentityHelper }),
             hostPathIdentityBroker,
             ignoreState,
             indexingRoot,
@@ -774,7 +852,7 @@ export async function startGraphService(
             workspaceKey,
           });
         } catch (error) {
-          await hostPathIdentityHelper?.close().catch(() => undefined);
+          await closeHostPathIdentityHelper?.().catch(() => undefined);
           await analyzer.close().catch(() => undefined);
           store?.close();
           if (error instanceof GraphServiceStartupError) {

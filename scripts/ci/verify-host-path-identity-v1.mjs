@@ -72,7 +72,7 @@ const allowedProductionImports = new Set([
 const expectedProductionSourceDigest = "902408ae9828938ea39ebea5f8ec91dfa8759f90212ded60cf54daea5a03ac73";
 const expectedAnalyzerSidecarAuthoritySourceDigests = new Map([
   [analyzerPortPath, "7bf991bb2569ff1a9f52cc3bbe9a455f61457086c320d713e640ffd3ffaa78b9"],
-  [graphServiceCompositionRootPath, "6209bfc9e291a92d8d6913340944ff889c876b445af256486f017b8114f91e53"],
+  [graphServiceCompositionRootPath, "0e9d61ac11d46a55ac3d524a2ade98192269a252781abc9fa3cd21ed38785430"],
   [analyzerParentPath, "dd9301c5375b27efcd2b816aeac176d27af7e8c6af6ae0efebf61b35f1f835a9"],
   [analyzerWorkerPath, "7e731fee9d80afbd55a2e828d4321ba8f539737568f36536a9f10db1f423f283"],
 ]);
