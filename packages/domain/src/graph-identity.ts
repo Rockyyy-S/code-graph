@@ -1,3 +1,8 @@
+import {
+  decodeModuleExportName,
+  encodeModuleExportName,
+} from "./module-dependency.js";
+
 /** hierarchy 切片允许使用工作区相对路径构造的实体类型。 */
 export type HierarchyEntityKind = "directory" | "file" | "workspace";
 
@@ -135,10 +140,33 @@ function assertCanonicalEdgeTuple(
     : relationType === "imports"
       ? qualifier === "value" || qualifier === "type" || qualifier === "dynamic"
       : qualifier === "star:value" || qualifier === "star:type" ||
-        /^reexport:[^:]+:[^:]+:(?:value|type)$/u.test(qualifier);
+        isCanonicalReexportQualifier(qualifier);
   if (!qualifierValid) {
     throw new TypeError("关系 qualifier 不符合 AD-4 v1 规范词汇。");
   }
+}
+
+/** re-export 名称段只接受严格解码后可逐字节重编码的唯一外部表示。 */
+function isCanonicalReexportQualifier(qualifier: string): boolean {
+  const segments = qualifier.split(":");
+  if (
+    segments.length !== 4 ||
+    segments[0] !== "reexport" ||
+    (segments[3] !== "value" && segments[3] !== "type")
+  ) {
+    return false;
+  }
+  for (const [encoded, label] of [
+    [segments[1]!, "reexport exported 名称"],
+    [segments[2]!, "reexport imported 名称"],
+  ] as const) {
+    const decoded = decodeModuleExportName(encoded);
+    assertCanonicalUnicode(decoded, label);
+    if (encodeModuleExportName(decoded) !== encoded) {
+      throw new TypeError(`${label} 的 percent-encoding 不是唯一规范形式。`);
+    }
+  }
+  return true;
 }
 
 /** JCS 字符串域拒绝 lone surrogate，并要求调用方提供 byte-for-byte NFC 输入。 */

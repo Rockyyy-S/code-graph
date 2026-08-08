@@ -99,6 +99,36 @@ describe("graph identity", () => {
     )).toThrow(/代理项/u);
   });
 
+  it("accepts only the unique canonical encoding of re-export name segments", () => {
+    const fromId = `cg://${workspaceKey}/file/src/index.ts`;
+    const toId = "pkg:npm/example@1.0.0";
+    const canonical = "reexport:c%2Fd:a%3Ab:type";
+
+    expect(() => buildGraphEdgeId(
+      workspaceKey,
+      fromId,
+      "exports",
+      toId,
+      canonical,
+    )).not.toThrow();
+    for (const qualifier of [
+      "reexport:c%2fd:a%3Ab:type",
+      "reexport:c%2Fd:%61:type",
+      "reexport:c%2Fd:%E0%A4%A:type",
+      "reexport:c/d:a%3Ab:type",
+      "reexport:%uD800:value:value",
+      "reexport:cafe%CC%81:value:value",
+    ]) {
+      expect(() => buildGraphEdgeId(
+        workspaceKey,
+        fromId,
+        "exports",
+        toId,
+        qualifier,
+      )).toThrow();
+    }
+  });
+
   it("separates workspace and qualifier domains and never emits legacy IDs canonically", () => {
     const fromId = `cg://${workspaceKey}/file/src/index.ts`;
     const toId = "node:path";
