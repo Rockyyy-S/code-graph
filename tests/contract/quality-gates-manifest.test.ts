@@ -12,6 +12,7 @@ import {
 } from "../../scripts/ci/run-architecture-required.mjs";
 import {
   assertTypeScriptModuleAnalysisBuildTopology,
+  TYPESCRIPT_VERIFIER_CHILD_TIMEOUT_MS,
   TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST,
   VITEST_REPORT_MAX_BYTES,
   verifyTypeScriptModuleAnalysis,
@@ -27,13 +28,19 @@ const temporaryRoots: string[] = [];
 type VitestAssertionStatus = "disabled" | "failed" | "passed" | "pending" | "skipped" | "todo";
 
 interface FakeProcessResult {
-  error?: Error;
-  output: Array<string | null>;
-  pid: number;
-  signal: NodeJS.Signals | null;
-  status: number | null;
-  stderr: string;
-  stdout: string;
+  cleanupComplete: boolean;
+  containment: string | null;
+  residualProcessTree: number | null;
+  signalEscalation: string[];
+  status: "fail" | "invalid" | "pass";
+  stderr: Buffer;
+  streamsDrained: boolean;
+  stdout: Buffer;
+  termination:
+    | { code: number; kind: "exit" }
+    | { kind: "signal"; signalName: NodeJS.Signals }
+    | { kind: "spawn-error"; stableCode: string };
+  timedOut: boolean;
 }
 
 /** 构造与 Vitest JSON reporter 同形的最小完整运行结果。 */
@@ -70,29 +77,29 @@ function createPassingVitestReport(testCount: number): string {
 
 /** 构造已正常退出且携带 reporter stdout 的受控进程结果。 */
 function createProcessResult(stdout = "", overrides: Partial<FakeProcessResult> = {}): FakeProcessResult {
-  const result = {
-    output: [null, stdout, ""],
-    pid: 1,
-    signal: null,
-    status: 0,
-    stderr: "",
-    stdout,
-    ...overrides,
-  };
   return {
-    ...result,
-    output: [null, result.stdout, result.stderr],
+    cleanupComplete: true,
+    containment: "test-stable-identity",
+    residualProcessTree: 0,
+    signalEscalation: [],
+    status: "pass",
+    stderr: Buffer.alloc(0),
+    streamsDrained: true,
+    stdout: Buffer.from(stdout, "utf8"),
+    termination: { code: 0, kind: "exit" },
+    timedOut: false,
+    ...overrides,
   };
 }
 
 /**
  * 通过真实 verifier 编排入口注入受控子进程结果，证明计数权威没有停留在静态 manifest。
  */
-function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, FakeProcessResult> = new Map()) {
+async function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, FakeProcessResult> = new Map()) {
   /** 独立写死 273 + 50 + 6，禁止从被测 manifest 或 reporter 反推期望值。 */
   const expectedCounts = [273, 50, 6] as const;
   let vitestIndex = 0;
-  const executePnpm = vi.fn((args: string[]) => {
+  const executePnpm = vi.fn(async (args: string[]) => {
     if (!args.includes("vitest")) {
       return createProcessResult();
     }
@@ -104,7 +111,7 @@ function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, FakeProces
 
   return {
     executePnpm,
-    status: verifyTypeScriptModuleAnalysis({ executePnpm }),
+    status: await verifyTypeScriptModuleAnalysis({ executePnpm }),
   };
 }
 
@@ -273,7 +280,7 @@ afterEach(async () => {
 });
 
 describe("quality-gates.v1 registry", () => {
-  it("locks the Story 1.5 verifier unit and process regression manifest", () => {
+  it("locks the Story 1.5 verifier unit and process regression manifest", async () => {
     const originalUnitTests = [
       "tests/unit/analyzer-config-capture.test.ts",
       "tests/unit/analyzer-config-snapshot.test.ts",
@@ -336,6 +343,14 @@ describe("quality-gates.v1 registry", () => {
       ...unitShards,
       ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
     ].reduce((total, { expectedTestCount }) => total + expectedTestCount, 0)).toBe(329);
+    const verifierSource = await readFile(
+      path.join(repositoryRoot, "scripts/ci/verify-typescript-module-analysis-v1.mjs"),
+      "utf8",
+    );
+    /** PF-A 只锁定有界执行，不在本切片提前处理 suite cardinality。 */
+    expect(TYPESCRIPT_VERIFIER_CHILD_TIMEOUT_MS).toBe(120_000);
+    expect(verifierSource).toContain("runProcessWithDeadline");
+    expect(verifierSource).not.toMatch(/\bspawnSync\s*\(/u);
   });
 
   it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {
@@ -374,10 +389,10 @@ describe("quality-gates.v1 registry", () => {
     ])).toThrow(/BUILD_TOPOLOGY_INVALID/u);
   });
 
-  it("consumes exact 273 + 50 unit and 6 contract runtime attestations", () => {
+  it("consumes exact 273 + 50 unit and 6 contract runtime attestations", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const { executePnpm, status } = runStoryVerifierWithOverrides();
+    const { executePnpm, status } = await runStoryVerifierWithOverrides();
 
     expect(status).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
@@ -398,29 +413,43 @@ describe("quality-gates.v1 registry", () => {
     expect(vitestCommands.every((args) => args.includes("--reporter=json"))).toBe(true);
   });
 
+  it("fails closed before Vitest when a build child reaches its deadline", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const executePnpm = vi.fn(async () => createProcessResult("", {
+      signalEscalation: ["SIGTERM", "SIGKILL"],
+      status: "invalid",
+      termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
+      timedOut: true,
+    }));
+
+    expect(await verifyTypeScriptModuleAnalysis({ executePnpm })).toBe(1);
+    expect(executePnpm).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("BUILD_TIMEOUT");
+  });
+
   it.each([
     ["default unit lower drift", 0, 272],
     ["SQLite unit lower drift", 1, 49],
     ["contract lower drift", 2, 5],
-  ] as const)("rejects %s runtime totals", (_label, shardIndex, reducedCount) => {
+  ] as const)("rejects %s runtime totals", async (_label, shardIndex, reducedCount) => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([
       [shardIndex, createProcessResult(createPassingVitestReport(reducedCount))],
     ]);
 
-    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
     expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_COUNT_MISMATCH");
   });
 
-  it("rejects SQLite unit upper drift instead of accepting actual >= expected", () => {
+  it("rejects SQLite unit upper drift instead of accepting actual >= expected", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([
       [1, createProcessResult(createPassingVitestReport(51))],
     ]);
 
-    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
     expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_COUNT_MISMATCH");
   });
 
@@ -466,19 +495,44 @@ describe("quality-gates.v1 registry", () => {
     ],
     [
       "abnormal termination",
-      createProcessResult(createPassingVitestReport(273), { signal: "SIGTERM", status: null }),
+      createProcessResult(createPassingVitestReport(273), {
+        status: "fail",
+        termination: { kind: "signal", signalName: "SIGTERM" },
+      }),
       "VITEST_ABNORMAL_TERMINATION",
     ],
-  ] as const)("fails closed on %s reporter evidence", (_label, result, expectedCode) => {
+    [
+      "deadline timeout",
+      createProcessResult(createPassingVitestReport(273), {
+        signalEscalation: ["SIGTERM", "SIGKILL"],
+        status: "invalid",
+        termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
+        timedOut: true,
+      }),
+      "VITEST_TIMEOUT",
+    ],
+    [
+      "unproven cleanup",
+      createProcessResult(createPassingVitestReport(273), {
+        cleanupComplete: false,
+        containment: null,
+        residualProcessTree: 1,
+        status: "invalid",
+        streamsDrained: false,
+        termination: { kind: "spawn-error", stableCode: "EPROCESSCLEANUP" },
+      }),
+      "VITEST_CLEANUP_UNPROVEN",
+    ],
+  ] as const)("fails closed on %s reporter evidence", async (_label, result, expectedCode) => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([[0, result]]);
 
-    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
     expect(errorSpy.mock.calls.flat().join(" ")).toContain(expectedCode);
   });
 
-  it("fails closed when reporter assertion details do not cover the aggregate total", () => {
+  it("fails closed when reporter assertion details do not cover the aggregate total", async () => {
     const report = JSON.parse(createPassingVitestReport(273)) as {
       testResults: Array<{ assertionResults: unknown[] }>;
     };
@@ -489,7 +543,7 @@ describe("quality-gates.v1 registry", () => {
       [0, createProcessResult(JSON.stringify(report))],
     ]);
 
-    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
     expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_REPORT_INCOMPLETE");
   });
 

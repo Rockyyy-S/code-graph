@@ -1,11 +1,17 @@
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import {
+  DEFAULT_PROCESS_CLEANUP_GRACE_MS,
+  runProcessWithDeadline,
+} from "./run-process-with-deadline.mjs";
 import { createPnpmInvocation } from "../quality/resolve-pnpm-invocation.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 /** JSON reporter 的 stdout/stderr 各自最多保留 4 MiB，避免异常测试无限占用内存。 */
 export const VITEST_REPORT_MAX_BYTES = 4 * 1024 * 1024;
+/** 单个 build/Vitest 子进程的硬上限；外层 gate 仍可施加更小的整体 deadline。 */
+export const TYPESCRIPT_VERIFIER_CHILD_TIMEOUT_MS = 120_000;
+const BUILD_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
 
 /** Story verifier 的固定清单由 contract 回归锁定，禁止静默缩小。 */
 export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
@@ -222,9 +228,9 @@ export function attestVitestJsonReport(output, authority) {
  * 构建真实 Worker 产物并运行 Story 1.5 不可缩小的模块分析回归集。
  *
  * @param {{ executePnpm?: typeof runPnpm }} [dependencies] 测试可注入的受控命令执行边界。
- * @returns {number} 0 表示所有构建与运行时证明均通过。
+ * @returns {Promise<number>} 0 表示所有构建与运行时证明均通过。
  */
-export function verifyTypeScriptModuleAnalysis(dependencies = {}) {
+export async function verifyTypeScriptModuleAnalysis(dependencies = {}) {
   const executePnpm = dependencies.executePnpm ?? runPnpm;
   try {
     assertTypeScriptModuleAnalysisBuildTopology(
@@ -236,22 +242,21 @@ export function verifyTypeScriptModuleAnalysis(dependencies = {}) {
   }
 
   for (const filter of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.buildFilters) {
-    const result = executePnpm(["--filter", filter, "build"], { captureOutput: false });
-    if (!didProcessExitSuccessfully(result)) {
-      console.error(
-        `[typescript-module-analysis-v1] BUILD_FAILED: ${filter} 未成功构建。`,
-      );
+    const result = await executePnpm(["--filter", filter, "build"], { captureOutput: false });
+    const buildFailure = stableProcessFailure(result, "BUILD");
+    if (buildFailure !== null) {
+      console.error(`[typescript-module-analysis-v1] ${buildFailure}: ${filter} 未成功构建。`);
       return 1;
     }
   }
 
   for (const shard of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.unitShards) {
-    if (runVitestShard(executePnpm, "vitest.config.ts", shard) !== 0) {
+    if (await runVitestShard(executePnpm, "vitest.config.ts", shard) !== 0) {
       return 1;
     }
   }
   for (const shard of TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards) {
-    if (runVitestShard(executePnpm, "vitest.contract.config.ts", shard) !== 0) {
+    if (await runVitestShard(executePnpm, "vitest.contract.config.ts", shard) !== 0) {
       return 1;
     }
   }
@@ -259,8 +264,8 @@ export function verifyTypeScriptModuleAnalysis(dependencies = {}) {
 }
 
 /** 使用机器可解析 reporter 运行并证明单个固定 shard。 */
-function runVitestShard(executePnpm, configPath, shard) {
-  const result = executePnpm([
+async function runVitestShard(executePnpm, configPath, shard) {
+  const result = await executePnpm([
     "exec",
     "vitest",
     "run",
@@ -283,46 +288,67 @@ function runVitestShard(executePnpm, configPath, shard) {
   }
 }
 
-/** 使用冻结 pnpm 入口运行单个固定 argv，并只为 reporter 使用有界捕获。 */
-function runPnpm(args, options = {}) {
+/** 使用冻结 pnpm 入口复用 deadline/process-tree primitive，不允许 spawnSync 无界等待。 */
+async function runPnpm(args, options = {}) {
   const invocation = createPnpmInvocation(process.env.npm_execpath, args);
-  return spawnSync(invocation.executable, invocation.args, {
+  const captureOutput = options.captureOutput === true;
+  const result = await runProcessWithDeadline({
+    args: invocation.args,
     cwd: repositoryRoot,
-    encoding: options.captureOutput === true ? "utf8" : undefined,
     env: process.env,
-    maxBuffer: options.captureOutput === true ? VITEST_REPORT_MAX_BYTES : undefined,
-    stdio: options.captureOutput === true ? ["ignore", "pipe", "pipe"] : "inherit",
-    windowsHide: true,
+    executable: invocation.executable,
+    killGraceMs: DEFAULT_PROCESS_CLEANUP_GRACE_MS,
+    outputLimitBytes: captureOutput ? VITEST_REPORT_MAX_BYTES : BUILD_OUTPUT_MAX_BYTES,
+    timeoutMs: TYPESCRIPT_VERIFIER_CHILD_TIMEOUT_MS,
     windowsVerbatimArguments: invocation.windowsVerbatimArguments === true,
   });
+  /** 失败输出可能含本机绝对路径；失败只发布下游 stableProcessFailure 代码。 */
+  if (!captureOutput && stableProcessFailure(result, "BUILD") === null) {
+    if (result.stdout.length > 0) {process.stdout.write(result.stdout);}
+    if (result.stderr.length > 0) {process.stderr.write(result.stderr);}
+  }
+  return result;
 }
 
-/** 校验 Vitest 子进程没有启动失败、非零退出或异常终止。 */
+/** 校验 Vitest 子进程的退出、timeout、双流排空与 residual=0 均有稳定证明。 */
 function assertVitestTermination(result, shardId) {
-  if (result?.error !== undefined) {
-    throw createAttestationError(shardId, "VITEST_CAPTURE_FAILED", "测试进程启动或有界输出捕获失败。");
-  }
-  if (result?.signal !== undefined && result.signal !== null) {
-    throw createAttestationError(
-      shardId,
-      "VITEST_ABNORMAL_TERMINATION",
-      `signal=${String(result.signal)}。`,
-    );
-  }
-  if (result?.status !== 0) {
-    throw createAttestationError(
-      shardId,
-      "VITEST_EXIT_NONZERO",
-      `status=${String(result?.status ?? "null")}。`,
-    );
+  const failure = stableProcessFailure(result, "VITEST");
+  if (failure !== null) {
+    throw createAttestationError(shardId, failure, "测试子进程未形成可证明的有界成功终态。");
   }
 }
 
-/** 判断普通构建命令是否正常以 0 退出。 */
-function didProcessExitSuccessfully(result) {
-  return result?.error === undefined
-    && (result?.signal === undefined || result.signal === null)
-    && result?.status === 0;
+/** 将 runner 结果归一化为不含路径、命令或堆栈的稳定失败代码。 */
+function stableProcessFailure(result, prefix) {
+  const stableCode = result?.termination?.kind === "spawn-error"
+    ? result.termination.stableCode
+    : null;
+  if (
+    [
+      "EPROCESSCLEANUP",
+      "EPROCESSCLEANUPTIMEOUT",
+      "EPROCESSCONTAINMENTUNAVAILABLE",
+      "EPROCESSIDENTITYAMBIGUOUS",
+      "EPIPEOPEN",
+    ].includes(stableCode) ||
+    result?.cleanupComplete !== true ||
+    result?.streamsDrained !== true ||
+    result?.residualProcessTree !== 0
+  ) {
+    return `${prefix}_CLEANUP_UNPROVEN`;
+  }
+  if (stableCode === "ETIMEDOUT" || result?.timedOut === true) {
+    return `${prefix}_TIMEOUT`;
+  }
+  if (result?.status !== "pass") {
+    return result?.termination?.kind === "signal"
+      ? `${prefix}_ABNORMAL_TERMINATION`
+      : `${prefix}_EXIT_NONZERO`;
+  }
+  if (result?.termination?.kind !== "exit" || result.termination.code !== 0) {
+    return `${prefix}_EXIT_NONZERO`;
+  }
+  return null;
 }
 
 /** 将 reporter 输出统一为 Buffer，以字节长度实施平台无关上界。 */
@@ -363,5 +389,5 @@ function toStableErrorMessage(error) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exitCode = verifyTypeScriptModuleAnalysis();
+  process.exitCode = await verifyTypeScriptModuleAnalysis();
 }

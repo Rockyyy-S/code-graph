@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 /** Windows taskkill 在高进程负载下需要更长的有界树清理窗口。 */
@@ -10,6 +11,8 @@ const WINDOWS_JOB_CONTROL_START = Buffer.from([0x1e]);
 const WINDOWS_JOB_CONTROL_END = Buffer.from([0x1f]);
 const WINDOWS_JOB_CONTROL_TAIL_BYTES = 4 * 1024;
 const WINDOWS_JOB_SHELL_EXECUTABLE = "pwsh.exe";
+const POSIX_IDENTITY_POLL_MS = process.platform === "linux" ? 20 : 100;
+const POSIX_SIGNAL_SETTLE_MS = 100;
 
 /**
  * Windows Job host 保留可审计源码与预编译程序集，避免每个短进程重复启动 Roslyn 编译。
@@ -419,7 +422,7 @@ const WINDOWS_JOB_HOST_ENCODED_COMMAND = Buffer.from(
 /**
  * 以 shell:false 执行进程，并用绝对 deadline、升级终止和有界输出保证最终收敛。
  *
- * @param {{args:string[],cleanupProcessTree?:(child:import("node:child_process").ChildProcess,timeoutMs:number)=>Promise<void>,cleanupProcessTreeOnExit?:boolean,cwd:string,env?:NodeJS.ProcessEnv,executable:string,killGraceMs?:number,outputLimitBytes?:number,spawnProcess?:typeof spawn,timeoutMs:number,windowsDescendantReadyPath?:string,windowsVerbatimArguments?:boolean}} options 进程执行参数。
+ * @param {{args:string[],cleanupProcessTree?:(child:import("node:child_process").ChildProcess,timeoutMs:number)=>Promise<object|void>,cleanupProcessTreeOnExit?:boolean,cwd:string,env?:NodeJS.ProcessEnv,executable:string,killGraceMs?:number,outputLimitBytes?:number,spawnProcess?:typeof spawn,timeoutMs:number,windowsDescendantReadyPath?:string,windowsVerbatimArguments?:boolean}} options 进程执行参数。
  */
 export function runProcessWithDeadline(options) {
   const timeoutMs = options.timeoutMs;
@@ -451,12 +454,11 @@ export function runProcessWithDeadline(options) {
     const stderr = createBoundedCollector(outputLimitBytes);
     let child;
     let deadline;
-    let forceKill;
-    let settleFallback;
     let postExitDeadline;
     let bootstrapDeadline;
     let settled = false;
     let timedOut = false;
+    let timeoutStableCode = "ETIMEDOUT";
     let closeObserved = false;
     let resolveRootClose;
     const rootClosePromise = new Promise((resolve) => {
@@ -464,25 +466,34 @@ export function runProcessWithDeadline(options) {
     });
     let cleanupStarted = false;
     let cleanupSucceeded = options.cleanupProcessTreeOnExit === false;
+    let cleanupProof = options.cleanupProcessTreeOnExit === false
+      ? disabledCleanupProof()
+      : null;
     let exitResult = null;
+    let posixContainment = null;
     const finish = (result) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(deadline);
-      clearTimeout(forceKill);
-      clearTimeout(settleFallback);
       clearTimeout(postExitDeadline);
       clearTimeout(bootstrapDeadline);
+      posixContainment?.stop();
       resolve({
         ...result,
+        cleanupComplete: cleanupProof?.cleanupComplete === true && closeObserved,
+        containment: cleanupProof?.containment ?? null,
+        residualProcessTree: cleanupProof?.residualProcessTree ?? null,
+        signalEscalation: cleanupProof?.signalEscalation ?? [],
         stderr: stderr.bytes(),
         stderrBytes: stderr.totalBytes(),
         stderrTruncated: stderr.truncated(),
+        streamsDrained: closeObserved,
         stdout: stdout.bytes(),
         stdoutBytes: stdout.totalBytes(),
         stdoutTruncated: stdout.truncated(),
+        timedOut,
       });
     };
     const finishExitedProcess = () => {
@@ -490,42 +501,67 @@ export function runProcessWithDeadline(options) {
         finish(exitResult);
       }
     };
-    const beginExitCleanup = () => {
+    const finishTimedOutProcess = () => {
+      if (timedOut && closeObserved && cleanupSucceeded) {
+        finish(timeoutResult(timeoutStableCode));
+      }
+    };
+    const createCleanup = () => options.cleanupProcessTree ?? ((cleanupChild, cleanupTimeoutMs) =>
+      cleanupProcessTreeAfterExit(
+        cleanupChild,
+        cleanupTimeoutMs,
+        (remainingMs) => waitForRootClose(rootClosePromise, closeObserved, remainingMs),
+        posixContainment,
+      ));
+    const beginCleanup = (forTimeout) => {
       if (cleanupStarted) {
-        finishExitedProcess();
+        if (forTimeout) {finishTimedOutProcess();}
+        else {finishExitedProcess();}
         return;
       }
       cleanupStarted = true;
-      /** close 依赖后代释放继承的 stdio；无论 cleanup Promise 如何结束都保留硬收敛上限。 */
+      /** cleanup 与双流 close 必须在同一硬 deadline 内共同收敛，任一缺失都 fail closed。 */
       postExitDeadline = setTimeout(() => {
         finish(postExitFailure(cleanupSucceeded ? "EPIPEOPEN" : "EPROCESSCLEANUPTIMEOUT"));
       }, killGraceMs);
       if (cleanupSucceeded) {
-        finishExitedProcess();
+        if (forTimeout) {finishTimedOutProcess();}
+        else {finishExitedProcess();}
         return;
       }
-      const cleanup = options.cleanupProcessTree ?? ((cleanupChild, cleanupTimeoutMs) =>
-        cleanupProcessTreeAfterExit(
-          cleanupChild,
-          cleanupTimeoutMs,
-          (remainingMs) => waitForRootClose(rootClosePromise, closeObserved, remainingMs),
-        ));
       void Promise.resolve()
-        .then(() => cleanup(child, killGraceMs))
-        .then(() => {
+        .then(() => createCleanup()(child, killGraceMs))
+        .then((proof) => {
           if (settled) {
             return;
           }
+          cleanupProof = normalizeCleanupProof(proof);
+          if (cleanupProof.cleanupComplete !== true || cleanupProof.residualProcessTree !== 0) {
+            finish(postExitFailure("EPROCESSCLEANUP"));
+            return;
+          }
           cleanupSucceeded = true;
-          finishExitedProcess();
+          if (forTimeout) {finishTimedOutProcess();}
+          else {finishExitedProcess();}
         })
-        .catch(() => {
-          finish(postExitFailure("EPROCESSCLEANUP"));
+        .catch((error) => {
+          finish(postExitFailure(cleanupStableCode(error)));
         });
     };
+    const beginExitCleanup = () => {
+      beginCleanup(false);
+    };
+    let usesPosixBootstrap = false;
     try {
       const spawnProcess = options.spawnProcess ?? spawn;
-      child = spawnProcess(options.executable, options.args, {
+      usesPosixBootstrap = process.platform === "linux"
+        && options.spawnProcess === undefined
+        && options.cleanupProcessTreeOnExit !== false
+        && options.cleanupProcessTree === undefined;
+      const invocation = usesPosixBootstrap
+        ? createLinuxPosixBootstrapInvocation(options.executable, options.args)
+        : { args: options.args, executable: options.executable };
+      child = spawnProcess(invocation.executable, invocation.args, {
         cwd: options.cwd,
         /** Windows 也建立独立进程组，使 deadline 能先广播 SIGBREAK 阻止后代继续执行。 */
         detached: true,
@@ -535,6 +571,14 @@ export function runProcessWithDeadline(options) {
         windowsHide: true,
         windowsVerbatimArguments: options.windowsVerbatimArguments === true,
       });
+      if (
+        process.platform !== "win32" &&
+        options.cleanupProcessTreeOnExit !== false &&
+        options.cleanupProcessTree === undefined
+      ) {
+        posixContainment = createPosixProcessContainment(child.pid);
+        posixContainment.start();
+      }
     } catch (error) {
       finish(spawnError(error));
       return;
@@ -546,27 +590,7 @@ export function runProcessWithDeadline(options) {
           return;
         }
         timedOut = true;
-        if (process.platform === "win32") {
-          /** 先向独立进程组广播终止，再由 taskkill /T /F 验证并收敛完整进程树。 */
-          void terminateProcessTree(
-            child,
-            "SIGKILL",
-            killGraceMs,
-            (remainingMs) => waitForRootClose(rootClosePromise, closeObserved, remainingMs),
-          )
-            .then(
-              () => finish(timeoutResult()),
-              () => finish(postExitFailure("EPROCESSCLEANUP")),
-            );
-          return;
-        }
-        void terminateProcessTree(child, "SIGTERM", killGraceMs).catch(() => undefined).finally(() => {
-          forceKill = setTimeout(() => {
-            void terminateProcessTree(child, "SIGKILL", killGraceMs).catch(() => undefined).finally(() => {
-              settleFallback = setTimeout(() => finish(timeoutResult()), killGraceMs);
-            });
-          }, killGraceMs);
-        });
+        beginCleanup(true);
       }, timeoutMs);
     };
     let waitingForJobReady = child.codegraphWindowsJobHosted === true;
@@ -612,6 +636,7 @@ export function runProcessWithDeadline(options) {
       closeObserved = true;
       resolveRootClose();
       if (timedOut) {
+        finishTimedOutProcess();
         return;
       }
       clearTimeout(bootstrapDeadline);
@@ -629,6 +654,16 @@ export function runProcessWithDeadline(options) {
         void terminateProcessTree(child, "SIGKILL", killGraceMs).catch(() => undefined)
           .finally(() => finish(postExitFailure("EPROCESSCLEANUP")));
       }, killGraceMs);
+    } else if (usesPosixBootstrap) {
+      /** root 在执行目标前先自停，确保稳定身份监控已建立后才允许 fork/setsid。 */
+      void prepareLinuxPosixBootstrap(child, posixContainment, killGraceMs).then(
+        () => startExecutionDeadline(),
+        (error) => {
+          timeoutStableCode = cleanupStableCode(error);
+          timedOut = true;
+          beginCleanup(true);
+        },
+      );
     } else {
       startExecutionDeadline();
     }
@@ -664,12 +699,18 @@ function runWindowsJobProcessWithDeadline(options, limits) {
       clearTimeout(outerGuard);
       resolve({
         ...result,
+        cleanupComplete: result.cleanupComplete === true,
+        containment: result.containment ?? null,
+        residualProcessTree: result.residualProcessTree ?? null,
+        signalEscalation: result.signalEscalation ?? [],
         stderr: stderr.bytes(),
         stderrBytes: stderr.totalBytes(),
         stderrTruncated: stderr.truncated(),
+        streamsDrained: result.streamsDrained === true,
         stdout: stdout.bytes(),
         stdoutBytes: stdout.totalBytes(),
         stdoutTruncated: stdout.truncated(),
+        timedOut: result.timedOut === true,
       });
     };
     try {
@@ -722,9 +763,19 @@ function runWindowsJobProcessWithDeadline(options, limits) {
         rootPid: readyProof.rootPid,
         terminalProof: "query-information-job-object",
       };
+      const cleanup = verifiedCleanupProof(
+        "windows-job-object-active-processes",
+        terminal.proof.kind === "timeout" ? ["TerminateJobObject"] : [],
+      );
       finish(terminal.proof.kind === "timeout"
-        ? { ...timeoutResult(), windowsJob }
-        : { ...processExitResult(terminal.proof.exitCode, null), windowsJob });
+        ? { ...timeoutResult(), ...cleanup, streamsDrained: true, timedOut: true, windowsJob }
+        : {
+            ...processExitResult(terminal.proof.exitCode, null),
+            ...cleanup,
+            streamsDrained: true,
+            timedOut: false,
+            windowsJob,
+          });
     });
     /** helper 失控时关闭其最后 Job 句柄仅作保险，未取得终态证明必须 fail closed。 */
     outerGuard = setTimeout(() => {
@@ -810,15 +861,13 @@ function consumeWindowsJobTerminalControl(bytes, nonce) {
   };
 }
 
-/** 正常退出后使用独立 deadline 清理残留后代，不复用已完成的执行 deadline。 */
-function cleanupProcessTreeAfterExit(child, timeoutMs, waitForRootClose) {
+/** 正常退出或 timeout 后使用独立 deadline 清理残留后代，并返回可审计终态证明。 */
+function cleanupProcessTreeAfterExit(child, timeoutMs, waitForRootClose, posixContainment) {
   if (process.platform !== "win32") {
-    return terminateProcessTree(child, "SIGTERM", timeoutMs).then(() =>
-      terminateProcessTree(child, "SIGKILL", timeoutMs),
-    );
+    return terminatePosixProcessTree(child, timeoutMs, posixContainment);
   }
   if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
-    return Promise.resolve();
+    return Promise.resolve(verifiedCleanupProof("windows-no-process", []));
   }
   return terminateWindowsProcessTree(
     child,
@@ -826,7 +875,7 @@ function cleanupProcessTreeAfterExit(child, timeoutMs, waitForRootClose) {
     runWindowsTaskkill,
     verifyWindowsDescendantsConverged,
     waitForRootClose,
-  );
+  ).then(() => verifiedCleanupProof("windows-taskkill-descendant-snapshot", ["SIGBREAK", "SIGKILL"]));
 }
 
 /**
@@ -1068,7 +1117,7 @@ function verifyWindowsDescendantsConverged(rootPid, timeoutMs) {
   });
 }
 
-/** 终止完整进程树；POSIX 使用独立进程组，Windows 使用 taskkill /T。 */
+/** 终止完整进程树；该兼容入口仅服务 Windows bootstrap 异常路径。 */
 async function terminateProcessTree(child, signal, timeoutMs, waitForRootClose) {
   if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
     return;
@@ -1083,13 +1132,443 @@ async function terminateProcessTree(child, signal, timeoutMs, waitForRootClose) 
     );
     return;
   }
+  throw new Error("POSIX process termination requires stable containment ownership.");
+}
+
+/**
+ * POSIX 进程树必须由 PID + 启动时刻的稳定身份闭包收敛；进程组只用于加速，不能作为终态证明。
+ * 监控期间发现的后代即使随后 setsid/setpgid 或被 reparent，仍保留在 owned identity 集合中。
+ */
+function createPosixProcessContainment(rootPid, dependencies = {}) {
+  const snapshotProvider = dependencies.snapshotProvider ?? createPosixSnapshotProvider();
+  const signalProcess = dependencies.signalProcess ?? ((pid, signal) => process.kill(pid, signal));
+  const signalGroup = dependencies.signalGroup ?? ((pid, signal) => process.kill(-pid, signal));
+  const sleep = dependencies.sleep ?? ((delayMs) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const pollIntervalMs = dependencies.pollIntervalMs ?? POSIX_IDENTITY_POLL_MS;
+  const termSettleMs = dependencies.termSettleMs ?? POSIX_SIGNAL_SETTLE_MS;
+  const state = {
+    rootObserved: false,
+    rootPid,
+    tracked: new Map(),
+  };
+  let stopped = false;
+  let timer;
+  let failure = null;
+  let liveRecords = [];
+  let pendingSample = Promise.resolve();
+
+  const sample = () => {
+    pendingSample = pendingSample.catch(() => undefined).then(async () => {
+      if (failure !== null) {throw failure;}
+      try {
+        const snapshot = await snapshotProvider(rootPid, state.tracked);
+        liveRecords = advancePosixDescendantClosure(state, snapshot);
+        return liveRecords;
+      } catch (error) {
+        failure = normalizePosixContainmentError(error);
+        throw failure;
+      }
+    });
+    return pendingSample;
+  };
+  const schedule = () => {
+    if (stopped || failure !== null) {return;}
+    timer = setTimeout(() => {
+      void sample().catch(() => undefined).finally(schedule);
+    }, pollIntervalMs);
+  };
+  const start = () => {
+    if (stopped || timer !== undefined) {return;}
+    void sample().catch(() => undefined).finally(schedule);
+  };
+  const stop = () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+  const signalOwned = async (signal) => {
+    const live = await sample();
+    if (live.some(({ pid }) => pid === rootPid)) {
+      try {
+        signalGroup(rootPid, signal);
+      } catch (error) {
+        if (!isNoSuchProcessError(error)) {throw error;}
+      }
+    }
+    for (const record of live) {
+      try {
+        signalProcess(record.pid, signal);
+      } catch (error) {
+        if (!isNoSuchProcessError(error)) {throw error;}
+      }
+    }
+  };
+  const waitForZero = async (deadlineAt) => {
+    let emptySamples = 0;
+    while (Date.now() < deadlineAt) {
+      const live = await sample();
+      if (live.length === 0) {
+        emptySamples += 1;
+        if (emptySamples >= 2) {return true;}
+      } else {
+        emptySamples = 0;
+      }
+      await sleep(Math.min(pollIntervalMs, Math.max(1, deadlineAt - Date.now())));
+    }
+    return false;
+  };
+  const terminateAndConverge = async (timeoutMs) => {
+    const deadlineAt = Date.now() + timeoutMs;
+    const escalation = [];
+    await sample();
+    escalation.push("SIGTERM");
+    await signalOwned("SIGTERM");
+    const termDeadline = Math.min(deadlineAt, Date.now() + termSettleMs);
+    if (await waitForZero(termDeadline)) {
+      stop();
+      return verifiedCleanupProof("posix-stable-identity-descendant-closure", escalation);
+    }
+    escalation.push("SIGKILL");
+    await signalOwned("SIGKILL");
+    if (await waitForZero(deadlineAt)) {
+      stop();
+      return verifiedCleanupProof("posix-stable-identity-descendant-closure", escalation);
+    }
+    const error = createStableProcessError(
+      "EPROCESSCLEANUPTIMEOUT",
+      "POSIX stable process identity closure did not converge.",
+    );
+    error.residualProcessTree = liveRecords.length;
+    throw error;
+  };
+
+  return { sample, start, stop, terminateAndConverge };
+}
+
+/** Linux wrapper 在 exec 目标前自停；argv 通过 sh 的位置参数原样传递，不经过字符串拼接。 */
+function createLinuxPosixBootstrapInvocation(executable, args) {
+  return {
+    args: [
+      "-c",
+      'kill -STOP "$$"; exec "$@"',
+      "codegraph-posix-bootstrap",
+      executable,
+      ...args,
+    ],
+    executable: "/bin/sh",
+  };
+}
+
+/** 在同一 bootstrap grace 内确认 root 已停止、建立首个身份快照，再恢复真实目标执行。 */
+async function prepareLinuxPosixBootstrap(child, containment, timeoutMs) {
+  if (!Number.isSafeInteger(child.pid) || child.pid <= 0 || containment === null) {
+    throw createStableProcessError(
+      "EPROCESSCONTAINMENTUNAVAILABLE",
+      "Linux POSIX bootstrap did not establish a root identity.",
+    );
+  }
+  const deadlineAt = Date.now() + timeoutMs;
+  while (Date.now() < deadlineAt) {
+    let stat;
+    try {
+      stat = await readFile(`/proc/${child.pid}/stat`, "utf8");
+    } catch (error) {
+      if (isNoSuchProcessError(error)) {
+        throw createStableProcessError(
+          "EPROCESSCONTAINMENTUNAVAILABLE",
+          "Linux POSIX bootstrap exited before identity ownership was established.",
+        );
+      }
+      throw createStableProcessError(
+        "EPROCESSCONTAINMENTUNAVAILABLE",
+        "Linux POSIX bootstrap state is unavailable.",
+      );
+    }
+    const commandEnd = stat.lastIndexOf(")");
+    const state = commandEnd >= 0 ? stat.slice(commandEnd + 2, commandEnd + 3) : "";
+    if (["T", "t"].includes(state)) {
+      await containment.sample();
+      try {
+        process.kill(child.pid, "SIGCONT");
+      } catch (error) {
+        if (!isNoSuchProcessError(error)) {throw error;}
+        throw createStableProcessError(
+          "EPROCESSCONTAINMENTUNAVAILABLE",
+          "Linux POSIX bootstrap disappeared before resume.",
+        );
+      }
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw createStableProcessError(
+    "EPROCESSCONTAINMENTUNAVAILABLE",
+    "Linux POSIX bootstrap did not stop within its fixed grace.",
+  );
+}
+
+/** 使用生产同一 identity/信号算法注入确定性快照，供非 POSIX 主机验证逃逸与 fail-closed。 */
+export async function terminatePosixProcessTreeForTests(
+  child,
+  timeoutMs,
+  snapshotProvider,
+  dependencies = {},
+) {
+  const containment = createPosixProcessContainment(child.pid, {
+    ...dependencies,
+    pollIntervalMs: dependencies.pollIntervalMs ?? 1,
+    snapshotProvider,
+  });
   try {
-    process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!(error && typeof error === "object" && error.code === "ESRCH")) {
-      child.kill(signal);
+    return await containment.terminateAndConverge(timeoutMs);
+  } finally {
+    containment.stop();
+  }
+}
+
+/** 在单一 cleanup deadline 内执行 POSIX 信号升级与稳定身份 residual=0 证明。 */
+async function terminatePosixProcessTree(child, timeoutMs, containment) {
+  if (!Number.isSafeInteger(child.pid) || child.pid <= 0 || containment === null) {
+    throw createStableProcessError(
+      "EPROCESSCONTAINMENTUNAVAILABLE",
+      "POSIX process containment was not established before execution.",
+    );
+  }
+  return containment.terminateAndConverge(timeoutMs);
+}
+
+/** 将一次进程快照并入稳定身份闭包；PID 复用、重复身份或缺失根身份均拒绝继续。 */
+function advancePosixDescendantClosure(state, snapshot) {
+  if (!Array.isArray(snapshot)) {
+    throw createStableProcessError(
+      "EPROCESSCONTAINMENTUNAVAILABLE",
+      "POSIX process identity provider returned no snapshot.",
+    );
+  }
+  const byPid = new Map();
+  for (const record of snapshot) {
+    if (!isValidPosixProcessIdentity(record) || byPid.has(record.pid)) {
+      throw createStableProcessError(
+        "EPROCESSIDENTITYAMBIGUOUS",
+        "POSIX process snapshot contains an ambiguous identity.",
+      );
+    }
+    byPid.set(record.pid, record);
+  }
+  if (!state.rootObserved) {
+    const root = byPid.get(state.rootPid);
+    if (root === undefined) {
+      throw createStableProcessError(
+        "EPROCESSCONTAINMENTUNAVAILABLE",
+        "POSIX root identity was not observed before it could create descendants.",
+      );
+    }
+    state.tracked.set(root.pid, root);
+    state.rootObserved = true;
+  }
+  for (const [pid, tracked] of state.tracked) {
+    const current = byPid.get(pid);
+    if (current !== undefined && current.identity !== tracked.identity) {
+      throw createStableProcessError(
+        "EPROCESSIDENTITYAMBIGUOUS",
+        "POSIX PID was reused before descendant closure converged.",
+      );
     }
   }
+  const liveOwned = new Map();
+  for (const [pid, tracked] of state.tracked) {
+    const current = byPid.get(pid);
+    if (current?.identity === tracked.identity) {liveOwned.set(pid, current);}
+  }
+  let discovered = true;
+  while (discovered) {
+    discovered = false;
+    for (const record of snapshot) {
+      if (state.tracked.has(record.pid) || !liveOwned.has(record.parentPid)) {continue;}
+      state.tracked.set(record.pid, record);
+      liveOwned.set(record.pid, record);
+      discovered = true;
+    }
+  }
+  return [...liveOwned.values()];
+}
+
+/** Linux 使用 /proc 定向读取已跟踪身份及其 children；其他 POSIX 使用有界 ps 快照。 */
+function createPosixSnapshotProvider() {
+  if (process.platform === "linux") {
+    return captureLinuxProcessSnapshot;
+  }
+  return capturePsProcessSnapshot;
+}
+
+/** 只遍历 root/已跟踪 PID 的 children，避免长构建期间高频扫描整个 /proc。 */
+async function captureLinuxProcessSnapshot(rootPid, tracked) {
+  const records = new Map();
+  const queue = tracked.size === 0 ? [rootPid] : [...tracked.keys()];
+  const queued = new Set(queue);
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    const record = await readLinuxProcessIdentity(pid);
+    if (record === null) {continue;}
+    records.set(pid, record);
+    let childText;
+    try {
+      childText = await readFile(`/proc/${pid}/task/${pid}/children`, "utf8");
+    } catch (error) {
+      if (isNoSuchProcessError(error)) {continue;}
+      throw createStableProcessError(
+        "EPROCESSCONTAINMENTUNAVAILABLE",
+        "Linux descendant identity source is unavailable.",
+      );
+    }
+    for (const value of childText.trim().split(/\s+/u)) {
+      if (!/^[1-9][0-9]*$/u.test(value)) {continue;}
+      const childPid = Number.parseInt(value, 10);
+      if (!queued.has(childPid)) {
+        queued.add(childPid);
+        queue.push(childPid);
+      }
+    }
+  }
+  return [...records.values()];
+}
+
+/** 从 /proc/<pid>/stat 提取 PID、PPID、进程组、session 与 starttime 稳定身份。 */
+async function readLinuxProcessIdentity(pid) {
+  let stat;
+  try {
+    stat = await readFile(`/proc/${pid}/stat`, "utf8");
+  } catch (error) {
+    if (isNoSuchProcessError(error)) {return null;}
+    throw createStableProcessError(
+      "EPROCESSCONTAINMENTUNAVAILABLE",
+      "Linux process identity source is unavailable.",
+    );
+  }
+  const commandEnd = stat.lastIndexOf(")");
+  const fields = commandEnd >= 0 ? stat.slice(commandEnd + 2).trim().split(/\s+/u) : [];
+  const parentPid = Number.parseInt(fields[1] ?? "", 10);
+  const processGroupId = Number.parseInt(fields[2] ?? "", 10);
+  const sessionId = Number.parseInt(fields[3] ?? "", 10);
+  const startTime = fields[19];
+  if (
+    !Number.isSafeInteger(parentPid) ||
+    !Number.isSafeInteger(processGroupId) ||
+    !Number.isSafeInteger(sessionId) ||
+    !/^[0-9]+$/u.test(startTime ?? "")
+  ) {
+    throw createStableProcessError(
+      "EPROCESSIDENTITYAMBIGUOUS",
+      "Linux process identity record is malformed.",
+    );
+  }
+  return {
+    identity: `${pid}:${startTime}`,
+    parentPid,
+    pid,
+    processGroupId,
+    sessionId,
+  };
+}
+
+/** Darwin/BSD 通过一次有界 ps 快照取得 PID + lstart 身份，查询失败不降级为进程组猜测。 */
+async function capturePsProcessSnapshot() {
+  const output = await runBoundedPsSnapshot();
+  return output.split(/\r?\n/u).flatMap((line) => {
+    const match = /^\s*([1-9][0-9]*)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+(.+?)\s*$/u.exec(line);
+    if (match === null) {return [];}
+    const [, pidText, parentText, groupText, sessionText, startText] = match;
+    const pid = Number.parseInt(pidText, 10);
+    return [{
+      identity: `${pid}:${startText}`,
+      parentPid: Number.parseInt(parentText, 10),
+      pid,
+      processGroupId: Number.parseInt(groupText, 10),
+      sessionId: Number.parseInt(sessionText, 10),
+    }];
+  });
+}
+
+/** ps 本身使用固定 1 秒和 4 MiB 上限，避免 containment 证明反向引入无界子进程。 */
+function runBoundedPsSnapshot() {
+  return new Promise((resolve, reject) => {
+    const collector = createBoundedCollector(4 * 1024 * 1024);
+    let child;
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) {return;}
+      settled = true;
+      clearTimeout(deadline);
+      if (error === undefined) {resolve(value);}
+      else {reject(error);}
+    };
+    const deadline = setTimeout(() => {
+      try {child?.kill("SIGKILL");} catch {/** close/error 仍由唯一 finish 收敛。 */}
+      finish(createStableProcessError(
+        "EPROCESSCONTAINMENTUNAVAILABLE",
+        "POSIX ps identity snapshot timed out.",
+      ));
+    }, 1_000);
+    try {
+      child = spawn("/bin/ps", ["-axo", "pid=,ppid=,pgid=,sess=,lstart="], {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      child.stdout.on("data", (chunk) => collector.append(chunk));
+      child.once("error", () => finish(createStableProcessError(
+        "EPROCESSCONTAINMENTUNAVAILABLE",
+        "POSIX ps identity snapshot failed to start.",
+      )));
+      child.once("close", (code) => {
+        if (code !== 0 || collector.truncated()) {
+          finish(createStableProcessError(
+            "EPROCESSCONTAINMENTUNAVAILABLE",
+            "POSIX ps identity snapshot was incomplete.",
+          ));
+          return;
+        }
+        finish(undefined, collector.bytes().toString("utf8"));
+      });
+    } catch {
+      finish(createStableProcessError(
+        "EPROCESSCONTAINMENTUNAVAILABLE",
+        "POSIX ps identity snapshot failed to start.",
+      ));
+    }
+  });
+}
+
+/** 进程身份记录必须完整且所有数值均为非负安全整数。 */
+function isValidPosixProcessIdentity(record) {
+  return record !== null && typeof record === "object"
+    && typeof record.identity === "string" && record.identity.length > 0
+    && Number.isSafeInteger(record.pid) && record.pid > 0
+    && Number.isSafeInteger(record.parentPid) && record.parentPid >= 0
+    && Number.isSafeInteger(record.processGroupId) && record.processGroupId >= 0
+    && Number.isSafeInteger(record.sessionId) && record.sessionId >= 0;
+}
+
+/** 将任意 provider/signal 异常归一化为稳定、无路径的 containment 错误。 */
+function normalizePosixContainmentError(error) {
+  if (error && typeof error === "object" && typeof error.stableCode === "string") {
+    return error;
+  }
+  return createStableProcessError(
+    "EPROCESSCONTAINMENTUNAVAILABLE",
+    "POSIX process containment provider failed.",
+  );
+}
+
+/** 创建仅含稳定代码的进程错误，禁止把 /proc、命令行或本机路径泄露到外部合同。 */
+function createStableProcessError(stableCode, message) {
+  const error = new Error(message);
+  error.stableCode = stableCode;
+  return error;
+}
+
+/** ENOENT/ESRCH 只表示被观察身份已消失；权限、解析或 provider 失败必须 fail closed。 */
+function isNoSuchProcessError(error) {
+  return error && typeof error === "object" && ["ENOENT", "ESRCH"].includes(error.code);
 }
 
 /**
@@ -1149,6 +1628,55 @@ function createBoundedCollector(limitBytes) {
   };
 }
 
+/** 生成 residual=0 的唯一成功 cleanup 证明。 */
+function verifiedCleanupProof(containment, signalEscalation) {
+  return Object.freeze({
+    cleanupComplete: true,
+    containment,
+    residualProcessTree: 0,
+    signalEscalation: Object.freeze([...signalEscalation]),
+  });
+}
+
+/** 显式禁用 cleanup 时保留兼容执行结果，但绝不伪报 containment 已完成。 */
+function disabledCleanupProof() {
+  return Object.freeze({
+    cleanupComplete: false,
+    containment: "disabled",
+    residualProcessTree: null,
+    signalEscalation: Object.freeze([]),
+  });
+}
+
+/** 自定义 cleanup 必须返回显式证明；旧 callback 的 void 只作为已履约 residual=0 兼容合同。 */
+function normalizeCleanupProof(proof) {
+  if (proof === undefined) {
+    return verifiedCleanupProof("custom-process-tree-cleanup", []);
+  }
+  if (
+    proof !== null && typeof proof === "object" &&
+    proof.cleanupComplete === true &&
+    proof.residualProcessTree === 0 &&
+    typeof proof.containment === "string" && proof.containment.length > 0 &&
+    Array.isArray(proof.signalEscalation)
+  ) {
+    return verifiedCleanupProof(proof.containment, proof.signalEscalation);
+  }
+  return Object.freeze({
+    cleanupComplete: false,
+    containment: null,
+    residualProcessTree: null,
+    signalEscalation: Object.freeze([]),
+  });
+}
+
+/** 将 cleanup 内部错误限制为稳定代码，禁止把平台路径或原始命令透传给调用方。 */
+function cleanupStableCode(error) {
+  return error && typeof error === "object" && typeof error.stableCode === "string"
+    ? error.stableCode
+    : "EPROCESSCLEANUP";
+}
+
 /** 将启动异常收敛为不泄露本机路径或堆栈的稳定 invalid。 */
 function spawnError(error) {
   return {
@@ -1163,11 +1691,11 @@ function spawnError(error) {
   };
 }
 
-/** deadline 到期统一使用稳定 ETIMEDOUT，不依赖平台信号名称。 */
-function timeoutResult() {
+/** deadline/bootstrap 到期只暴露稳定代码，不依赖平台信号名称或本机路径。 */
+function timeoutResult(stableCode = "ETIMEDOUT") {
   return {
     status: "invalid",
-    termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
+    termination: { kind: "spawn-error", stableCode },
   };
 }
 

@@ -6,7 +6,10 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { runProcessWithDeadline } from "../../scripts/ci/run-process-with-deadline.mjs";
+import {
+  runProcessWithDeadline,
+  terminatePosixProcessTreeForTests,
+} from "../../scripts/ci/run-process-with-deadline.mjs";
 import { PROCESS_LIFECYCLE_BUDGET } from "../../vitest.process-deadline.config.js";
 
 const temporaryRoots: string[] = [];
@@ -52,6 +55,17 @@ function createReadyDescendant(marker: string, delayMs = 750): string {
     `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "survived"), ${delayMs});`,
     "setInterval(() => {}, 1_000);",
   ].join("");
+}
+
+/** 构造可注入 POSIX 快照的 PID + 启动时刻稳定身份记录。 */
+function posixIdentity(
+  pid: number,
+  parentPid: number,
+  start: number,
+  processGroupId = pid,
+  sessionId = processGroupId,
+) {
+  return { identity: `${pid}:${start}`, parentPid, pid, processGroupId, sessionId };
 }
 
 /** 在同一轮中执行一个带 descendant-ready/PID 正向握手的 Windows 进程树场景。 */
@@ -150,6 +164,142 @@ describe("process deadline", () => {
       killGraceMs: 3_000_000_000,
       timeoutMs: 50,
     })).toThrow(/timer|上限/u);
+  });
+
+  it.each([
+    [
+      "setsid/setpgid 逃逸后代仍由稳定身份闭包升级终止并证明 residual=0",
+      [
+        [posixIdentity(5100, 1, 11), posixIdentity(5101, 5100, 12, 5101, 5101)],
+        [posixIdentity(5100, 1, 11), posixIdentity(5101, 1, 12, 5101, 5101)],
+        [posixIdentity(5101, 1, 12, 5101, 5101)],
+        [],
+        [],
+      ],
+      null,
+    ],
+    ["containment provider 不可用时 fail closed", [[]], "EPROCESSCONTAINMENTUNAVAILABLE"],
+    [
+      "同 PID 启动身份变化时拒绝歧义并 fail closed",
+      [[posixIdentity(5200, 1, 21)], [posixIdentity(5200, 1, 22)]],
+      "EPROCESSIDENTITYAMBIGUOUS",
+    ],
+  ] as const)("PF-A %s", async (_label, scriptedSnapshots, expectedStableCode) => {
+    let snapshotIndex = 0;
+    const processSignals: Array<{ pid: number; signal: string }> = [];
+    const groupSignals: Array<{ pid: number; signal: string }> = [];
+    const snapshotProvider = async () => scriptedSnapshots[
+      Math.min(snapshotIndex++, scriptedSnapshots.length - 1)
+    ];
+    const run = terminatePosixProcessTreeForTests(
+      { pid: expectedStableCode === "EPROCESSIDENTITYAMBIGUOUS" ? 5200 : 5100 },
+      100,
+      snapshotProvider,
+      {
+        signalGroup: (pid: number, signal: string) => groupSignals.push({ pid, signal }),
+        signalProcess: (pid: number, signal: string) => processSignals.push({ pid, signal }),
+        sleep: async () => undefined,
+        termSettleMs: 0,
+      },
+    );
+
+    if (expectedStableCode !== null) {
+      await expect(run).rejects.toMatchObject({ stableCode: expectedStableCode });
+      return;
+    }
+    await expect(run).resolves.toMatchObject({
+      cleanupComplete: true,
+      containment: "posix-stable-identity-descendant-closure",
+      residualProcessTree: 0,
+      signalEscalation: ["SIGTERM", "SIGKILL"],
+    });
+    expect(groupSignals).toEqual([{ pid: 5100, signal: "SIGTERM" }]);
+    expect(processSignals).toContainEqual({ pid: 5101, signal: "SIGKILL" });
+  });
+
+  it.each(["stdout/stderr"])("PF-A %s 双流必须在 cleanup 后完整排空", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      kill: () => boolean;
+      pid: number;
+      stderr: PassThrough;
+      stdout: PassThrough;
+    };
+    child.kill = () => true;
+    child.pid = 5300;
+    child.stderr = new PassThrough();
+    child.stdout = new PassThrough();
+    const resultPromise = runProcessWithDeadline({
+      args: [],
+      cleanupProcessTree: async () => ({
+        cleanupComplete: true,
+        containment: "test-stable-identity",
+        residualProcessTree: 0,
+        signalEscalation: [],
+      }),
+      cwd: process.cwd(),
+      executable: process.execPath,
+      killGraceMs: 100,
+      outputLimitBytes: 1024,
+      spawnProcess: (() => child) as never,
+      timeoutMs: 500,
+    });
+    child.stdout.write("stdout-complete");
+    child.stderr.write("stderr-complete");
+    child.emit("exit", 0, null);
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", 0, null);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      cleanupComplete: true,
+      residualProcessTree: 0,
+      status: "pass",
+      streamsDrained: true,
+    });
+    const result = await resultPromise;
+    expect(result.stdout.toString("utf8")).toBe("stdout-complete");
+    expect(result.stderr.toString("utf8")).toBe("stderr-complete");
+  });
+
+  it.each(["setsid escape"])("PF-A POSIX runtime fixture: %s", async () => {
+    if (process.platform === "win32") {
+      console.warn("PF-A POSIX runtime fixture NOT_RUN on win32");
+      return;
+    }
+    const escapedChild = [
+      'process.on("SIGTERM", () => {});',
+      'process.stdout.write("escaped-child-ready\\n");',
+      "setInterval(() => {}, 1_000);",
+    ].join("");
+    const root = [
+      'const { spawn } = require("node:child_process");',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(escapedChild)}], ` +
+        '{ detached: true, stdio: ["ignore", "inherit", "inherit"] });',
+      'process.stdout.write(`escaped-pid:${child.pid}\\n`);',
+      "setInterval(() => {}, 1_000);",
+    ].join("");
+    const result = await runProcessWithDeadline({
+      args: ["-e", root],
+      cwd: process.cwd(),
+      executable: process.execPath,
+      killGraceMs: 2_000,
+      outputLimitBytes: 4_096,
+      timeoutMs: 300,
+    });
+    const pidMatch = /escaped-pid:([1-9][0-9]*)/u.exec(result.stdout.toString("utf8"));
+
+    expect(pidMatch).not.toBeNull();
+    expect(result).toMatchObject({
+      cleanupComplete: true,
+      containment: "posix-stable-identity-descendant-closure",
+      residualProcessTree: 0,
+      signalEscalation: ["SIGTERM", "SIGKILL"],
+      status: "invalid",
+      streamsDrained: true,
+      termination: { kind: "spawn-error", stableCode: "ETIMEDOUT" },
+      timedOut: true,
+    });
+    await expectProcessGone(Number.parseInt(pidMatch![1]!, 10));
   });
 
   it("CR6-005 does not treat root exit as Windows descendant-tree convergence", async () => {
