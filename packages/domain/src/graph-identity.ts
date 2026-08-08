@@ -153,8 +153,9 @@ function isCanonicalExportsQualifier(qualifier: string): boolean {
 }
 
 /**
- * 以 decode→canonical re-encode 守住 AD-4 身份唯一性边界，而不是只做普通格式检查。
+ * percent decode 后先 fail closed 校验 decoded Unicode，再 canonical re-encode 守住身份唯一性。
  *
+ * decoded 值必须原样满足 NFC 且不含孤立代理项；禁止静默 normalize 后接受另一份输入字节。
  * ModuleExportName 的内部 `%u` 退避表示不得进入公共 edge 身份；字面 `%u` 名称仍以 `%25u` 表示。
  */
 function isCanonicalModuleExportNameSegment(encoded: string): boolean {
@@ -163,6 +164,7 @@ function isCanonicalModuleExportNameSegment(encoded: string): boolean {
   }
   try {
     const decoded = decodeModuleExportName(encoded);
+    assertCanonicalUnicode(decoded, "decoded ModuleExportName");
     return encodeModuleExportName(decoded) === encoded;
   } catch {
     return false;

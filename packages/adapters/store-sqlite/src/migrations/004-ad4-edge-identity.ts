@@ -171,11 +171,9 @@ export function applyAd4EdgeIdentityMigration(
       version = readSchemaVersion(database);
     }
     if (version === AD4_EDGE_IDENTITY_SCHEMA_VERSION) {
-      /**
-       * reopen 必须在任何恢复或裁剪前验证全部 terminal history，再回验 current 绑定。
-       */
+      /** reopen 先结构预检全部 terminal history，再昂贵回验 current 绑定。 */
       assertAd4ModuleDependencySchemaIntegrity(database);
-      assertTerminalJobHistory(database, options.digestPort);
+      assertTerminalJobHistory(database);
       assertCurrentCommittedState(database, options.digestPort, "canonical", false);
       return false;
     }
@@ -185,7 +183,7 @@ export function applyAd4EdgeIdentityMigration(
 
     /** v3 必须先按旧编码 byte-for-byte 回验，禁止把损坏身份误认成迁移输入。 */
     assertModuleDependencySchemaIntegrity(database);
-    assertTerminalJobHistory(database, options.digestPort);
+    assertTerminalJobHistory(database);
     assertCurrentCommittedState(database, options.digestPort, "legacy", true);
 
     const edgeMappings = buildEdgeMappings(readEdgeIdentityRows(database));
@@ -269,7 +267,7 @@ export function assertAd4EdgeIdentitySchemaIntegrity(
     throw new Error("SQLite AD-4 schema 尚未完成 v4 migration。");
   }
   assertAd4ModuleDependencySchemaIntegrity(database);
-  assertTerminalJobHistory(database, digestPort);
+  assertTerminalJobHistory(database);
   assertCurrentCommittedState(database, digestPort, "canonical", false);
 }
 
@@ -431,15 +429,14 @@ function migrateCurrentCommittedDigests(
 }
 
 /**
- * terminal history 必须在任何临时映射或持久 mutation 前完成全量验证。
+ * terminal history 必须在任何临时映射或持久 mutation 前完成全量结构预检。
  *
  * 非 succeeded 状态没有可提交的 read-set/patch，revision 只能停留在 logical base；
- * succeeded 的完整证据继续交给同一快照下的身份与摘要派生校验。
+ * succeeded history 在裁剪前只验证持久结构与 CAS revision，避免对即将删除的证据派生昂贵摘要。
+ * current committed Job 仍由 assertCurrentCommittedState 完整验证，裁剪后的 retained history
+ * 则由 store 打开路径的 validateStoredJobHistory 复核语义摘要。
  */
-function assertTerminalJobHistory(
-  database: Database.Database,
-  digestPort: CanonicalDigestPort,
-): void {
+function assertTerminalJobHistory(database: Database.Database): void {
   const rows = database.prepare(`
     SELECT jobs.id, jobs.workspace_key, jobs.kind, jobs.state,
            jobs.requested_at, jobs.started_at, jobs.completed_at,
@@ -499,14 +496,11 @@ function assertTerminalJobHistory(
       throw new Error("历史 terminal Job 合同不完整、证据越界或时间不单调。");
     }
   }
-  assertHistoricalSucceededJobEvidence(database, digestPort);
+  assertHistoricalSucceededJobStructure(database);
 }
 
-/** 历史 succeeded Job 保持原字节证据，但必须在迁移前后仍可按 legacy/canonical 规则验证。 */
-function assertHistoricalSucceededJobEvidence(
-  database: Database.Database,
-  digestPort: CanonicalDigestPort,
-): void {
+/** 裁剪前只做 succeeded Job 的结构/CAS 预检，昂贵语义摘要留给 current 与 retained 集合。 */
+function assertHistoricalSucceededJobStructure(database: Database.Database): void {
   const rows = database.prepare(`
     SELECT id, workspace_key, kind, completed_at, base_graph_revision,
            result_graph_revision, read_set_json, patch_digest, legacy_schema_version
@@ -530,21 +524,10 @@ function assertHistoricalSucceededJobEvidence(
     if (row.read_set_json === null || row.patch_digest === null) {
       throw new Error("非 legacy succeeded Job 缺少 read-set 或 patch digest。");
     }
-    const readSet = parseReadSet(row.read_set_json);
-    assertReadSetSemanticDigests(readSet, digestPort);
-    const canonicalPatch = derivePatchDigest(
-      database,
-      row.workspace_key,
-      readSet,
-      digestPort,
-      "canonical",
-    );
-    const legacyPatch = isCompositeReadSet(readSet)
-      ? canonicalPatch
-      : derivePatchDigest(database, row.workspace_key, readSet, digestPort, "legacy");
-    if (row.patch_digest !== canonicalPatch && row.patch_digest !== legacyPatch) {
-      throw new Error("历史 succeeded Job 的 patch/read-set 证据无法重新派生。");
+    if (!isSha256(row.patch_digest)) {
+      throw new Error("非 legacy succeeded Job 的 patch digest 不合法。");
     }
+    const readSet = parseReadSet(row.read_set_json);
     assertSucceededJobCasContract(row, readSet);
   }
 }
