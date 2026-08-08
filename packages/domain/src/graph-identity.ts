@@ -1,3 +1,5 @@
+import { decodeModuleExportName, encodeModuleExportName } from "./module-dependency.js";
+
 /** hierarchy 切片允许使用工作区相对路径构造的实体类型。 */
 export type HierarchyEntityKind = "directory" | "file" | "workspace";
 
@@ -134,10 +136,36 @@ function assertCanonicalEdgeTuple(
     ? qualifier === ""
     : relationType === "imports"
       ? qualifier === "value" || qualifier === "type" || qualifier === "dynamic"
-      : qualifier === "star:value" || qualifier === "star:type" ||
-        /^reexport:[^:]+:[^:]+:(?:value|type)$/u.test(qualifier);
+      : isCanonicalExportsQualifier(qualifier);
   if (!qualifierValid) {
     throw new TypeError("关系 qualifier 不符合 AD-4 v1 规范词汇。");
+  }
+}
+
+/** exports qualifier 同时封闭结构词汇与 re-export 名称段的规范身份。 */
+function isCanonicalExportsQualifier(qualifier: string): boolean {
+  if (qualifier === "star:value" || qualifier === "star:type") {
+    return true;
+  }
+  const match = /^reexport:([^:]+):([^:]+):(value|type)$/u.exec(qualifier);
+  return match !== null && isCanonicalModuleExportNameSegment(match[1]!) &&
+    isCanonicalModuleExportNameSegment(match[2]!);
+}
+
+/**
+ * 以 decode→canonical re-encode 守住 AD-4 身份唯一性边界，而不是只做普通格式检查。
+ *
+ * ModuleExportName 的内部 `%u` 退避表示不得进入公共 edge 身份；字面 `%u` 名称仍以 `%25u` 表示。
+ */
+function isCanonicalModuleExportNameSegment(encoded: string): boolean {
+  if (encoded.includes("%u")) {
+    return false;
+  }
+  try {
+    const decoded = decodeModuleExportName(encoded);
+    return encodeModuleExportName(decoded) === encoded;
+  } catch {
+    return false;
   }
 }
 

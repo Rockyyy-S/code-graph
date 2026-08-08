@@ -79,6 +79,13 @@ describe("graph identity", () => {
         vector.qualifier,
       )).toBe(`cg://${workspaceKey}/edge/v1/${vector.digest}`);
     }
+    expect(() => buildGraphEdgeId(
+      workspaceKey,
+      `cg://${workspaceKey}/file/src/index.ts`,
+      "exports",
+      "node:path",
+      "reexport:%3A:%25u:type",
+    )).not.toThrow();
   });
 
   it("rejects noncanonical Unicode and lone surrogates instead of silently normalizing", () => {
@@ -97,6 +104,25 @@ describe("graph identity", () => {
       target,
       "value",
     )).toThrow(/代理项/u);
+
+    const source = `cg://${workspaceKey}/file/src/index.ts`;
+    const invalidReexportQualifiers = [
+      "reexport:%e7%BB%84%E4%BB%B6:value:value",
+      "reexport:value:%76alue:value",
+      "reexport:%E7%BB%84%E4%BB%:value:value",
+      "reexport:value:%FF:value",
+      "reexport:%u:value:value",
+      "reexport:value:%uD800:type",
+    ];
+    for (const qualifier of invalidReexportQualifiers) {
+      expect(() => buildGraphEdgeId(
+        workspaceKey,
+        source,
+        "exports",
+        target,
+        qualifier,
+      )).toThrow(/qualifier/u);
+    }
   });
 
   it("separates workspace and qualifier domains and never emits legacy IDs canonically", () => {
