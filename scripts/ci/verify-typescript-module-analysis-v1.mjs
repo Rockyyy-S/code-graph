@@ -50,7 +50,8 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
       ]),
     }),
     Object.freeze({
-      expectedTestCount: 45,
+      /** 该计数是独立审阅后的权威，禁止从 reporter actual 动态派生并自授权。 */
+      expectedTestCount: 50,
       shardId: "sqlite-module-dependencies",
       tests: Object.freeze([
         "tests/unit/sqlite-module-dependencies.test.ts",

@@ -89,7 +89,8 @@ function createProcessResult(stdout = "", overrides: Partial<FakeProcessResult> 
  * 通过真实 verifier 编排入口注入受控子进程结果，证明计数权威没有停留在静态 manifest。
  */
 function runStoryVerifierWithOverrides(overrides: ReadonlyMap<number, FakeProcessResult> = new Map()) {
-  const expectedCounts = [273, 45, 6] as const;
+  /** 独立写死 273 + 50 + 6，禁止从被测 manifest 或 reporter 反推期望值。 */
+  const expectedCounts = [273, 50, 6] as const;
   let vitestIndex = 0;
   const executePnpm = vi.fn((args: string[]) => {
     if (!args.includes("vitest")) {
@@ -313,7 +314,7 @@ describe("quality-gates.v1 registry", () => {
           ),
         },
         {
-          expectedTestCount: 45,
+          expectedTestCount: 50,
           shardId: "sqlite-module-dependencies",
           tests: ["tests/unit/sqlite-module-dependencies.test.ts"],
         },
@@ -330,11 +331,11 @@ describe("quality-gates.v1 registry", () => {
     expect(new Set(unitTests).size).toBe(unitTests.length);
     expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
     expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(318);
+      .toBe(323);
     expect([
       ...unitShards,
       ...TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST.contractShards,
-    ].reduce((total, { expectedTestCount }) => total + expectedTestCount, 0)).toBe(324);
+    ].reduce((total, { expectedTestCount }) => total + expectedTestCount, 0)).toBe(329);
   });
 
   it("CR7-006 locks a clean-checkout build topology without relying on pre-existing dist", () => {
@@ -373,7 +374,7 @@ describe("quality-gates.v1 registry", () => {
     ])).toThrow(/BUILD_TOPOLOGY_INVALID/u);
   });
 
-  it("consumes exact 273 + 45 unit and 6 contract runtime attestations", () => {
+  it("consumes exact 273 + 50 unit and 6 contract runtime attestations", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { executePnpm, status } = runStoryVerifierWithOverrides();
@@ -381,7 +382,7 @@ describe("quality-gates.v1 registry", () => {
     expect(status).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
     expect(logSpy.mock.calls.flat().join(" ")).toContain("273/273 tests passed");
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("45/45 tests passed");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("50/50 tests passed");
     expect(logSpy.mock.calls.flat().join(" ")).toContain("6/6 tests passed");
 
     const commands = executePnpm.mock.calls.map(([args]) => args);
@@ -398,14 +399,25 @@ describe("quality-gates.v1 registry", () => {
   });
 
   it.each([
-    ["default unit", 0, 272],
-    ["SQLite unit", 1, 44],
-    ["contract", 2, 5],
-  ] as const)("rejects reduced %s runtime totals", (_label, shardIndex, reducedCount) => {
+    ["default unit lower drift", 0, 272],
+    ["SQLite unit lower drift", 1, 49],
+    ["contract lower drift", 2, 5],
+  ] as const)("rejects %s runtime totals", (_label, shardIndex, reducedCount) => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([
       [shardIndex, createProcessResult(createPassingVitestReport(reducedCount))],
+    ]);
+
+    expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("VITEST_COUNT_MISMATCH");
+  });
+
+  it("rejects SQLite unit upper drift instead of accepting actual >= expected", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const overrides = new Map<number, FakeProcessResult>([
+      [1, createProcessResult(createPassingVitestReport(51))],
     ]);
 
     expect(runStoryVerifierWithOverrides(overrides).status).toBe(1);
