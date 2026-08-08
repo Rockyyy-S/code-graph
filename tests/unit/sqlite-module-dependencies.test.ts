@@ -1511,6 +1511,146 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     database.close();
   });
 
+  it("validates every legal terminal Job shape before committing schema v4", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    database.exec(`
+      INSERT INTO jobs(
+        id, workspace_key, kind, state, requested_at, started_at, completed_at,
+        error_code, error_log_id, base_graph_revision, result_graph_revision,
+        read_set_json, patch_digest, legacy_schema_version
+      ) VALUES
+        ('v3-failed', '${workspaceKey}', 'rebuild', 'failed',
+         '2026-07-27T00:00:02.000Z', '2026-07-27T00:00:03.000Z',
+         '2026-07-27T00:00:04.000Z', 'GRAPH_SCAN_FAILED', 'log-v3-failed', 1, 1,
+         NULL, NULL, NULL),
+        ('v3-cancelled', '${workspaceKey}', 'rebuild', 'cancelled',
+         '2026-07-27T00:00:05.000Z', '2026-07-27T00:00:06.000Z',
+         '2026-07-27T00:00:07.000Z', NULL, NULL, 1, 1, NULL, NULL, NULL),
+        ('v3-partial', '${workspaceKey}', 'rebuild', 'partial',
+         '2026-07-27T00:00:08.000Z', '2026-07-27T00:00:09.000Z',
+         '2026-07-27T00:00:10.000Z', NULL, NULL, 1, 1, NULL, NULL, NULL),
+        ('v1-failed-history', '${workspaceKey}', 'initial-index', 'failed',
+         '2026-07-26T23:59:50.000Z', '2026-07-26T23:59:51.000Z',
+         '2026-07-26T23:59:52.000Z', 'GRAPH_SCAN_FAILED', 'log-v1-failed', NULL, NULL,
+         NULL, NULL, 1);
+    `);
+
+    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+
+    expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect(database.prepare(`
+      SELECT id, state, base_graph_revision, result_graph_revision, legacy_schema_version
+      FROM jobs WHERE id IN ('v3-failed', 'v3-cancelled', 'v3-partial', 'v1-failed-history')
+      ORDER BY id
+    `).all()).toEqual([
+      {
+        base_graph_revision: null,
+        id: "v1-failed-history",
+        legacy_schema_version: 1,
+        result_graph_revision: null,
+        state: "failed",
+      },
+      {
+        base_graph_revision: 1,
+        id: "v3-cancelled",
+        legacy_schema_version: null,
+        result_graph_revision: 1,
+        state: "cancelled",
+      },
+      {
+        base_graph_revision: 1,
+        id: "v3-failed",
+        legacy_schema_version: null,
+        result_graph_revision: 1,
+        state: "failed",
+      },
+      {
+        base_graph_revision: 1,
+        id: "v3-partial",
+        legacy_schema_version: null,
+        result_graph_revision: 1,
+        state: "partial",
+      },
+    ]);
+    database.close();
+  });
+
+  it.each(["failed", "cancelled", "partial"] as const)(
+    "rejects malformed %s history before any schema-v4 mutation",
+    async (state) => {
+      const databasePath = await createDatabasePath();
+      await seedLegacyV3CompositeDatabase(databasePath);
+      const database = new RawSqlite(databasePath);
+      database.prepare(`
+        INSERT INTO jobs(
+          id, workspace_key, kind, state, requested_at, started_at, completed_at,
+          error_code, error_log_id, base_graph_revision, result_graph_revision,
+          read_set_json, patch_digest, legacy_schema_version
+        ) VALUES (?, ?, 'rebuild', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL)
+      `).run(
+        `malformed-${state}`,
+        workspaceKey,
+        state,
+        "2026-07-27T00:00:11.000Z",
+        "2026-07-27T00:00:12.000Z",
+        "2026-07-27T00:00:13.000Z",
+        null,
+        state === "failed" ? "log-without-code" : null,
+        state === "cancelled" ? 2 : 1,
+        state === "partial" ? "{}" : null,
+        state === "partial" ? "f".repeat(64) : null,
+      );
+      const before = readApplicationState(database);
+
+      expect(() => applyAd4EdgeIdentityMigration(database as never, { digestPort })).toThrow();
+
+      expect(databaseVersion(database)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
+      expect(readApplicationState(database)).toEqual(before);
+      database.close();
+    },
+  );
+
+  it("uses deterministic unique old_id indexes for every correlated rekey lookup", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    let edgeIndexes: unknown[] = [];
+    let evidenceIndexes: unknown[] = [];
+    let queryPlan: unknown[] = [];
+
+    applyAd4EdgeIdentityMigration(database as never, {
+      digestPort,
+      faultInjector: ({ stage }) => {
+        if (stage !== "edge") {return;}
+        edgeIndexes = database.prepare("PRAGMA temp.index_list('ad4_edge_rekey')").all();
+        evidenceIndexes = database.prepare("PRAGMA temp.index_list('ad4_evidence_rekey')").all();
+        queryPlan = database.prepare(`
+          EXPLAIN QUERY PLAN
+          UPDATE evidence
+          SET edge_id = (
+            SELECT new_id FROM temp.ad4_edge_rekey WHERE old_id = evidence.edge_id
+          )
+          WHERE EXISTS (
+            SELECT 1 FROM temp.ad4_edge_rekey WHERE old_id = evidence.edge_id
+          )
+        `).all();
+      },
+    });
+
+    expect(edgeIndexes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "ad4_edge_rekey_old_id_idx", unique: 1 }),
+    ]));
+    expect(evidenceIndexes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "ad4_evidence_rekey_old_id_idx", unique: 1 }),
+    ]));
+    expect(queryPlan).toEqual(expect.arrayContaining([
+      expect.objectContaining({ detail: expect.stringContaining("ad4_edge_rekey_old_id_idx") }),
+    ]));
+    database.close();
+  });
+
   it("keeps schema-v1 current evidence-less while rekeying its real hierarchy edges", async () => {
     const databasePath = await createDatabasePath();
     const fixture = seedLegacyV1CurrentDatabase(databasePath);

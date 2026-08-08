@@ -104,7 +104,7 @@ interface WorkspaceCommitRow {
 
 interface SucceededJobRow {
   base_graph_revision: number | null;
-  completed_at: string;
+  completed_at: string | null;
   id: string;
   kind: "initial-index" | "rebuild";
   legacy_schema_version: number | null;
@@ -113,6 +113,24 @@ interface SucceededJobRow {
   result_graph_revision: number | null;
   workspace_key: string;
 }
+
+interface TerminalJobRow extends SucceededJobRow {
+  error_code: string | null;
+  error_log_id: string | null;
+  requested_at: string;
+  started_at: string | null;
+  state: "cancelled" | "failed" | "partial" | "succeeded";
+  workspace_graph_revision: number | null;
+}
+
+/** failed Job 只允许持久化 Story 1.4 冻结的稳定错误码。 */
+const PERSISTED_INDEX_JOB_ERROR_CODES = new Set([
+  "GRAPH_INPUT_CHANGED_DURING_BUILD",
+  "GRAPH_IGNORE_CONFIG_UNSUPPORTED",
+  "GRAPH_SCAN_FAILED",
+  "GRAPH_SCAN_LIMIT_EXCEEDED",
+  "GRAPH_WRITE_FAILED",
+]);
 
 /** 顶层只读 preflight 接受 absent/v1/v2/v3/v4，拒绝未来版本与未知表。 */
 export function assertAd4EdgeIdentitySchemaSupported(database: Database.Database): void {
@@ -154,10 +172,10 @@ export function applyAd4EdgeIdentityMigration(
     }
     if (version === AD4_EDGE_IDENTITY_SCHEMA_VERSION) {
       /**
-       * store 会在绑定 current、裁剪 retention 后完整派生保留历史；这里仅做 v4
-       * schema/身份/拓扑与 current 证据回验，避免在裁剪前重复扫描全部 succeeded history。
+       * reopen 必须在任何恢复或裁剪前验证全部 terminal history，再回验 current 绑定。
        */
       assertAd4ModuleDependencySchemaIntegrity(database);
+      assertTerminalJobHistory(database, options.digestPort);
       assertCurrentCommittedState(database, options.digestPort, "canonical", false);
       return false;
     }
@@ -167,7 +185,7 @@ export function applyAd4EdgeIdentityMigration(
 
     /** v3 必须先按旧编码 byte-for-byte 回验，禁止把损坏身份误认成迁移输入。 */
     assertModuleDependencySchemaIntegrity(database);
-    assertHistoricalSucceededJobEvidence(database, options.digestPort);
+    assertTerminalJobHistory(database, options.digestPort);
     assertCurrentCommittedState(database, options.digestPort, "legacy", true);
 
     const edgeMappings = buildEdgeMappings(readEdgeIdentityRows(database));
@@ -251,7 +269,7 @@ export function assertAd4EdgeIdentitySchemaIntegrity(
     throw new Error("SQLite AD-4 schema 尚未完成 v4 migration。");
   }
   assertAd4ModuleDependencySchemaIntegrity(database);
-  assertHistoricalSucceededJobEvidence(database, digestPort);
+  assertTerminalJobHistory(database, digestPort);
   assertCurrentCommittedState(database, digestPort, "canonical", false);
 }
 
@@ -324,6 +342,10 @@ function createMigrationMaps(
       new_id TEXT NOT NULL,
       new_edge_id TEXT NOT NULL
     );
+    CREATE UNIQUE INDEX temp.ad4_edge_rekey_old_id_idx
+    ON ad4_edge_rekey(old_id);
+    CREATE UNIQUE INDEX temp.ad4_evidence_rekey_old_id_idx
+    ON ad4_evidence_rekey(old_id);
   `);
   const insertEdge = database.prepare(`
     INSERT INTO temp.ad4_edge_rekey(old_id, new_id, tuple_key) VALUES (?, ?, ?)
@@ -406,6 +428,78 @@ function migrateCurrentCommittedDigests(
     `).run(patchDigest, workspace.workspace_key).changes);
     upsertMeta(database, committedReadSetDigestMetaKey(workspace.workspace_key), readSetDigest);
   }
+}
+
+/**
+ * terminal history 必须在任何临时映射或持久 mutation 前完成全量验证。
+ *
+ * 非 succeeded 状态没有可提交的 read-set/patch，revision 只能停留在 logical base；
+ * succeeded 的完整证据继续交给同一快照下的身份与摘要派生校验。
+ */
+function assertTerminalJobHistory(
+  database: Database.Database,
+  digestPort: CanonicalDigestPort,
+): void {
+  const rows = database.prepare(`
+    SELECT jobs.id, jobs.workspace_key, jobs.kind, jobs.state,
+           jobs.requested_at, jobs.started_at, jobs.completed_at,
+           jobs.error_code, jobs.error_log_id, jobs.base_graph_revision,
+           jobs.result_graph_revision, jobs.read_set_json, jobs.patch_digest,
+           jobs.legacy_schema_version,
+           workspace.graph_revision AS workspace_graph_revision
+    FROM jobs
+    INNER JOIN workspace ON workspace.workspace_key = jobs.workspace_key
+    WHERE jobs.state IN ('succeeded', 'failed', 'partial', 'cancelled')
+    ORDER BY jobs.rowid
+  `).all() as ReadonlyArray<TerminalJobRow>;
+  for (const row of rows) {
+    const hasCanonicalTime =
+      isCanonicalUtcTimestamp(row.requested_at) &&
+      row.started_at !== null &&
+      isCanonicalUtcTimestamp(row.started_at) &&
+      isCanonicalUtcTimestamp(row.completed_at);
+    const hasMonotonicTime = hasCanonicalTime &&
+      Date.parse(row.requested_at) <= Date.parse(row.started_at!) &&
+      Date.parse(row.started_at!) <= Date.parse(row.completed_at!);
+    const hasValidRevisions =
+      (row.base_graph_revision === null || isPositiveSafeInteger(row.base_graph_revision)) &&
+      (row.result_graph_revision === null || isPositiveSafeInteger(row.result_graph_revision)) &&
+      (row.kind === "initial-index"
+        ? row.base_graph_revision === null
+        : row.kind === "rebuild" && row.base_graph_revision !== null) &&
+      (row.base_graph_revision === null || (
+        row.workspace_graph_revision !== null &&
+        row.base_graph_revision <= row.workspace_graph_revision
+      )) &&
+      (row.result_graph_revision === null || (
+        row.workspace_graph_revision !== null &&
+        row.result_graph_revision <= row.workspace_graph_revision
+      ));
+    const hasStateEvidence = row.state === "failed"
+      ? row.error_code !== null &&
+        PERSISTED_INDEX_JOB_ERROR_CODES.has(row.error_code) &&
+        row.error_log_id !== null &&
+        row.error_log_id.length > 0
+      : row.error_code === null && row.error_log_id === null;
+    const hasTerminalResult = row.state === "succeeded"
+      ? row.result_graph_revision !== null &&
+        (row.base_graph_revision === null || row.base_graph_revision <= row.result_graph_revision)
+      : row.result_graph_revision === row.base_graph_revision &&
+        row.read_set_json === null &&
+        row.patch_digest === null;
+    if (
+      row.id.length === 0 ||
+      !isSha256(row.workspace_key) ||
+      !hasMonotonicTime ||
+      !hasValidRevisions ||
+      !hasStateEvidence ||
+      !hasTerminalResult ||
+      (row.legacy_schema_version !== null && row.legacy_schema_version !== 1)
+    ) {
+      throw new Error("历史 terminal Job 合同不完整、证据越界或时间不单调。");
+    }
+  }
+  assertHistoricalSucceededJobEvidence(database, digestPort);
 }
 
 /** 历史 succeeded Job 保持原字节证据，但必须在迁移前后仍可按 legacy/canonical 规则验证。 */
@@ -1083,6 +1177,20 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+/** 接受秒或毫秒精度的真实 UTC 时间，拒绝日期溢出与等价非规范表示。 */
+function isCanonicalUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{3})?Z$/u.exec(value);
+  if (match === null) {
+    return false;
+  }
+  const canonical = match[2] === undefined ? `${match[1]}.000Z` : value;
+  const parsed = new Date(canonical);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === canonical;
 }
 
 function readSchemaVersion(database: Database.Database): number | null {
