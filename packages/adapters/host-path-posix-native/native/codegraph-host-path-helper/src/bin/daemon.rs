@@ -5,7 +5,7 @@ mod linux {
         fs::{self, OpenOptions},
         io::Write,
         os::fd::{AsRawFd, FromRawFd},
-        os::unix::{fs::OpenOptionsExt, net::{UnixListener, UnixStream}},
+        os::unix::{fs::{MetadataExt, OpenOptionsExt}, net::{UnixListener, UnixStream}},
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -127,6 +127,11 @@ mod linux {
 
     fn create_daemon_epoch(boot_id: &str, socket_path: &Path) -> Result<String, HelperError> {
         let parent = socket_path.parent().ok_or_else(|| HelperError::protocol("SOCKET_PARENT"))?;
+        // daemon epoch 不是密钥，但 bridge 必须在受保护 runtime 目录的授权组内读取它。
+        // 以父目录的 group 作为唯一授权边界，避免受 umask 影响而落成 root-only 文件。
+        let parent_gid = fs::metadata(parent)
+            .map_err(|_| HelperError::protocol("EPOCH_PARENT"))?
+            .gid();
         let sequence = monotonic_nanoseconds()?;
         let epoch = hex::encode(Sha256::digest(format!("{boot_id}:{}:{sequence}", std::process::id())));
         let destination = parent.join("daemon.epoch");
@@ -137,12 +142,39 @@ mod linux {
             .mode(0o644)
             .open(&temporary)
             .map_err(|_| HelperError::protocol("EPOCH_CREATE"))?;
+        // 显式设置 group/mode；仅依赖 OpenOptions.mode 会被 systemd 的 UMask=0077 收紧。
+        if unsafe { libc::fchown(file.as_raw_fd(), !0, parent_gid) } != 0 {
+            return Err(HelperError::protocol("EPOCH_GROUP"));
+        }
+        if unsafe { libc::fchmod(file.as_raw_fd(), 0o640) } != 0 {
+            return Err(HelperError::protocol("EPOCH_MODE"));
+        }
         file.write_all(epoch[..32].as_bytes())
             .and_then(|_| file.write_all(b"\n"))
             .and_then(|_| file.sync_all())
             .map_err(|_| HelperError::protocol("EPOCH_WRITE"))?;
         fs::rename(&temporary, &destination).map_err(|_| HelperError::protocol("EPOCH_RENAME"))?;
         Ok(epoch[..32].to_owned())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::create_daemon_epoch;
+        use std::{fs, os::unix::fs::MetadataExt};
+
+        #[test]
+        fn daemon_epoch_inherits_runtime_group_and_group_read_mode() {
+            let runtime = tempfile::tempdir().expect("runtime tempdir");
+            let socket = runtime.path().join("helper.sock");
+            let epoch = create_daemon_epoch("boot-test", &socket).expect("daemon epoch");
+            let epoch_path = runtime.path().join("daemon.epoch");
+            let epoch_metadata = fs::metadata(&epoch_path).expect("epoch metadata");
+            let runtime_metadata = fs::metadata(runtime.path()).expect("runtime metadata");
+
+            assert_eq!(epoch_metadata.gid(), runtime_metadata.gid());
+            assert_eq!(epoch_metadata.mode() & 0o777, 0o640);
+            assert_eq!(fs::read_to_string(epoch_path).expect("epoch contents"), format!("{epoch}\n"));
+        }
     }
 
     fn parse_args(values: Vec<String>) -> Result<Args, HelperError> {

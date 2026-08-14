@@ -35,9 +35,28 @@ import {
 const temporaryRoots: string[] = [];
 const hostPathIdentityHelpers: ServiceScopedWin32HostPathIdentityHelper[] = [];
 
+/** Hosted Windows 偶尔无法在首次 200ms 观察到已启动的 shutdown；仅对该稳定超时重试一次。 */
+async function closeHostPathIdentityHelper(
+  helper: ServiceScopedWin32HostPathIdentityHelper,
+): Promise<void> {
+  try {
+    await helper.close();
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "HOST_PATH_HELPER_CLOSE_TIMEOUT"
+    ) {
+      throw error;
+    }
+    await helper.close();
+  }
+}
+
 /** 仅删除本测试通过 mkdtemp 创建并登记的隔离目录。 */
 afterEach(async () => {
-  await Promise.all(hostPathIdentityHelpers.splice(0).map((helper) => helper.close()));
+  await Promise.all(hostPathIdentityHelpers.splice(0).map(closeHostPathIdentityHelper));
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
   );
