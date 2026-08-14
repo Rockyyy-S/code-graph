@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -77,6 +78,154 @@ pub enum OutputExpectationV1 {
 
 pub struct LinuxSnapshotBackend<E> {
     executor: E,
+}
+
+trait RuntimeDirectoryOps {
+    fn create_dir(&mut self, path: &Path) -> io::Result<()>;
+    fn remove_dir(&mut self, path: &Path) -> io::Result<()>;
+    fn set_directory_mode(&mut self, path: &Path, mode: u32) -> io::Result<()>;
+}
+
+#[cfg(target_os = "linux")]
+struct SystemRuntimeDirectoryOps;
+
+#[cfg(target_os = "linux")]
+impl RuntimeDirectoryOps for SystemRuntimeDirectoryOps {
+    fn create_dir(&mut self, path: &Path) -> io::Result<()> {
+        std::fs::create_dir(path)
+    }
+
+    fn remove_dir(&mut self, path: &Path) -> io::Result<()> {
+        std::fs::remove_dir(path)
+    }
+
+    fn set_directory_mode(&mut self, path: &Path, mode: u32) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+}
+
+struct RuntimeDirectoryGuard<'a, O: RuntimeDirectoryOps> {
+    backend: SnapshotBackendKindV1,
+    mount_root_owned: bool,
+    ops: &'a mut O,
+    plan: &'a SnapshotPlanV1,
+    request_root_owned: bool,
+}
+
+impl<'a, O: RuntimeDirectoryOps> RuntimeDirectoryGuard<'a, O> {
+    fn acquire(
+        ops: &'a mut O,
+        plan: &'a SnapshotPlanV1,
+        backend: SnapshotBackendKindV1,
+    ) -> Result<Self, HelperError> {
+        ops.create_dir(&plan.request_root)
+            .map_err(|_| HelperError::snapshot("SNAPSHOT_DIRECTORY_CREATE", false))?;
+        // request_root 一旦创建成功便立即归 guard 所有，后续 chmod、mkdir 与捕获错误不得绕过清理。
+        let mut guard = Self {
+            backend,
+            mount_root_owned: false,
+            ops,
+            plan,
+            request_root_owned: true,
+        };
+        match guard.prepare() {
+            Ok(()) => Ok(guard),
+            Err(error) => guard.cleanup().and(Err(error)),
+        }
+    }
+
+    fn prepare(&mut self) -> Result<(), HelperError> {
+        self.ops.set_directory_mode(&self.plan.request_root, 0o700)
+            .map_err(|_| HelperError::snapshot("SNAPSHOT_DIRECTORY_MODE", false))?;
+        if self.backend != SnapshotBackendKindV1::Btrfs {
+            self.ops.create_dir(&self.plan.mount_root)
+                .map_err(|_| HelperError::snapshot("VIEW_DIRECTORY_CREATE", false))?;
+            self.mount_root_owned = true;
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), HelperError> {
+        let mut cleanup_error = None;
+        if self.mount_root_owned {
+            match self.ops.remove_dir(&self.plan.mount_root) {
+                Ok(()) => self.mount_root_owned = false,
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    self.mount_root_owned = false;
+                }
+                Err(_) => {
+                    cleanup_error = Some(HelperError::cleanup("VIEW_DIRECTORY_CLEANUP_FAILED"));
+                }
+            }
+        }
+        if self.request_root_owned {
+            match self.ops.remove_dir(&self.plan.request_root) {
+                Ok(()) => self.request_root_owned = false,
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    self.request_root_owned = false;
+                }
+                Err(_) if cleanup_error.is_none() => {
+                    cleanup_error = Some(HelperError::cleanup("RUNTIME_DIRECTORY_CLEANUP_FAILED"));
+                }
+                Err(_) => {}
+            }
+        }
+        cleanup_error.map_or(Ok(()), Err)
+    }
+}
+
+impl<O: RuntimeDirectoryOps> Drop for RuntimeDirectoryGuard<'_, O> {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn with_runtime_directory_ownership<T, O, F>(
+    ops: &mut O,
+    plan: &SnapshotPlanV1,
+    backend: SnapshotBackendKindV1,
+    action: F,
+) -> Result<T, HelperError>
+where
+    O: RuntimeDirectoryOps,
+    F: FnOnce() -> (Result<T, HelperError>, Result<(), HelperError>),
+{
+    let mut guard = RuntimeDirectoryGuard::acquire(ops, plan, backend)?;
+    let (capture_result, snapshot_cleanup) = action();
+    let directory_cleanup = guard.cleanup();
+    match (capture_result, snapshot_cleanup.and(directory_cleanup)) {
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(capture), Ok(())) => Ok(capture),
+    }
+}
+
+/// 按 mountinfo 的四种八进制转义先恢复原始字节，最后只执行一次严格 UTF-8 解码。
+pub fn decode_mountinfo_field(value: &[u8]) -> Result<String, HelperError> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] == b'\\' {
+            let code = value.get(index + 1..index + 4)
+                .ok_or_else(|| HelperError::namespace("MOUNTINFO_ESCAPE"))?;
+            decoded.push(match code {
+                b"040" => b' ',
+                b"011" => b'\t',
+                b"012" => b'\n',
+                b"134" => b'\\',
+                _ => return Err(HelperError::namespace("MOUNTINFO_ESCAPE")),
+            });
+            index += 4;
+        } else {
+            // 普通片段保持原始 UTF-8 bytes，禁止逐 byte 转成 Unicode scalar。
+            decoded.push(value[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| HelperError::namespace("MOUNTINFO_ENCODING"))
 }
 
 impl<E> LinuxSnapshotBackend<E> {
@@ -538,70 +687,72 @@ impl<E: CommandExecutor> SnapshotBackend for LinuxSnapshotBackend<E> {
         }
         #[cfg(target_os = "linux")]
         {
-            use std::{fs, os::fd::AsRawFd, os::unix::fs::PermissionsExt};
+            use std::os::fd::AsRawFd;
 
             let plan = plan_snapshot(request)?;
             let snapshot_root = Path::new(SNAPSHOT_ROOT);
             if !snapshot_root.is_dir() {
                 return Err(HelperError::snapshot("SNAPSHOT_ROOT_MISSING", false));
             }
-            fs::create_dir(&plan.request_root)
-                .map_err(|_| HelperError::snapshot("SNAPSHOT_DIRECTORY_CREATE", false))?;
-            fs::set_permissions(&plan.request_root, fs::Permissions::from_mode(0o700))
-                .map_err(|_| HelperError::snapshot("SNAPSHOT_DIRECTORY_MODE", false))?;
-            if request.snapshot.backend != SnapshotBackendKindV1::Btrfs {
-                fs::create_dir(&plan.mount_root)
-                    .map_err(|_| HelperError::snapshot("VIEW_DIRECTORY_CREATE", false))?;
-            }
-            // fd 3 保留给 systemd socket activation；收到的 root FD 只复制到固定 slot 9。
-            if root_fd != crate::transport::DAEMON_ROOT_FD {
-                let directory_cleanup = cleanup_runtime_directories(&plan, request.snapshot.backend);
-                return directory_cleanup.and(Err(HelperError::authentication("ROOT_FD_SLOT_MISMATCH")));
-            }
-            let mut completed_mutations = BTreeSet::new();
-            let capture_result = (|| {
-                let mut snapshot_id = None;
-                for step in &plan.create {
-                    let candidate_snapshot_id = execute_plan_step(
+            let mut directory_ops = SystemRuntimeDirectoryOps;
+            with_runtime_directory_ownership(
+                &mut directory_ops,
+                &plan,
+                request.snapshot.backend,
+                || {
+                    let mut completed_mutations = BTreeSet::new();
+                    let capture_result = (|| {
+                        // fd 3 保留给 systemd socket activation；收到的 root FD 只复制到固定 slot 9。
+                        if root_fd != crate::transport::DAEMON_ROOT_FD {
+                            return Err(HelperError::authentication("ROOT_FD_SLOT_MISMATCH"));
+                        }
+                        let mut snapshot_id = None;
+                        for step in &plan.create {
+                            let candidate_snapshot_id = execute_plan_step(
+                                &mut self.executor,
+                                step,
+                                request.deadline_unix_ms,
+                                &mut completed_mutations,
+                            )?;
+                            bind_snapshot_id(&mut snapshot_id, candidate_snapshot_id)?;
+                        }
+                        ensure_request_deadline(request.deadline_unix_ms)?;
+                        let view = crate::path_boundary::open_directory(&plan.view_root)?;
+                        let view_identity = crate::path_boundary::stat_identity_fd(view.as_raw_fd())?;
+                        let (root_object_id, items) = crate::path_boundary::capture_batch(
+                            &view,
+                            &request.candidates,
+                        )?;
+                        ensure_request_deadline(request.deadline_unix_ms)?;
+                        for step in &plan.postflight {
+                            let candidate_snapshot_id = execute_plan_step(
+                                &mut self.executor,
+                                step,
+                                request.deadline_unix_ms,
+                                &mut completed_mutations,
+                            )?;
+                            bind_snapshot_id(&mut snapshot_id, candidate_snapshot_id)?;
+                        }
+                        Ok(BackendCaptureV1 {
+                            items,
+                            root_object_id,
+                            snapshot_fence: request.snapshot.fence_id.clone(),
+                            snapshot_view: request.snapshot.view_id.clone(),
+                            volume_id: capture_volume_id(
+                                request,
+                                &view_identity,
+                                snapshot_id.as_deref(),
+                            )?,
+                        })
+                    })();
+                    let cleanup_result = cleanup_plan(
                         &mut self.executor,
-                        step,
-                        request.deadline_unix_ms,
-                        &mut completed_mutations,
-                    )?;
-                    bind_snapshot_id(&mut snapshot_id, candidate_snapshot_id)?;
-                }
-                ensure_request_deadline(request.deadline_unix_ms)?;
-                let view = crate::path_boundary::open_directory(&plan.view_root)?;
-                let view_identity = crate::path_boundary::stat_identity_fd(view.as_raw_fd())?;
-                let (root_object_id, items) = crate::path_boundary::capture_batch(
-                    &view,
-                    &request.candidates,
-                )?;
-                ensure_request_deadline(request.deadline_unix_ms)?;
-                for step in &plan.postflight {
-                    let candidate_snapshot_id = execute_plan_step(
-                        &mut self.executor,
-                        step,
-                        request.deadline_unix_ms,
-                        &mut completed_mutations,
-                    )?;
-                    bind_snapshot_id(&mut snapshot_id, candidate_snapshot_id)?;
-                }
-                Ok(BackendCaptureV1 {
-                    items,
-                    root_object_id,
-                    snapshot_fence: request.snapshot.fence_id.clone(),
-                    snapshot_view: request.snapshot.view_id.clone(),
-                    volume_id: capture_volume_id(request, &view_identity, snapshot_id.as_deref())?,
-                })
-            })();
-            let cleanup_result = cleanup_plan(&mut self.executor, &plan, &completed_mutations);
-            let directory_cleanup = cleanup_runtime_directories(&plan, request.snapshot.backend);
-            match (capture_result, cleanup_result.and(directory_cleanup)) {
-                (_, Err(error)) => Err(error),
-                (Err(error), Ok(())) => Err(error),
-                (Ok(capture), Ok(())) => Ok(capture),
-            }
+                        &plan,
+                        &completed_mutations,
+                    );
+                    (capture_result, cleanup_result)
+                },
+            )
         }
     }
 }
@@ -637,21 +788,6 @@ fn remaining_request_ms(deadline_unix_ms: u64) -> Result<u64, HelperError> {
     deadline_unix_ms.checked_sub(now)
         .filter(|remaining| *remaining > 0)
         .ok_or_else(|| HelperError::deadline("REQUEST_EXPIRED_DURING_CAPTURE"))
-}
-
-#[cfg(target_os = "linux")]
-fn cleanup_runtime_directories(
-    plan: &SnapshotPlanV1,
-    backend: SnapshotBackendKindV1,
-) -> Result<(), HelperError> {
-    use std::fs;
-
-    // 绝不递归删除 mount target；若卸载失败，remove_dir 只会安全地失败并保留证据。
-    if backend != SnapshotBackendKindV1::Btrfs && fs::remove_dir(&plan.mount_root).is_err() {
-        return Err(HelperError::cleanup("VIEW_DIRECTORY_CLEANUP_FAILED"));
-    }
-    fs::remove_dir(&plan.request_root)
-        .map_err(|_| HelperError::cleanup("RUNTIME_DIRECTORY_CLEANUP_FAILED"))
 }
 
 fn cleanup_plan<E: CommandExecutor>(
@@ -940,7 +1076,11 @@ fn lvm_uuid_matches(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        io,
+        path::{Path, PathBuf},
+    };
 
     use crate::{
         canonical::canonical_sha256,
@@ -952,8 +1092,45 @@ mod tests {
         },
     };
 
-    use super::{MutationV1, OutputExpectationV1, cleanup_plan, plan_snapshot, validate_output};
+    use super::{
+        MutationV1, OutputExpectationV1, RuntimeDirectoryOps, cleanup_plan,
+        decode_mountinfo_field, plan_snapshot, validate_output,
+        with_runtime_directory_ownership,
+    };
     use crate::command::{CommandOutput, testing::FakeCommandExecutor};
+
+    #[derive(Default)]
+    struct FakeRuntimeDirectoryOps {
+        directories: BTreeSet<PathBuf>,
+        fail_create_for: Option<PathBuf>,
+        fail_mode: bool,
+    }
+
+    impl RuntimeDirectoryOps for FakeRuntimeDirectoryOps {
+        fn create_dir(&mut self, path: &Path) -> io::Result<()> {
+            if self.fail_create_for.as_deref() == Some(path) {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "create denied"));
+            }
+            self.directories.insert(path.to_path_buf());
+            Ok(())
+        }
+
+        fn remove_dir(&mut self, path: &Path) -> io::Result<()> {
+            if self.directories.remove(path) {
+                Ok(())
+            } else {
+                Err(io::Error::new(io::ErrorKind::NotFound, "directory missing"))
+            }
+        }
+
+        fn set_directory_mode(&mut self, _path: &Path, _mode: u32) -> io::Result<()> {
+            if self.fail_mode {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "chmod denied"))
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn request(volume_identity: VolumeIdentityV1, backend: SnapshotBackendKindV1) -> AuthenticatedRequestV1 {
         let candidates = vec![BridgeCandidateV1 {
@@ -1169,6 +1346,83 @@ mod tests {
                 plan.mount_root.to_str(),
             );
         }
+    }
+
+    #[test]
+    fn mountinfo_utf8_and_escape_decoding_is_byte_exact() {
+        let decoded = decode_mountinfo_field("/数据/根\\040目录\\134文件\\011x\\012y".as_bytes())
+            .expect("valid mountinfo");
+
+        assert_eq!(decoded.as_bytes(), "/数据/根 目录\\文件\tx\ny".as_bytes());
+    }
+
+    #[test]
+    fn mountinfo_malformed_escape_and_utf8_fail_closed() {
+        for malformed in [b"/root\\".as_slice(), b"/root\\04".as_slice(), b"/root\\041".as_slice()] {
+            assert_eq!(
+                decode_mountinfo_field(malformed).expect_err("malformed escape").code,
+                "MOUNTINFO_ESCAPE",
+            );
+        }
+        assert_eq!(
+            decode_mountinfo_field(b"/root/\xff").expect_err("invalid UTF-8").code,
+            "MOUNTINFO_ENCODING",
+        );
+    }
+
+    #[test]
+    fn runtime_directory_guard_cleans_setup_and_early_failures() {
+        let plan = plan_snapshot(&request(
+            VolumeIdentityV1::Zfs {
+                dataset: "tank/repo".into(),
+                dataset_guid: "123456789".into(),
+                indexing_root_offset: "packages/app".into(),
+                mount_id: 11,
+                pool: "tank".into(),
+            },
+            SnapshotBackendKindV1::Zfs,
+        )).expect("plan");
+
+        let mut chmod_failure = FakeRuntimeDirectoryOps {
+            fail_mode: true,
+            ..FakeRuntimeDirectoryOps::default()
+        };
+        let chmod_error = with_runtime_directory_ownership(
+            &mut chmod_failure,
+            &plan,
+            SnapshotBackendKindV1::Zfs,
+            || (Ok(()), Ok(())),
+        ).expect_err("chmod failure");
+        assert_eq!(chmod_error.code, "SNAPSHOT_DIRECTORY_MODE");
+        assert!(chmod_failure.directories.is_empty());
+
+        let mut mount_root_failure = FakeRuntimeDirectoryOps {
+            fail_create_for: Some(plan.mount_root.clone()),
+            ..FakeRuntimeDirectoryOps::default()
+        };
+        let mount_error = with_runtime_directory_ownership(
+            &mut mount_root_failure,
+            &plan,
+            SnapshotBackendKindV1::Zfs,
+            || (Ok(()), Ok(())),
+        ).expect_err("mount root failure");
+        assert_eq!(mount_error.code, "VIEW_DIRECTORY_CREATE");
+        assert!(mount_root_failure.directories.is_empty());
+
+        let mut early_failure = FakeRuntimeDirectoryOps::default();
+        let root_slot_error = with_runtime_directory_ownership(
+            &mut early_failure,
+            &plan,
+            SnapshotBackendKindV1::Zfs,
+            || (
+                Err::<(), _>(crate::protocol::HelperError::authentication("ROOT_FD_SLOT_MISMATCH")),
+                Ok(()),
+            ),
+        ).expect_err("root slot failure");
+        assert_eq!(root_slot_error.code, "ROOT_FD_SLOT_MISMATCH");
+        assert!(!early_failure.directories.contains(&plan.request_root));
+        assert!(!early_failure.directories.contains(&plan.mount_root));
+        assert!(!early_failure.directories.contains(&plan.view_root));
     }
 
     #[test]

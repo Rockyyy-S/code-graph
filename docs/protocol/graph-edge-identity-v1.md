@@ -25,6 +25,8 @@ qualifier 词汇：
 - `imports`: `value | type | dynamic`
 - `exports`: `star:value | star:type | reexport:{canonical-exported-name}:{canonical-imported-name}:value|type`
 
+`reexport` 的 exported/imported 两个 `ModuleExportName` 段分别使用既有解码语义读取，再由规范 serializer 重新编码；重新编码结果必须与输入逐字节相同。这是 edge 身份唯一性边界，不是普通格式检查：不可解码输入、非规范 percent 大小写、无必要 percent encoding、截断 percent 和内部 `%u` 退避表示全部 fail-closed。字面包含 `%u` 的合法名称使用标准 percent-encoding `%25u`，不与内部表示混淆。
+
 同一 tuple 重放只产生同一 ID；若同一 ID 对应不同 tuple，必须抛出稳定错误 `GRAPH_EDGE_ID_COLLISION`。禁止 salt、覆盖或 fallback。
 
 ## Legacy compatibility

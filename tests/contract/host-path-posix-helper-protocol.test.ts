@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   LINUX_HELPER_ABI_VERSION,
@@ -283,5 +284,34 @@ describe("Linux HostPath helper protocol v1 / ABI v2", () => {
         options,
       )).toThrow("Linux helper bridge 响应非法。");
     }
+  });
+
+  it("锁定 mountinfo byte-level UTF-8 解码与 malformed fail-closed 回归", async () => {
+    const backend = await readFile(new URL(
+      "../../packages/adapters/host-path-posix-native/native/codegraph-host-path-helper/src/backend.rs",
+      import.meta.url,
+    ), "utf8");
+    const bridge = await readFile(new URL(
+      "../../packages/adapters/host-path-posix-native/native/codegraph-host-path-helper/src/bin/bridge.rs",
+      import.meta.url,
+    ), "utf8");
+
+    expect(bridge).toContain("fs::read(\"/proc/self/mountinfo\")");
+    expect(bridge).toContain("decode_mountinfo_field(value)");
+    expect(backend).toContain("String::from_utf8(decoded)");
+    expect(backend).toContain("mountinfo_utf8_and_escape_decoding_is_byte_exact");
+    expect(backend).toContain("mountinfo_malformed_escape_and_utf8_fail_closed");
+  });
+
+  it("锁定 request_root 创建后的统一 cleanup ownership", async () => {
+    const backend = await readFile(new URL(
+      "../../packages/adapters/host-path-posix-native/native/codegraph-host-path-helper/src/backend.rs",
+      import.meta.url,
+    ), "utf8");
+
+    expect(backend).toContain("RuntimeDirectoryGuard::acquire");
+    expect(backend).toContain("with_runtime_directory_ownership");
+    expect(backend).toContain("runtime_directory_guard_cleans_setup_and_early_failures");
+    expect(backend).not.toContain("cleanup_runtime_directories");
   });
 });

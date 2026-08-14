@@ -145,6 +145,10 @@ async function validateStaticClosure() {
     "REQUEST_EXPIRED_DURING_CAPTURE",
     "SNAPSHOT_CLEANUP_FAILED",
     "completed_mutations",
+    "decode_mountinfo_field",
+    "MOUNTINFO_ENCODING",
+    "RuntimeDirectoryGuard",
+    "with_runtime_directory_ownership",
   ], "Rust security closure");
   if (joined.includes("remove_dir_all")) {
     throw new Error("snapshot mount target 禁止递归删除。 ");

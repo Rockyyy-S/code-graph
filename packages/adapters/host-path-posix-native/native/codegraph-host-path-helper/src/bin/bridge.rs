@@ -11,6 +11,7 @@ mod linux {
     };
 
     use codegraph_host_path_helper::{
+        backend::decode_mountinfo_field,
         canonical::{canonical_json, canonical_sha256, decode_frame, encode_frame},
         command::{CommandExecutor, CommandSpec, SystemCommandExecutor},
         path_boundary::{project_indexing_root_offset, stat_identity_fd},
@@ -414,20 +415,24 @@ mod linux {
     fn discover_volume_identity(
         root: &codegraph_host_path_helper::path_boundary::ObjectIdentityV1,
     ) -> Result<VolumeIdentityV1, HelperError> {
-        let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        let mountinfo = fs::read("/proc/self/mountinfo")
             .map_err(|_| HelperError::namespace("MOUNTINFO_UNREADABLE"))?;
-        let line = mountinfo.lines().find(|line| {
-            line.split_whitespace().next().and_then(|value| value.parse::<u64>().ok()) == Some(root.mount_id)
+        let line = mountinfo.split(|byte| *byte == b'\n').find(|line| {
+            mountinfo_fields(line).first().and_then(|value| {
+                std::str::from_utf8(value).ok()?.parse::<u64>().ok()
+            }) == Some(root.mount_id)
         }).ok_or_else(|| HelperError::namespace("MOUNTINFO_ENTRY_MISSING"))?;
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        let separator = fields.iter().position(|field| *field == "-")
+        let fields = mountinfo_fields(line);
+        let separator = fields.iter().position(|field| *field == b"-")
             .ok_or_else(|| HelperError::namespace("MOUNTINFO_INVALID"))?;
         if separator + 3 >= fields.len() || fields.len() < 6 {
             return Err(HelperError::namespace("MOUNTINFO_INVALID"));
         }
-        let filesystem = fields[separator + 1];
+        let filesystem = std::str::from_utf8(fields[separator + 1])
+            .map_err(|_| HelperError::namespace("MOUNTINFO_ENCODING"))?;
         let source = unescape_mountinfo(fields[separator + 2])?;
-        let super_options = fields[separator + 3];
+        let super_options = std::str::from_utf8(fields[separator + 3])
+            .map_err(|_| HelperError::namespace("MOUNTINFO_ENCODING"))?;
         match filesystem {
             "btrfs" => {
                 let subvolume_id = super_options.split(',')
@@ -560,8 +565,8 @@ mod linux {
     }
 
     fn discover_indexing_root_offset(
-        mount_root_field: &str,
-        mount_point_field: &str,
+        mount_root_field: &[u8],
+        mount_point_field: &[u8],
     ) -> Result<String, HelperError> {
         let mount_root = unescape_mountinfo(mount_root_field)?;
         let mount_point = unescape_mountinfo(mount_point_field)?;
@@ -601,29 +606,14 @@ mod linux {
         Ok((left, right))
     }
 
-    fn unescape_mountinfo(value: &str) -> Result<String, HelperError> {
-        let mut output = String::new();
-        let bytes = value.as_bytes();
-        let mut index = 0;
-        while index < bytes.len() {
-            if bytes[index] == b'\\' {
-                let code = bytes.get(index + 1..index + 4)
-                    .ok_or_else(|| HelperError::namespace("MOUNTINFO_ESCAPE"))?;
-                let decoded = match code {
-                    b"040" => ' ',
-                    b"011" => '\t',
-                    b"012" => '\n',
-                    b"134" => '\\',
-                    _ => return Err(HelperError::namespace("MOUNTINFO_ESCAPE")),
-                };
-                output.push(decoded);
-                index += 4;
-            } else {
-                output.push(bytes[index] as char);
-                index += 1;
-            }
-        }
-        Ok(output)
+    fn mountinfo_fields(line: &[u8]) -> Vec<&[u8]> {
+        line.split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty())
+            .collect()
+    }
+
+    fn unescape_mountinfo(value: &[u8]) -> Result<String, HelperError> {
+        decode_mountinfo_field(value)
     }
 
     fn backend_name(value: SnapshotBackendKindV1) -> &'static str {

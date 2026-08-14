@@ -16,3 +16,7 @@ _bmad/
 .agents/
 .github/
 **/graphify-out/
+.tmp-*/
+.playwright-*/
+.codex-tmp/
+想法.md
