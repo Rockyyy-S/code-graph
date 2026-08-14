@@ -433,14 +433,11 @@ mod linux {
         let filesystem = std::str::from_utf8(fields[separator + 1])
             .map_err(|_| HelperError::namespace("MOUNTINFO_ENCODING"))?;
         let source = unescape_mountinfo(fields[separator + 2])?;
-        let super_options = std::str::from_utf8(fields[separator + 3])
-            .map_err(|_| HelperError::namespace("MOUNTINFO_ENCODING"))?;
         match filesystem {
             "btrfs" => {
-                let subvolume_id = super_options.split(',')
-                    .find_map(|option| option.strip_prefix("subvolid="))
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .ok_or_else(|| HelperError::volume("BTRFS_SUBVOLUME_ID_MISSING"))?;
+                // mountinfo 的 subvolid 只描述挂载根；索引根可能是其下的独立子卷，
+                // 必须通过已打开的 root FD 查询真实 subvolume ID。
+                let subvolume_id = discover_btrfs_subvolume_id()?;
                 // btrfs exposes an anonymous filesystem device number through
                 // stat(2). Resolve the UUID using the actual mount source
                 // (for example /dev/loop0), whose rdev is also listed in
@@ -518,6 +515,32 @@ mod linux {
         }).ok_or_else(|| HelperError::volume("BTRFS_UUID_UNRESOLVED"))
     }
 
+    fn discover_btrfs_subvolume_id() -> Result<u64, HelperError> {
+        let output = SystemCommandExecutor.execute(&CommandSpec::fixed(
+            "/usr/bin/btrfs",
+            vec![
+                "subvolume".into(),
+                "show".into(),
+                "--raw".into(),
+                format!("/proc/self/fd/{ROOT_FD}"),
+            ],
+            5_000,
+        )?)?;
+        let stdout = std::str::from_utf8(&output.stdout)
+            .map_err(|_| HelperError::volume("BTRFS_SUBVOLUME_ID_ENCODING"))?;
+        parse_btrfs_subvolume_id(stdout)
+            .ok_or_else(|| HelperError::volume("BTRFS_SUBVOLUME_ID_MISSING"))
+    }
+
+    fn parse_btrfs_subvolume_id(stdout: &str) -> Option<u64> {
+        stdout.lines().find_map(|line| {
+            let (label, value) = line.trim_start().split_once(':')?;
+            label.eq_ignore_ascii_case("subvolume id")
+                .then(|| value.trim().parse::<u64>().ok().filter(|value| *value > 0))
+                .flatten()
+        })
+    }
+
     fn is_uuid(value: &str) -> bool {
         value.len() == 36 && value.bytes().enumerate().all(|(index, byte)| {
             matches!(index, 8 | 13 | 18 | 23) && byte == b'-' ||
@@ -542,7 +565,9 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use super::{discover_btrfs_uuid, discover_btrfs_uuid_from_sysfs};
+        use super::{
+            discover_btrfs_uuid, discover_btrfs_uuid_from_sysfs, parse_btrfs_subvolume_id,
+        };
         use std::fs;
 
         #[test]
@@ -565,6 +590,16 @@ mod linux {
             let error = discover_btrfs_uuid(source.path().to_str().expect("path"))
                 .expect_err("regular files are not btrfs devices");
             assert_eq!(error.code, "BTRFS_DEVICE_NOT_BLOCK");
+        }
+
+        #[test]
+        fn btrfs_subvolume_id_comes_from_the_open_indexing_root() {
+            assert_eq!(
+                parse_btrfs_subvolume_id("Name: platform-fix156-preflight\nSubvolume ID: 256\n"),
+                Some(256),
+            );
+            assert_eq!(parse_btrfs_subvolume_id("Subvolume ID: 0\n"), None);
+            assert_eq!(parse_btrfs_subvolume_id("Subvolume ID: invalid\n"), None);
         }
     }
 
