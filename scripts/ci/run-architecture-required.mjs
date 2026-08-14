@@ -343,7 +343,7 @@ export function sanitizeDiagnosticText(value) {
   text = text.replace(/(?<![a-z0-9_])[a-z]:[\\/][^\s"'<>|]+/giu, placeholder);
   text = text.replace(/(?<![:a-z0-9_])(?:\\\\|\/\/)[^\\/\s"'<>|]+[\\/][^\s"'<>|]+/giu, placeholder);
   text = text.replace(
-    /(^|[\s([{=,:;])\/(?:[^/\s"'<>|]+\/)*[^/\s"'<>|]+/gu,
+    /(^|[\s([{"'=,:;])\/(?:[^/\s"'<>|]+\/)*[^/\s"'<>|]+/gu,
     (_match, prefix) => `${prefix}${placeholder}`,
   );
   return text;

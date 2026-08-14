@@ -268,6 +268,7 @@ describe("architecture-required failure propagation", () => {
     ["Windows drive", "failed at C:\\repo\\cache\\tool.exe"],
     ["UNC", "failed at \\\\server\\share\\cache\\tool.exe"],
     ["POSIX", "failed at /home/user/cache/tool.mjs"],
+    ["quoted POSIX", "failed at '/g/2/cache/tool.mjs'"],
     ["file URL", "failed at file:///C:/repo/cache/tool.mjs"],
     ["mixed separators", "failed at D:\\repo/cache\\tool.mjs"],
   ] as const)("sanitizes %s absolute path text", (_label, message) => {
@@ -304,13 +305,17 @@ describe("architecture-required failure propagation", () => {
 
       const diagnosticText = JSON.stringify(await readRunnerDiagnostic(outputRoot));
       expect(diagnosticText.match(/\[absolute-path\]/gu)?.length).toBeGreaterThanOrEqual(3);
+      // basename 是允许发布的稳定元数据；仅把带目录的启动命令视为敏感路径。
+      const packageManagerPath = process.env.npm_execpath;
       for (const leaked of [
         "C:/repo/cache/deep.mjs",
         "server\\share\\nested",
         "/home/user/repository/top.mjs",
         path.resolve(outputRoot),
         process.execPath,
-        process.env.npm_execpath,
+        packageManagerPath?.includes("/") || packageManagerPath?.includes("\\")
+          ? packageManagerPath
+          : undefined,
       ]) {
         if (leaked !== undefined) {
           expect(diagnosticText).not.toContain(leaked);
