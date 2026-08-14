@@ -519,9 +519,8 @@ mod linux {
         let output = SystemCommandExecutor.execute(&CommandSpec::fixed(
             "/usr/bin/btrfs",
             vec![
-                "subvolume".into(),
-                "show".into(),
-                "--raw".into(),
+                "inspect-internal".into(),
+                "rootid".into(),
                 format!("/proc/self/fd/{ROOT_FD}"),
             ],
             5_000,
@@ -533,12 +532,10 @@ mod linux {
     }
 
     fn parse_btrfs_subvolume_id(stdout: &str) -> Option<u64> {
-        stdout.lines().find_map(|line| {
-            let (label, value) = line.trim_start().split_once(':')?;
-            label.eq_ignore_ascii_case("subvolume id")
-                .then(|| value.trim().parse::<u64>().ok().filter(|value| *value > 0))
-                .flatten()
-        })
+        let value = stdout.trim();
+        (!value.is_empty() && !value.bytes().any(|byte| byte.is_ascii_whitespace()))
+            .then(|| value.parse::<u64>().ok().filter(|value| *value > 0))
+            .flatten()
     }
 
     fn is_uuid(value: &str) -> bool {
@@ -594,12 +591,10 @@ mod linux {
 
         #[test]
         fn btrfs_subvolume_id_comes_from_the_open_indexing_root() {
-            assert_eq!(
-                parse_btrfs_subvolume_id("Name: platform-fix156-preflight\nSubvolume ID: 256\n"),
-                Some(256),
-            );
-            assert_eq!(parse_btrfs_subvolume_id("Subvolume ID: 0\n"), None);
-            assert_eq!(parse_btrfs_subvolume_id("Subvolume ID: invalid\n"), None);
+            assert_eq!(parse_btrfs_subvolume_id("256\n"), Some(256));
+            assert_eq!(parse_btrfs_subvolume_id("0\n"), None);
+            assert_eq!(parse_btrfs_subvolume_id("256 extra\n"), None);
+            assert_eq!(parse_btrfs_subvolume_id("invalid\n"), None);
         }
     }
 
