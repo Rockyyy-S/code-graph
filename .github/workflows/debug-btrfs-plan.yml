@@ -60,11 +60,15 @@ jobs:
           sudo /usr/bin/mount -t btrfs -o nosuid,nodev -- "$loop_device" /g
           sudo /usr/bin/btrfs subvolume create "$snapshot_root"
           sudo /usr/bin/touch "$snapshot_root/input.txt"
+          sudo chown -R "$(id -u):$(id -g)" "$snapshot_root"
+          sudo chmod 0700 "$snapshot_root"
           sudo install -d -o 0 -g 0 -m 0700 "$(dirname "$request_root")"
           sudo /usr/bin/mkdir -m 0700 "$request_root"
 
           # fd 9 mirrors the daemon-owned root slot and must be opened inside the
           # privileged command process; sudo itself intentionally closes inherited fds.
+          run_step subvolume-show-unprivileged /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs subvolume show --raw /proc/self/fd/9"
+          run_step rootid-unprivileged /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs inspect-internal rootid /proc/self/fd/9"
           run_step filesystem-show-root sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs filesystem show --raw /proc/self/fd/9"
           run_step subvolume-show-root sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs subvolume show --raw /proc/self/fd/9"
           run_step subvolume-list-root sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs subvolume list -o /proc/self/fd/9"
