@@ -1,0 +1,12 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "name": "codegraph-host-path-helper",
+  "documentNamespace": "https://codegraph.invalid/sbom/codegraph-host-path-helper/${RELEASE_DIGEST}",
+  "creationInfo": {
+    "created": "${SOURCE_DATE_EPOCH_ISO8601}",
+    "creators": ["Tool: cargo-cyclonedx-compatible-release-pipeline"]
+  },
+  "packages": []
+}

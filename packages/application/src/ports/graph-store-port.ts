@@ -1,6 +1,7 @@
 import type {
+  AnyGraphPatchV1,
+  CommittedCompositeGraphSnapshotV1,
   CommittedGraphSnapshotV1,
-  GraphPatchV1,
 } from "@codegraph/domain";
 
 /** application 层可观察的已提交图谱摘要。 */
@@ -51,7 +52,7 @@ export interface AtomicGraphUpdate {
   /** 上层在同一同步调用栈中包围事务 mutation，前后复核外部 read-set。 */
   finalReadSetFence: (commitMutation: () => void) => boolean;
   jobId: string;
-  patch: GraphPatchV1;
+  patch: AnyGraphPatchV1;
   summary: Omit<StoredIndexSummary, "graphRevision">;
 }
 
@@ -78,5 +79,5 @@ export interface GraphStorePort {
   markJobRunning: (jobId: string, startedAt: string) => void;
   markWorkspaceStale: () => void;
   readBootstrapState: () => GraphStoreBootstrapState;
-  readCommittedSnapshot: () => CommittedGraphSnapshotV1;
+  readCommittedSnapshot: () => CommittedCompositeGraphSnapshotV1;
 }

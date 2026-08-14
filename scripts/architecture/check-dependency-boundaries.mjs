@@ -29,6 +29,10 @@ const externalDependencyAllowlistByRole = new Map([
   ["client-app", new Set(["@types/vscode", "esbuild", "typescript"])],
   ["renderer-app", new Set()],
 ]);
+/** 只允许明确职责的 workspace 扩展其角色级第三方依赖集合。 */
+const externalDependencyAllowlistByWorkspace = new Map([
+  ["packages/adapters/analyzer-typescript", new Set(["typescript"])],
+]);
 
 function toPosix(relativePath) {
   return relativePath.split(path.sep).join("/");
@@ -239,8 +243,10 @@ export async function checkDependencyBoundaries(root) {
     const declaredDependencies = new Set(
       dependencyEntriesForWorkspace.map(({ name }) => name),
     );
-    const externalAllowlist =
-      externalDependencyAllowlistByRole.get(workspace.role) ?? new Set();
+    const externalAllowlist = new Set([
+      ...(externalDependencyAllowlistByRole.get(workspace.role) ?? []),
+      ...(externalDependencyAllowlistByWorkspace.get(workspace.relativePath) ?? []),
+    ]);
 
     for (const { field, name: dependencyName, specifier } of dependencyEntriesForWorkspace) {
       const target = workspacesByName.get(dependencyName);

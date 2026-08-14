@@ -129,6 +129,13 @@ workspace digest、revision、ownership 与该 Job。CAS 不匹配时丢弃 patc
 完整 revision。第四次仍过期时 Job 以 `GRAPH_INPUT_CHANGED_DURING_BUILD` 失败，旧 revision 与
 ownership 保持不变。当前公共方法集合没有新增 `job/cancel` 或查询 RPC。
 
+当 manifest 含 TS、TSX、JS 或 JSX 时，同一 rebuild 还在真实 TypeScript 6.0.3 Worker 中分析模块语法与
+目标。配置 read-set 包含排序后的 `AnalyzerConfigSnapshotV1`、配置/extends/manifest/lockfile 与受控解析
+元数据 hash；Worker 新发现的逻辑候选必须先由 graph-service 安全读取并重新封口，提交 mutation 前后再同步
+复核。hierarchy 与全部 source Evidence slice 组成一个 `CompositeGraphPatchV1`，因此公开状态只会看到旧的
+完整 revision 或同时包含 hierarchy 与模块依赖的新完整 revision，不会观察到按文件推进的中间 revision。
+这不会新增 RPC、capability 或公共 Schema 字段；`service/status` 继续只暴露既有计数与 revision。
+
 公共响应不包含 findingsRevision、绝对 indexing root、缓存路径、SQLite rowid、源码正文或读取缓冲。
 
 服务端请求、canonical 响应、metadata 与 `ErrorV1` 使用封闭 Schema。兼容客户端仍校验

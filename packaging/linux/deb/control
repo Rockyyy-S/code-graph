@@ -1,0 +1,7 @@
+Package: codegraph-host-path-helper
+Version: ${VERSION}
+Architecture: ${ARCH}
+Maintainer: CodeGraph Release Engineering
+Depends: systemd, btrfs-progs | zfsutils-linux | lvm2, mount
+Description: Privilege-separated snapshot-only HostPath helper for CodeGraph
+ This package does not grant capabilities to Node.js and does not enable ext4/xfs freeze.

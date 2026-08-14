@@ -25,6 +25,7 @@ import { validateGateEvaluationContextV1 } from "../../packages/contracts/src/ru
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const temporaryRoots: string[] = [];
+const gitDeadlineMs = 30_000;
 
 afterEach(async () => {
   await Promise.all(
@@ -113,6 +114,7 @@ async function git(root: string, ...args: string[]): Promise<string> {
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_TERMINAL_PROMPT: "0",
     },
+    timeout: gitDeadlineMs,
   });
   return result.stdout.trim();
 }
@@ -169,38 +171,31 @@ describe("gate applicability", () => {
         createDefinition("source", ["*.ts"]),
       ]);
       const gateRegistryDigest = computeGateRegistryDigest(registry);
-      const evaluation = await createLocalGateFixtureEvaluation(fixture.root, {
-        baseOid: fixture.baseOid,
-        gateRegistryDigest,
-        headOid: fixture.headOid,
-        objectFormat: "sha1",
-        registry,
-      });
 
-      expect(evaluation.contextKind).toBe("local-fixture");
-      expect(evaluation.hostedEvidenceEligible).toBe(false);
-      expect(evaluation.affectedPaths).toEqual([
-        "deleted.ts",
-        "new file.ts",
-        "renamed target.ts",
-        "renamed.ts",
-      ]);
-      expect(evaluation.applicability).toEqual([
-        { gateId: "always", status: "required" },
-        { gateId: "docs", status: "not-applicable" },
-        { gateId: "source", status: "required" },
-      ]);
-
+      /** SHA-1 仓库只证明 provider 入口；local fixture 由 SHA-256 用例独立覆盖，避免重复消耗真实 Git 预算。 */
       const providerEvaluation = await createProviderGateEvaluation(fixture.root, {
         baseOid: fixture.baseOid,
         gateRegistryDigest,
+        gitTimeoutMs: gitDeadlineMs,
         headOid: fixture.headOid,
         objectFormat: "sha1",
         providerRepositoryId: "1303415307",
         registry,
       });
+
       expect(providerEvaluation.contextKind).toBe("provider-event");
       expect(providerEvaluation.hostedEvidenceEligible).toBe(true);
+      expect(providerEvaluation.affectedPaths).toEqual([
+        "deleted.ts",
+        "new file.ts",
+        "renamed target.ts",
+        "renamed.ts",
+      ]);
+      expect(providerEvaluation.applicability).toEqual([
+        { gateId: "always", status: "required" },
+        { gateId: "docs", status: "not-applicable" },
+        { gateId: "source", status: "required" },
+      ]);
       expect(validateGateEvaluationContextV1(providerEvaluation.evaluationContext)).toBe(true);
     },
     45_000,
@@ -216,6 +211,7 @@ describe("gate applicability", () => {
       const evaluation = await createLocalGateFixtureEvaluation(fixture.root, {
         baseOid: fixture.baseOid,
         gateRegistryDigest,
+        gitTimeoutMs: gitDeadlineMs,
         headOid: fixture.headOid,
         objectFormat: "sha256",
         registry,
@@ -223,7 +219,11 @@ describe("gate applicability", () => {
 
       expect(fixture.baseOid).toHaveLength(64);
       expect(fixture.headOid).toHaveLength(64);
+      expect(evaluation.contextKind).toBe("local-fixture");
+      expect(evaluation.gateRegistryDigest).toBe(gateRegistryDigest);
+      expect(evaluation.hostedEvidenceEligible).toBe(false);
       expect(evaluation.comparisonBaseOid).toBe(fixture.baseOid);
+      expect(evaluation).not.toHaveProperty("evaluationContext");
     },
     45_000,
   );

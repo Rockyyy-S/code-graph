@@ -44,12 +44,10 @@ export function assertBootstrapSchemaSupported(database: Database.Database): voi
  */
 export function applyBootstrapMigration(database: Database.Database): void {
   assertBootstrapSchemaSupported(database);
-  const hasMigrationTable = readUserTableNames(database).includes("schema_migrations");
-  if (hasMigrationTable) {
-    return;
-  }
-
   database.transaction(() => {
+    /** 获取 IMMEDIATE 写锁后重读 absent/v1，避免并发连接依据陈旧空库状态重复建表。 */
+    assertBootstrapSchemaSupported(database);
+    if (readUserTableNames(database).includes("schema_migrations")) {return;}
     database.exec(`
       CREATE TABLE schema_migrations (
         version INTEGER PRIMARY KEY,
@@ -126,7 +124,7 @@ export function applyBootstrapMigration(database: Database.Database): void {
       INSERT INTO schema_migrations(version, applied_at)
       VALUES (?, ?)
     `).run(BOOTSTRAP_SCHEMA_VERSION, new Date().toISOString());
-  })();
+  }).immediate();
   assertExactTableSet(database);
 }
 

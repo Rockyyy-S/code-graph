@@ -2,3 +2,4 @@
 export * from "./graph-identity.js";
 export * from "./graph-patch.js";
 export * from "./hierarchy.js";
+export * from "./module-dependency.js";

@@ -97,6 +97,41 @@ describe("graph-service process lifecycle", () => {
     }
   });
 
+  it("recovers a transient runtime close failure without force terminating the process", async () => {
+    vi.useFakeTimers();
+    try {
+      const signals = new EventEmitter();
+      const exitCodes: number[] = [];
+      const forceTerminate = vi.fn();
+      const close = vi.fn()
+        .mockRejectedValueOnce(new Error("transient cleanup failure"))
+        .mockResolvedValueOnce(undefined);
+      const runtime = { close } as unknown as OwnedServiceInstance;
+      const environment = createEnvironment(
+        "1".repeat(64),
+        "\\\\.\\pipe\\codegraph-transient-close",
+      );
+      await runGraphServiceProcess(environment, {
+        forceTerminate,
+        setExitCode: (code) => exitCodes.push(code),
+        shutdownDeadlineMs: 100,
+        signalTarget: signals,
+        startService: async () => runtime,
+      });
+
+      signals.emit("SIGTERM");
+      await vi.advanceTimersByTimeAsync(25);
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(exitCodes).toEqual([1, 0]);
+      expect(forceTerminate).not.toHaveBeenCalled();
+      expect(signals.listenerCount("SIGTERM")).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("forces termination when startup remains pending after a shutdown signal", async () => {
     vi.useFakeTimers();
     try {

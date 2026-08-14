@@ -317,6 +317,40 @@ describe("public capability gate contract", () => {
     expect(collectPublicCapabilitySurface(files).has("cli:command:scan")).toBe(true);
   });
 
+  it("忽略全仓扫描中与公共能力目标无关的外部常量别名", () => {
+    const files = createSurfaceFiles();
+    files.set(
+      "apps/graph-service/src/host-path-identity.ts",
+      'import { MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES } from "@codegraph/application"; const MAX_HOST_PATH_CANDIDATES = MAX_ANALYZER_HOST_PATH_IDENTITY_SIDECAR_ENTRIES; export function clampHostPathCandidates(requested: number) { return Math.min(MAX_HOST_PATH_CANDIDATES, requested); }',
+    );
+
+    expect([...collectPublicCapabilitySurface(files).keys()].sort()).toEqual([
+      "cli:binary:codegraph",
+      "cli:command:scan",
+      "extension:command:codegraph.open",
+      "rpc:initialize",
+      "schema:resultV1Schema",
+    ]);
+  });
+
+  it.each([
+    [
+      "公共 Schema re-export",
+      "packages/contracts/src/index.ts",
+      'export { externalSchema as resultV1Schema } from "@vendor/contracts";',
+    ],
+    [
+      "SERVICE_METHODS 值别名",
+      "packages/contracts/src/service-control.ts",
+      'import { SERVICE_METHODS as EXTERNAL_METHODS } from "@vendor/contracts"; export const SERVICE_METHODS = EXTERNAL_METHODS;',
+    ],
+  ])("公共 binding 自身的外部来源继续 fail closed：%s", (_label, modulePath, source) => {
+    const files = createSurfaceFiles();
+    files.set(modulePath, source);
+
+    expect(() => collectPublicCapabilitySurface(files)).toThrow(/禁止依赖外部模块/u);
+  });
+
   it.each([
     'SERVICE_METHODS.query = "graph/query";',
     'Object.assign(SERVICE_METHODS, { query: "graph/query" });',
@@ -382,6 +416,7 @@ describe("public capability gate contract", () => {
   it.each([
     'resultV1Schema.required = ["id"];',
     'Object.assign(resultV1Schema, { additionalProperties: false });',
+    'Reflect.set(resultV1Schema, "type", "string");',
     'const alias = resultV1Schema; alias.type = "string";',
     'function mutate(value: Record<string, unknown>) { value.type = "string"; } mutate(resultV1Schema);',
   ])("拒绝公共 Schema 声明后的 runtime mutation：%s", (mutation) => {

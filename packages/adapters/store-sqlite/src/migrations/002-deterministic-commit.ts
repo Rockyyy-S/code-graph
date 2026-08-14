@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import { isSupportedSourceFile } from "@codegraph/application";
 import {
-  buildGraphEdgeId,
   buildGraphEntityId,
+  buildLegacyGraphEdgeIdV0,
   normalizeRelativeGraphPath,
 } from "@codegraph/domain";
 import {
@@ -261,7 +261,7 @@ function assertCanonicalHierarchyIdentity(database: Database.Database): void {
       if (edge.relation_type !== "contains") {
         throw new Error("invalid edge relation");
       }
-      const expectedId = buildGraphEdgeId(
+      const expectedId = buildLegacyGraphEdgeIdV0(
         edge.workspace_key,
         edge.from_id,
         edge.relation_type,

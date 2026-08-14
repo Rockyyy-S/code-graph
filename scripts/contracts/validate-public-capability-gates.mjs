@@ -2851,7 +2851,10 @@ function hasNamedImport(sourceFile, specifier, importedName, localName) {
   );
 }
 
-/** 判断表达式最终指向目标绑定本身或其任意属性。 */
+/**
+ * 判断表达式最终指向当前目标绑定本身或其任意属性。
+ * 公共 binding 自身的 export/re-export 仍由上层 fail-closed；全仓扫描中的无关外部来源在此视为 opaque non-target。
+ */
 function expressionTargetsBinding(workspace, modulePath, rawExpression, targetKey) {
   const expression = unwrapExpression(rawExpression);
   let directBinding = null;
@@ -2862,11 +2865,17 @@ function expressionTargetsBinding(workspace, modulePath, rawExpression, targetKe
       throw error;
     }
   }
-  if (
-    directBinding !== null &&
-    resolveBindingOriginKey(workspace, directBinding, new Set()) === targetKey
-  ) {
-    return true;
+  if (directBinding !== null) {
+    try {
+      if (resolveBindingOriginKey(workspace, directBinding, new Set()) === targetKey) {
+        return true;
+      }
+    } catch (error) {
+      if (error instanceof Error && /禁止依赖外部模块/u.test(error.message)) {
+        return false;
+      }
+      throw error;
+    }
   }
   if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
     return expressionTargetsBinding(workspace, modulePath, expression.expression, targetKey);

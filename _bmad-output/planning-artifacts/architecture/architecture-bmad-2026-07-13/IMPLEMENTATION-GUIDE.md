@@ -489,6 +489,7 @@ TS/JS 语法映射：
 - 内部 workspace package ID 使用 cg:// 和 package 根相对路径。
 - 外部 npm 包使用标准 purl pkg:npm/<name>@<resolvedVersion>；npm/Yarn/pnpm 不改变身份，未解析版本使用 @unresolved 并降低置信度。
 - Node built-in 使用 node:<module>。
+- 所有 contains/imports/exports 必须调用统一 `buildGraphEdgeId`。AD-4 v1 预像为 `['codegraph.graph-edge-id',1,workspaceKey,relationType,fromId,toId,qualifier]`，使用 JCS→UTF-8→SHA-256 小写十六进制，ID 为 `cg://{workspaceKey}/edge/v1/{digest}`；输入必须已是 NFC 且无 lone surrogate。
 
 建议的首批表：
 
@@ -514,6 +515,7 @@ schema_migrations
 - revision 相关写入使用一个事务。
 - 所有查询先有可测试 SQL 计划；常用反向依赖、路径、finding、revision 条件建立索引。
 - schema 不兼容时由服务迁移；失败保留故障副本并返回可恢复错误。
+- SQLite v4 使用 `sqlite-v4-eager-transactional-ad4-rekey`：迁移前生成并只读验证 online backup；在一个 IMMEDIATE 事务中重键 edges、Evidence 引用与身份、edge/evidence ownership，并重算 current committed targetGraphDigest、read-set digest、workspace/Job patch digest 与 meta。graphRevision、端点、qualifier、语义字段和时间戳保持不变；历史非 current succeeded Job 保留旧证据，v4 reopen 只验证。应用表仍精确为八张，禁止 alias table、永久 dual-read 与 silent fallback。
 
 ## 8. TypeScript 分析器
 

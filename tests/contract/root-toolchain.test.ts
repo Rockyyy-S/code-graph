@@ -82,6 +82,16 @@ describe("root toolchain contract", () => {
     await expect(readText(".nvmrc")).resolves.toBe("24.18.0\n");
   });
 
+  it("pins the TypeScript Analyzer runtime to the architecture-approved compiler", async () => {
+    const manifest = await readJson("packages/adapters/analyzer-typescript/package.json");
+    const dependencies = manifest.dependencies as Record<string, string>;
+
+    expect(dependencies.typescript).toBe("6.0.3");
+    expect(Object.keys(dependencies).filter((name) =>
+      /tree-sitter|scip|language-server|typescript-language-server/iu.test(name)))
+      .toEqual([]);
+  });
+
   it("keeps composite TypeScript state inside writable dist directories", async () => {
     for (const configPath of compositeTypeScriptConfigs) {
       const config = await readJson(configPath);
