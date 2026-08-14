@@ -56,8 +56,7 @@ export async function captureHostPathPosixNativeV1(options: {
   let rawCapability: unknown;
   try {
     rawCapability = await options.binding.provider.getCapability();
-  } catch (error) {
-    reportProviderCaptureFailure(error);
+  } catch {
     return { reason: "PROVIDER_ERROR", status: "rejected" };
   }
   const capability = validateHostPathPosixCapabilityV1(rawCapability, {
@@ -79,8 +78,7 @@ export async function captureHostPathPosixNativeV1(options: {
       platform: options.platform,
       protocolVersion: HOST_PATH_POSIX_PROTOCOL_VERSION,
     });
-  } catch (error) {
-    reportProviderCaptureFailure(error);
+  } catch {
     return { reason: "PROVIDER_ERROR", status: "rejected" };
   }
 
@@ -107,11 +105,4 @@ export async function captureHostPathPosixNativeV1(options: {
     status: "complete",
     volumeId: response.response.volumeId,
   };
-}
-
-/** 只记录 bridge 暴露的封闭错误码；其他异常统一隐藏为稳定占位符。 */
-function reportProviderCaptureFailure(error: unknown): void {
-  const message = error instanceof Error ? error.message : "";
-  const match = /^Linux helper bridge 失败：([A-Z0-9_]{1,128})\s*$/u.exec(message);
-  process.stderr.write(`[codegraph-linux-helper] bridge:${match?.[1] ?? "PROVIDER_EXCEPTION"}\n`);
 }
