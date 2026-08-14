@@ -63,13 +63,13 @@ jobs:
           sudo install -d -o 0 -g 0 -m 0700 "$(dirname "$request_root")"
           sudo /usr/bin/mkdir -m 0700 "$request_root"
 
-          # fd 9 mirrors the daemon-owned root slot and must remain inherited by every command.
-          exec 9<"$snapshot_root"
-          run_step filesystem-show-root sudo /usr/bin/btrfs filesystem show --raw /proc/self/fd/9
-          run_step subvolume-show-root sudo /usr/bin/btrfs subvolume show --raw /proc/self/fd/9
-          run_step subvolume-list-root sudo /usr/bin/btrfs subvolume list -o /proc/self/fd/9
+          # fd 9 mirrors the daemon-owned root slot and must be opened inside the
+          # privileged command process; sudo itself intentionally closes inherited fds.
+          run_step filesystem-show-root sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs filesystem show --raw /proc/self/fd/9"
+          run_step subvolume-show-root sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs subvolume show --raw /proc/self/fd/9"
+          run_step subvolume-list-root sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs subvolume list -o /proc/self/fd/9"
           run_step mount-top-level sudo /usr/bin/mount -t btrfs -o subvolid=5,nosuid,nodev,noexec -- "$loop_device" "$request_root"
           run_step filesystem-show-top sudo /usr/bin/btrfs filesystem show --raw "$request_root"
           run_step subvolume-show-top sudo /usr/bin/btrfs subvolume show --raw "$request_root"
-          run_step snapshot-create sudo /usr/bin/btrfs subvolume snapshot -r /proc/self/fd/9 "$snapshot_view"
+          run_step snapshot-create sudo /bin/sh -c "exec 9<\"$snapshot_root\"; exec /usr/bin/btrfs subvolume snapshot -r /proc/self/fd/9 \"$snapshot_view\""
           run_step snapshot-show sudo /usr/bin/btrfs subvolume show --raw "$snapshot_view"
