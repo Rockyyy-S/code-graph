@@ -344,7 +344,9 @@ fn plan_btrfs(
                 mutation: None,
                 spec: CommandSpec::fixed(
                     "/usr/bin/btrfs",
-                    vec!["filesystem".into(), "show".into(), "--raw".into(), root_fd_path.clone()],
+                    // btrfs-progs 不接受子卷路径执行 `filesystem show`；已认证的 mount
+                    // source 块设备才是稳定的文件系统级句柄。
+                    vec!["filesystem".into(), "show".into(), "--raw".into(), device.into()],
                     COMMAND_TIMEOUT_MS,
                 )?,
             },
@@ -1245,6 +1247,14 @@ mod tests {
             step.spec.executable == "/usr/bin/btrfs" &&
                 step.spec.args.get(1).is_some_and(|arg| arg == "snapshot")
         }).expect("readonly snapshot");
+        assert_eq!(
+            plan.create[0].spec.args,
+            ["filesystem", "show", "--raw", "/dev/sda1"],
+        );
+        assert!(plan.create.iter().skip(1).any(|step| {
+            step.spec.executable == "/usr/bin/btrfs" &&
+                step.spec.args.last().is_some_and(|arg| arg == "/proc/self/fd/9")
+        }));
         assert!(mount_index < snapshot_index);
         assert!(plan.cleanup.iter().any(|step| step.spec.executable == "/usr/bin/umount"));
         assert!(plan.postflight.is_empty());
