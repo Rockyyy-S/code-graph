@@ -5,6 +5,7 @@ mod linux {
         fs,
         io,
         os::fd::{AsRawFd, BorrowedFd},
+        os::unix::fs::{FileTypeExt, MetadataExt},
         os::unix::net::UnixStream,
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
@@ -439,9 +440,14 @@ mod linux {
                     .find_map(|option| option.strip_prefix("subvolid="))
                     .and_then(|value| value.parse::<u64>().ok())
                     .ok_or_else(|| HelperError::volume("BTRFS_SUBVOLUME_ID_MISSING"))?;
+                // btrfs exposes an anonymous filesystem device number through
+                // stat(2). Resolve the UUID using the actual mount source
+                // (for example /dev/loop0), whose rdev is also listed in
+                // /sys/fs/btrfs/*/devices/*/dev.
+                let filesystem_uuid = discover_btrfs_uuid(&source)?;
                 Ok(VolumeIdentityV1::Btrfs {
                     device: source,
-                    filesystem_uuid: discover_btrfs_uuid(root.device_major, root.device_minor)?,
+                    filesystem_uuid,
                     mount_id: root.mount_id,
                     subvolume_id,
                 })
@@ -480,9 +486,18 @@ mod linux {
         }
     }
 
-    fn discover_btrfs_uuid(major: u32, minor: u32) -> Result<String, HelperError> {
-        let expected = format!("{major}:{minor}");
-        let roots = fs::read_dir("/sys/fs/btrfs")
+    fn discover_btrfs_uuid(source: &str) -> Result<String, HelperError> {
+        let metadata = fs::metadata(source)
+            .map_err(|_| HelperError::volume("BTRFS_DEVICE_UNREADABLE"))?;
+        if !metadata.file_type().is_block_device() {
+            return Err(HelperError::volume("BTRFS_DEVICE_NOT_BLOCK"));
+        }
+        let expected = format!("{}:{}", libc::major(metadata.rdev()), libc::minor(metadata.rdev()));
+        discover_btrfs_uuid_from_sysfs(&expected, Path::new("/sys/fs/btrfs"))
+    }
+
+    fn discover_btrfs_uuid_from_sysfs(expected: &str, sysfs_root: &Path) -> Result<String, HelperError> {
+        let roots = fs::read_dir(sysfs_root)
             .map_err(|_| HelperError::volume("BTRFS_SYSFS_UNREADABLE"))?;
         for root in roots.flatten() {
             let uuid = root.file_name().to_string_lossy().into_owned();
@@ -494,6 +509,34 @@ mod linux {
             }
         }
         Err(HelperError::volume("BTRFS_UUID_UNRESOLVED"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{discover_btrfs_uuid, discover_btrfs_uuid_from_sysfs};
+        use std::fs;
+
+        #[test]
+        fn btrfs_uuid_matches_mount_source_device() {
+            let sysfs = tempfile::tempdir().expect("sysfs");
+            let device = sysfs.path()
+                .join("12345678-1234-1234-1234-123456789abc/devices/loop0");
+            fs::create_dir_all(&device).expect("device");
+            fs::write(device.join("dev"), "7:0\n").expect("device id");
+
+            assert_eq!(
+                discover_btrfs_uuid_from_sysfs("7:0", sysfs.path()).expect("uuid"),
+                "12345678-1234-1234-1234-123456789abc",
+            );
+        }
+
+        #[test]
+        fn btrfs_uuid_rejects_non_block_mount_source() {
+            let source = tempfile::NamedTempFile::new().expect("source");
+            let error = discover_btrfs_uuid(source.path().to_str().expect("path"))
+                .expect_err("regular files are not btrfs devices");
+            assert_eq!(error.code, "BTRFS_DEVICE_NOT_BLOCK");
+        }
     }
 
     fn discover_zfs_guid(dataset: &str) -> Result<String, HelperError> {
