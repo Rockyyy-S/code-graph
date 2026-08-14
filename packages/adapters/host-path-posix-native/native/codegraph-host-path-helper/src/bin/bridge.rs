@@ -227,7 +227,8 @@ mod linux {
                         signature_key_id: &response.response.provenance.signature_key_id,
                         signer_id: &response.response.provenance.signer_id,
                     },
-                    request_digest: &response.response.request_digest,
+                    // Node 边界绑定原始 bridge 请求；daemon 的内部认证摘要已在 validate_response 中独立校验。
+                    request_digest: &envelope.request.client_request_digest,
                     request_id: &response.response.request_id,
                     root_object_id,
                     sequence: response.response.sequence,
@@ -258,7 +259,7 @@ mod linux {
                         signature_key_id: &response.response.provenance.signature_key_id,
                         signer_id: &response.response.provenance.signer_id,
                     },
-                    request_digest: &response.response.request_digest,
+                    request_digest: &envelope.request.client_request_digest,
                     request_id: &response.response.request_id,
                     root_object_id: response.response.root_object_id.as_deref(),
                     sequence: response.response.sequence,
