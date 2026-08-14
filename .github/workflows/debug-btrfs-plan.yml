@@ -1,0 +1,75 @@
+name: debug-btrfs-plan
+
+on:
+  push:
+    branches:
+      - codex/debug-btrfs
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Reproduce helper Btrfs command plan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$RUNNER_TEMP/codegraph-btrfs-debug.img"
+          loop_device=""
+          request_root=/run/codegraph-btrfs-debug/request
+          snapshot_root=/g/platform-fix156-preflight
+          snapshot_view="$request_root/snapshot-view"
+
+          cleanup() {
+            set +e
+            if mountpoint --quiet "$request_root"; then
+              sudo /usr/bin/umount -- "$request_root"
+            fi
+            if mountpoint --quiet /g; then
+              sudo /usr/bin/umount -- /g
+            fi
+            if [[ "$loop_device" =~ ^/dev/loop[0-9]+$ ]]; then
+              sudo /usr/sbin/losetup --detach "$loop_device"
+            fi
+            rm -f -- "$image"
+          }
+          trap cleanup EXIT
+
+          run_step() {
+            local label="$1"
+            shift
+            local stdout_file="$RUNNER_TEMP/${label}.stdout"
+            local stderr_file="$RUNNER_TEMP/${label}.stderr"
+            set +e
+            "$@" >"$stdout_file" 2>"$stderr_file"
+            local status=$?
+            set -e
+            printf 'debug-step[%s]: exit=%s\n' "$label" "$status"
+            sed -n '1,120p' "$stdout_file"
+            sed -n '1,120p' "$stderr_file" >&2
+          }
+
+          sudo install -d -o 0 -g 0 -m 0755 /g
+          truncate --size 4G "$image"
+          loop_device="$(sudo /usr/sbin/losetup --find --show "$image")"
+          sudo /usr/sbin/mkfs.btrfs --force --label codegraph-gate "$loop_device"
+          sudo /usr/bin/mount -t btrfs -o nosuid,nodev -- "$loop_device" /g
+          sudo /usr/bin/btrfs subvolume create "$snapshot_root"
+          sudo /usr/bin/touch "$snapshot_root/input.txt"
+          sudo install -d -o 0 -g 0 -m 0700 "$(dirname "$request_root")"
+          sudo /usr/bin/mkdir -m 0700 "$request_root"
+
+          # fd 9 mirrors the daemon-owned root slot and must remain inherited by every command.
+          exec 9<"$snapshot_root"
+          run_step filesystem-show-root sudo /usr/bin/btrfs filesystem show --raw /proc/self/fd/9
+          run_step subvolume-show-root sudo /usr/bin/btrfs subvolume show --raw /proc/self/fd/9
+          run_step subvolume-list-root sudo /usr/bin/btrfs subvolume list -o /proc/self/fd/9
+          run_step mount-top-level sudo /usr/bin/mount -t btrfs -o subvolid=5,nosuid,nodev,noexec -- "$loop_device" "$request_root"
+          run_step filesystem-show-top sudo /usr/bin/btrfs filesystem show --raw "$request_root"
+          run_step subvolume-show-top sudo /usr/bin/btrfs subvolume show --raw "$request_root"
+          run_step snapshot-create sudo /usr/bin/btrfs subvolume snapshot -r /proc/self/fd/9 "$snapshot_view"
+          run_step snapshot-show sudo /usr/bin/btrfs subvolume show --raw "$snapshot_view"
