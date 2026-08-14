@@ -618,7 +618,8 @@ export function mapLinuxHelperBridgeResponseV1(
     signerId: options.signerId,
   });
   if (validated.status !== "accepted") {
-    throw new Error("Linux helper bridge 响应非法。");
+    // 保留封闭协议错误码，供托管 preflight 诊断；不暴露响应内容或宿主路径。
+    throw new Error(`Linux helper bridge 响应非法。 [${validated.reason}]`);
   }
   const response = validated.response;
   if (response.status === "failed") {

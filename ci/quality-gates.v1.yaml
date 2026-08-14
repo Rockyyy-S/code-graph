@@ -8,9 +8,9 @@
         "command": ["pnpm", "basic-security"],
         "capabilityOwner": "security",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#basic-security"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#basic-security"
       },
-      "gateDefinitionDigest": "48b2bd5b2ce695bc47841dce938f97c298d9abaab290e2ee9148cdf86d66e715"
+      "gateDefinitionDigest": "66e91d3e5a7a4a5f307cba8488e5df6f55ed2331b5becd82c0add5f23be6e5d8"
     },
     {
       "gateDefinition": {
@@ -19,9 +19,9 @@
         "command": ["pnpm", "build"],
         "capabilityOwner": "dev-enablement",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#build"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#build"
       },
-      "gateDefinitionDigest": "a5ce9c344489417a2702ce012921cb87cbf121d112ba89d05a15e129ec86e2c2"
+      "gateDefinitionDigest": "514dbf70300e054d13f0f91018c511cf897c8772af0fce99c869bbbb43882de4"
     },
     {
       "gateDefinition": {
@@ -30,9 +30,9 @@
         "command": ["pnpm", "contract"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#contract"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#contract"
       },
-      "gateDefinitionDigest": "131e5fdb895a1b9f37eaddb75c99af937f7833695c2db91d49ef30c8da220453"
+      "gateDefinitionDigest": "d138965e3d5357e9409097578e2a51b6af917b914b96ecebd12879d75baa9a2a"
     },
     {
       "gateDefinition": {
@@ -41,9 +41,9 @@
         "command": ["pnpm", "dependency-boundary"],
         "capabilityOwner": "architecture",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#dependency-boundary"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#dependency-boundary"
       },
-      "gateDefinitionDigest": "1144b98671007094703bfa016df4730c954e6902b88d13e6827a88d33ec38855"
+      "gateDefinitionDigest": "bc5951cd72d528e7c094be23b4cfa5cad854472673d876d9d6f25dde90f63c37"
     },
     {
       "gateDefinition": {
@@ -52,9 +52,9 @@
         "command": ["node", "scripts/ci/verify-deterministic-rebuild-v1.mjs"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-atomic-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-atomic-v1"
       },
-      "gateDefinitionDigest": "97a166db5b642ad6ee14bc84dbfa85f8d1b14a7ea477edb5365944d3ff42d9ad"
+      "gateDefinitionDigest": "6c341474332faa1a67973c82d1452bf38f2c9be9d7ad9443c58185b0727df80a"
     },
     {
       "gateDefinition": {
@@ -63,9 +63,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-error-v1.mjs", "--capability", "schema:errorV1Schema", "--test", "tests/unit/deterministic-rebuild-error-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-error-v1.json", "--evidence-id", "public-capability:schema:errorV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-error-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-error-v1"
       },
-      "gateDefinitionDigest": "050d179fe327450b475d0681ff2dce190aefd27a1d72537f72d3ad2c15eab923"
+      "gateDefinitionDigest": "fad4275b21552999759840402abc464a7f21cd766523fdfeb56973740348363a"
     },
     {
       "gateDefinition": {
@@ -74,9 +74,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-initialize-compatible-v1.mjs", "--capability", "schema:initializeResultCompatibleSchema", "--test", "tests/unit/deterministic-rebuild-initialize-compatible-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-initialize-compatible-v1.json", "--evidence-id", "public-capability:schema:initializeResultCompatibleSchema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-initialize-compatible-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-initialize-compatible-v1"
       },
-      "gateDefinitionDigest": "c922f11155086f89932b86654c18807f439590e5d4394cf68343c737a781b835"
+      "gateDefinitionDigest": "256ef5de046a0f6b73f5487134618fb4d6eb1503a6c424008fc64054fb162457"
     },
     {
       "gateDefinition": {
@@ -85,9 +85,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-initialize-v1.mjs", "--capability", "schema:initializeResultSchema", "--test", "tests/unit/deterministic-rebuild-initialize-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-initialize-v1.json", "--evidence-id", "public-capability:schema:initializeResultSchema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-initialize-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-initialize-v1"
       },
-      "gateDefinitionDigest": "2c3a6a084f04cf4f0a8d7bd9d75e4e7b8d5389a4cc62359cb1f41137413107d0"
+      "gateDefinitionDigest": "2d608d6d6ce34cee84d3d77bbb3e7531aac9618564ca2cc42ee9741ee53cd0a5"
     },
     {
       "gateDefinition": {
@@ -96,9 +96,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-job-result-v1.mjs", "--capability", "schema:jobStartResultV1Schema", "--test", "tests/unit/deterministic-rebuild-job-result-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-job-result-v1.json", "--evidence-id", "public-capability:schema:jobStartResultV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-job-result-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-job-result-v1"
       },
-      "gateDefinitionDigest": "539e11267088b2aecd9031f47ae456e100def825c005c14eb88f8962e98f0695"
+      "gateDefinitionDigest": "3797ebf630cdfbb81d39ce9f2d2cac078d9ed82cc0cbcc7f8da9e8b4a5fac707"
     },
     {
       "gateDefinition": {
@@ -107,9 +107,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-rpc-v1.mjs", "--capability", "rpc:job/start", "--test", "tests/unit/deterministic-rebuild-rpc-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-rpc-v1.json", "--evidence-id", "public-capability:rpc:job/start"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-rpc-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-rpc-v1"
       },
-      "gateDefinitionDigest": "82c0c01156d0238427af9b233d03ec5f889493c3bbd5d6d93dc283789bccc42c"
+      "gateDefinitionDigest": "0e37d67e2c8151b17e6d40b44ec3b3402b78f36a0b6544d1f0ac42151b4168f8"
     },
     {
       "gateDefinition": {
@@ -118,9 +118,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-status-compatible-v1.mjs", "--capability", "schema:serviceStatusV1CompatibleSchema", "--test", "tests/unit/deterministic-rebuild-status-compatible-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-status-compatible-v1.json", "--evidence-id", "public-capability:schema:serviceStatusV1CompatibleSchema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-status-compatible-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-status-compatible-v1"
       },
-      "gateDefinitionDigest": "988b75978263761199e39ceab15665b211f01ebe13c3632c0da8c788e6778ca8"
+      "gateDefinitionDigest": "300dfc59f4be7df0fad4914d3ad5015cf09b3ecc54778c096e7f50eca70cbc56"
     },
     {
       "gateDefinition": {
@@ -129,9 +129,9 @@
         "command": ["node", "scripts/contracts/verify-deterministic-rebuild-status-v1.mjs", "--capability", "schema:serviceStatusV1Schema", "--test", "tests/unit/deterministic-rebuild-status-v1-capability.test.ts", "--fixture", "tests/fixtures/deterministic-rebuild-status-v1.json", "--evidence-id", "public-capability:schema:serviceStatusV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#deterministic-rebuild-status-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#deterministic-rebuild-status-v1"
       },
-      "gateDefinitionDigest": "3a2856f563c2fde8b954438f48c5c7daccb0722e5044482f531256a00c424280"
+      "gateDefinitionDigest": "d4cf7974ccc1f9db2fb911be7af2a7c43e602227a38f5d8e004ac8ecd90c0ccd"
     },
     {
       "gateDefinition": {
@@ -140,9 +140,9 @@
         "command": ["node", "scripts/contracts/verify-graph-bootstrap-job-request-v1.mjs", "--capability", "schema:jobStartRequestV1Schema", "--test", "tests/unit/graph-bootstrap-job-request-v1-capability.test.ts", "--fixture", "tests/fixtures/graph-bootstrap-job-request-v1.json", "--evidence-id", "public-capability:schema:jobStartRequestV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#graph-bootstrap-job-request-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#graph-bootstrap-job-request-v1"
       },
-      "gateDefinitionDigest": "159dcddea1a7d888ec343951e5f96148887e75c81808ea5ee715cb5888e75e2f"
+      "gateDefinitionDigest": "355de3a7fb10577965c8956b348c2d4054da1cb0d23bd305289da243d72c172c"
     },
     {
       "gateDefinition": {
@@ -185,9 +185,9 @@
         "command": ["node", "scripts/ci/verify-host-path-identity-v1.mjs"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#host-path-identity-win32-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#host-path-identity-win32-v1"
       },
-      "gateDefinitionDigest": "440d9a838f5922d60ee8f8fbefb34ecb4ec033ea2b306cc0a139d3f6574afc12"
+      "gateDefinitionDigest": "89bb9327cac601f051818f1365f40880f97f09df0c014cfef769f1da2675d7dd"
     },
     {
       "gateDefinition": {
@@ -215,9 +215,9 @@
         "command": ["node", "scripts/ci/verify-host-path-posix-helper-v1.mjs"],
         "capabilityOwner": "security",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#host-path-posix-helper-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#host-path-posix-helper-v1"
       },
-      "gateDefinitionDigest": "e9eb992eaf35bd584b5dfae640e990b91a835a8c5b831193c58813eaa44904f6"
+      "gateDefinitionDigest": "113be16794dffa977c3fbdb2de761f5c65c3ab5e43e44f11bbf2b290cf47b0ab"
     },
     {
       "gateDefinition": {
@@ -226,9 +226,9 @@
         "command": ["pnpm", "lint"],
         "capabilityOwner": "dev-enablement",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#lint"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#lint"
       },
-      "gateDefinitionDigest": "19c2adca76f0ec84b2735b966c010529208cb875a1507360d795de82ff98079d"
+      "gateDefinitionDigest": "3ff17f9e00e897389cc7848263f98f8c9eac9518f74bdf1d8a5d82846ddd043d"
     },
     {
       "gateDefinition": {
@@ -237,9 +237,9 @@
         "command": ["pnpm", "planning-trace"],
         "capabilityOwner": "architecture-po",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#planning-traceability"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#planning-traceability"
       },
-      "gateDefinitionDigest": "0c59b1d66a7c044dfcfa286122fc4fcde4786eba661ae42d37097fda5344ef1f"
+      "gateDefinitionDigest": "0e9f59ff5f3f2a845d1de582ebe5922a1dfa096703d9de0d9ea8370769e27b72"
     },
     {
       "gateDefinition": {
@@ -248,9 +248,9 @@
         "command": ["pnpm", "process-lifecycle"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#process-lifecycle"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#process-lifecycle"
       },
-      "gateDefinitionDigest": "2444ef85b80ae6c9f06045333c75e9bf46f1a41ab7cf2e3936752400aad07ae3"
+      "gateDefinitionDigest": "7ce31e727b6357ee6d3cd435be91ac2f6300432b35a004b66bd880032fad0e5b"
     },
     {
       "gateDefinition": {
@@ -259,9 +259,9 @@
         "command": ["node", "scripts/contracts/verify-public-gate-definition-v1.mjs", "--capability", "schema:gateDefinitionV1Schema", "--test", "tests/unit/public-gate-definition-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-definition-v1.json", "--evidence-id", "public-capability:schema:gateDefinitionV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#public-gate-definition-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#public-gate-definition-v1"
       },
-      "gateDefinitionDigest": "b16da6f4d8350d61104353ea48f4b0bb2a35a9d41a5d8a9d9eab01d073ad68f3"
+      "gateDefinitionDigest": "659425601010b305bb6cbc0f74474c7e6ccd073de39693fb167b2328ca6ccaa1"
     },
     {
       "gateDefinition": {
@@ -270,9 +270,9 @@
         "command": ["node", "scripts/contracts/verify-public-gate-evaluation-context-v1.mjs", "--capability", "schema:gateEvaluationContextV1Schema", "--test", "tests/unit/public-gate-evaluation-context-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-evaluation-context-v1.json", "--evidence-id", "public-capability:schema:gateEvaluationContextV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#public-gate-evaluation-context-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#public-gate-evaluation-context-v1"
       },
-      "gateDefinitionDigest": "20563c495a099a4dbb8e15ecac18621ce05fc63b6a6f1b144ae728d476fe9fdd"
+      "gateDefinitionDigest": "c6df5758715f23225b6a85e8765cfb55edabb993b91fbfcf015d79a36feab104"
     },
     {
       "gateDefinition": {
@@ -281,9 +281,9 @@
         "command": ["node", "scripts/contracts/verify-public-gate-evidence-v1.mjs", "--capability", "schema:gateEvidenceV1Schema", "--test", "tests/unit/public-gate-evidence-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-evidence-v1.json", "--evidence-id", "public-capability:schema:gateEvidenceV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#public-gate-evidence-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#public-gate-evidence-v1"
       },
-      "gateDefinitionDigest": "d6f0a25eb88624a4f69b1363de6cd00366715294ce0dddd4291d6ac64c5510e5"
+      "gateDefinitionDigest": "9c43eb4bf04e6cd29ebe651cf56da337aa5d89af1bdf0675774406299b80bdd1"
     },
     {
       "gateDefinition": {
@@ -292,9 +292,9 @@
         "command": ["node", "scripts/contracts/verify-public-gate-output-v1.mjs", "--capability", "schema:gateOutputV1Schema", "--test", "tests/unit/public-gate-output-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-output-v1.json", "--evidence-id", "public-capability:schema:gateOutputV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#public-gate-output-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#public-gate-output-v1"
       },
-      "gateDefinitionDigest": "a27f232447ec2ff6bb88d08191027053458160b7bb5527b2bf4392cb3f350c30"
+      "gateDefinitionDigest": "1bfee8b8d4454cc0eaabaa69472080c0c6f2ebd27aebd2a2ce61c6a0d489c5be"
     },
     {
       "gateDefinition": {
@@ -303,9 +303,9 @@
         "command": ["node", "scripts/contracts/verify-public-gate-registry-v1.mjs", "--capability", "schema:gateRegistryV1Schema", "--test", "tests/unit/public-gate-registry-v1-capability.test.ts", "--fixture", "tests/fixtures/public-gate-registry-v1.json", "--evidence-id", "public-capability:schema:gateRegistryV1Schema"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#public-gate-registry-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#public-gate-registry-v1"
       },
-      "gateDefinitionDigest": "7508463d2f60ae8b3a24a6b71b097a1e2c465d39b90ee06680878f5c9ff07865"
+      "gateDefinitionDigest": "d3de855e51b9a1be654d414dc974f3502628930e223808d4c4a4db6bb5d8ca3c"
     },
     {
       "gateDefinition": {
@@ -314,9 +314,9 @@
         "command": ["node", "scripts/contracts/validate-repository-contract.mjs"],
         "capabilityOwner": "dev-enablement",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#repository-contract-preflight"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#repository-contract-preflight"
       },
-      "gateDefinitionDigest": "059850a323f43972be002ee08de701a6339e12740bfa0a078fb86b89ffadc17e"
+      "gateDefinitionDigest": "ec6f561cccf052df671af150350acf5c9e3041e92cdfd2e902d078d85b6415b3"
     },
     {
       "gateDefinition": {
@@ -325,9 +325,9 @@
         "command": ["pnpm", "type"],
         "capabilityOwner": "dev-enablement",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#type"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#type"
       },
-      "gateDefinitionDigest": "6c0a3f69e4f40e76dcd370f48fb607f419f4cad51675cf9dc322cdcb3f02dc7c"
+      "gateDefinitionDigest": "a0b75bd363928c07d35449de5b1668d8063bd62f9540303c2282bb36c28d6e17"
     },
     {
       "gateDefinition": {
@@ -336,9 +336,9 @@
         "command": ["node", "scripts/ci/verify-typescript-module-analysis-v1.mjs"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#typescript-module-analysis-v1"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#typescript-module-analysis-v1"
       },
-      "gateDefinitionDigest": "6c80e627baec6747a4b2f547276a94629b40457ec5a35db2728f96666d889a62"
+      "gateDefinitionDigest": "0433ce39707851b6f994fc00ab967e5f47bc277a96a547f041a50c8dcf5c4204"
     },
     {
       "gateDefinition": {
@@ -347,9 +347,9 @@
         "command": ["pnpm", "unit"],
         "capabilityOwner": "qa",
         "blocking": true,
-        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@1beeabc374d75f8b6e1aff466e95b6c0fa4e5944#unit"
+        "evidenceProducerId": "gha-oidc://1303415307/Rockyyy-S/code-graph-gate-controller/.github/workflows/produce-gate-evidence.yml@a6b1accf6fd044f49f1860c5945344e3578d72f7#unit"
       },
-      "gateDefinitionDigest": "81963a983c9d4f61e17f3632b14f92820104dd1cf7613ae58d323f160644b35b"
+      "gateDefinitionDigest": "58db175d2771326b9ed4554dc217095f9594053344b89ab446f1732bbd66a730"
     }
   ]
 }
