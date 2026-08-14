@@ -487,6 +487,11 @@ mod linux {
     }
 
     fn discover_btrfs_uuid(source: &str) -> Result<String, HelperError> {
+        // mountinfo 的 source 是 backing block device；优先让 btrfs 自身解析
+        // UUID，兼容 hosted loop device 在 sysfs 中使用不同设备目录名的情况。
+        if let Ok(uuid) = discover_btrfs_uuid_from_command(source) {
+            return Ok(uuid);
+        }
         let metadata = fs::metadata(source)
             .map_err(|_| HelperError::volume("BTRFS_DEVICE_UNREADABLE"))?;
         if !metadata.file_type().is_block_device() {
@@ -494,6 +499,29 @@ mod linux {
         }
         let expected = format!("{}:{}", libc::major(metadata.rdev()), libc::minor(metadata.rdev()));
         discover_btrfs_uuid_from_sysfs(&expected, Path::new("/sys/fs/btrfs"))
+    }
+
+    fn discover_btrfs_uuid_from_command(source: &str) -> Result<String, HelperError> {
+        let output = SystemCommandExecutor.execute(&CommandSpec::fixed(
+            "/usr/bin/btrfs",
+            vec!["filesystem".into(), "show".into(), "--raw".into(), source.into()],
+            5_000,
+        )?)?;
+        let stdout = std::str::from_utf8(&output.stdout)
+            .map_err(|_| HelperError::volume("BTRFS_UUID_ENCODING"))?;
+        stdout.lines().find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            fields.windows(2)
+                .find(|pair| pair[0].eq_ignore_ascii_case("uuid:"))
+                .and_then(|pair| is_uuid(pair[1]).then(|| pair[1].to_owned()))
+        }).ok_or_else(|| HelperError::volume("BTRFS_UUID_UNRESOLVED"))
+    }
+
+    fn is_uuid(value: &str) -> bool {
+        value.len() == 36 && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 8 | 13 | 18 | 23) && byte == b'-' ||
+                !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        })
     }
 
     fn discover_btrfs_uuid_from_sysfs(expected: &str, sysfs_root: &Path) -> Result<String, HelperError> {

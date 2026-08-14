@@ -34,6 +34,9 @@ import {
 
 const temporaryRoots: string[] = [];
 const hostPathIdentityHelpers: ServiceScopedWin32HostPathIdentityHelper[] = [];
+// Hosted Windows runners can spend over ten seconds creating the isolated
+// PowerShell helper; keep the contract budget above that cold-start cost.
+const HOSTED_WIN32_CONTRACT_TIMEOUT_MS = 30_000;
 
 /** Hosted Windows 偶尔无法在首次 200ms 观察到已启动的 shutdown；仅对该稳定超时重试一次。 */
 async function closeHostPathIdentityHelper(
@@ -109,7 +112,7 @@ function createBrokerFixture(indexingRoot: string): {
   };
 }
 
-describe("Windows host path identity contract", () => {
+describe("Windows host path identity contract", { timeout: HOSTED_WIN32_CONTRACT_TIMEOUT_MS }, () => {
   it("binds root, directory and leaf casing aliases plus hardlinks in one snapshot", async () => {
     const root = await createWindowsRoot();
     const directoryName = "MixedDirectory";
