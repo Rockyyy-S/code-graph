@@ -652,6 +652,10 @@ export function mapLinuxHelperBridgeResponseV1(
 function mapLinuxHelperError(
   error: Record<string, unknown>,
 ): HostPathPosixCaptureFailureReasonV1 {
+  // 仅在 Hosted preflight 的隔离环境记录已校验的封闭 class/code，生产调用不写 stderr。
+  if (process.env.PREFLIGHT_ROOT !== undefined) {
+    process.stderr.write(`[codegraph-linux-helper] ${String(error.class)}:${String(error.code)}\n`);
+  }
   if (error.class === "namespace-drift") {
     return "CAPTURE_CHANGED";
   }
