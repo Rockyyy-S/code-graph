@@ -1,10 +1,15 @@
-import { decodeModuleExportName, encodeModuleExportName } from "./module-dependency.js";
+import {
+  decodeModuleExportName,
+  encodeModuleExportName,
+  type BasicSymbolKind,
+  type ModuleLanguageV1,
+} from "./module-dependency.js";
 
 /** hierarchy 切片允许使用工作区相对路径构造的实体类型。 */
 export type HierarchyEntityKind = "directory" | "file" | "workspace";
 
 /** 当前持久图谱允许的封闭实体类型。 */
-export type GraphEntityKind = HierarchyEntityKind | "external-package" | "node-builtin";
+export type GraphEntityKind = HierarchyEntityKind | "external-package" | "node-builtin" | "symbol";
 
 /** 当前持久图谱允许的封闭关系类型。 */
 export type GraphRelationType = "contains" | "exports" | "imports";
@@ -64,6 +69,34 @@ export function buildGraphEntityId(
   }
   const encodedPath = normalizedPath.split("/").map(encodeURIComponent).join("/");
   return `cg://${workspaceKey}/${kind}/${encodedPath}${kind === "directory" ? "/" : ""}`;
+}
+
+/** AD-4 symbol 身份只消费 file scope 与规范声明语义，不消费 range/exported/时间。 */
+export function buildBasicSymbolId(input: {
+  fileId: string;
+  kind: BasicSymbolKind;
+  language: ModuleLanguageV1;
+  qualifiedName: string;
+  signatureDigest: string;
+  workspaceKey: string;
+}): string {
+  assertWorkspaceKey(input.workspaceKey);
+  assertCanonicalUnicode(input.fileId, "fileId");
+  assertCanonicalUnicode(input.qualifiedName, "qualifiedName");
+  if (!/^[a-f0-9]{64}$/u.test(input.signatureDigest)) {
+    throw new TypeError("signatureDigest 必须是 SHA-256 小写十六进制。");
+  }
+  const preimage = JSON.stringify([
+    "codegraph.basic-symbol-id",
+    1,
+    input.workspaceKey,
+    input.fileId,
+    input.language,
+    input.kind,
+    input.qualifiedName,
+    input.signatureDigest,
+  ]);
+  return `cg://${input.workspaceKey}/symbol/v1/${sha256Utf8Hex(preimage)}`;
 }
 
 /**
@@ -144,8 +177,13 @@ function assertCanonicalEdgeTuple(
 
 /** exports qualifier 同时封闭结构词汇与 re-export 名称段的规范身份。 */
 function isCanonicalExportsQualifier(qualifier: string): boolean {
-  if (qualifier === "star:value" || qualifier === "star:type") {
+  if (qualifier === "star:value" || qualifier === "star:type" ||
+    qualifier === "default:value" || qualifier === "default:type") {
     return true;
+  }
+  const local = /^local:([^:]+):(value|type)$/u.exec(qualifier);
+  if (local !== null) {
+    return isCanonicalModuleExportNameSegment(local[1]!);
   }
   const match = /^reexport:([^:]+):([^:]+):(value|type)$/u.exec(qualifier);
   return match !== null && isCanonicalModuleExportNameSegment(match[1]!) &&
@@ -156,15 +194,16 @@ function isCanonicalExportsQualifier(qualifier: string): boolean {
  * percent decode 后先 fail closed 校验 decoded Unicode，再 canonical re-encode 守住身份唯一性。
  *
  * decoded 值必须原样满足 NFC 且不含孤立代理项；禁止静默 normalize 后接受另一份输入字节。
- * ModuleExportName 的内部 `%u` 退避表示不得进入公共 edge 身份；字面 `%u` 名称仍以 `%25u` 表示。
+ * ModuleExportName 的内部逃逸表示（`~e`/`~uXXXX...`）由 domain 解码并重新编码，
+ * 禁止未经 canonical 校验的 qualifier 进入公共 edge 身份。
  */
 function isCanonicalModuleExportNameSegment(encoded: string): boolean {
-  if (encoded.includes("%u")) {
-    return false;
-  }
   try {
     const decoded = decodeModuleExportName(encoded);
-    assertCanonicalUnicode(decoded, "decoded ModuleExportName");
+    /** `~u` 仅承载合法 AST 的孤立代理项；持久 qualifier 本身仍是纯 ASCII。 */
+    if (!/^~u(?:[0-9A-F]{4})+$/u.test(encoded)) {
+      assertCanonicalUnicode(decoded, "decoded ModuleExportName");
+    }
     return encodeModuleExportName(decoded) === encoded;
   } catch {
     return false;

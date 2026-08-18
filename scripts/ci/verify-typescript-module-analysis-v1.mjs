@@ -37,9 +37,18 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
   contractShards: Object.freeze([
     Object.freeze({
       attestationVersion: 1,
-      expectedSuiteCount: 2,
-      expectedTestCount: 6,
+      expectedSuiteCount: 4,
+      expectedTestCount: 10,
       expectedTestResults: Object.freeze([
+        Object.freeze({
+          filePath: "tests/contract/basic-symbol-contract.test.ts",
+          suites: Object.freeze([
+            Object.freeze({
+              ancestorTitles: Object.freeze(["Story 1.6 BasicSymbolV1 contract"]),
+              expectedAssertionCount: 4,
+            }),
+          ]),
+        }),
         Object.freeze({
           filePath: "tests/contract/graph-service-process.test.ts",
           suites: Object.freeze([
@@ -57,8 +66,8 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
   unitShards: Object.freeze([
     Object.freeze({
       attestationVersion: 1,
-      expectedSuiteCount: 22,
-      expectedTestCount: 275,
+      expectedSuiteCount: 24,
+      expectedTestCount: 292,
       expectedTestResults: Object.freeze([
         Object.freeze({
           filePath: "tests/unit/analyzer-config-capture.test.ts",
@@ -75,17 +84,24 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
           })]),
         }),
         Object.freeze({
+          filePath: "tests/unit/basic-symbol.test.ts",
+          suites: Object.freeze([Object.freeze({
+            ancestorTitles: Object.freeze(["Story 1.6 BasicSymbolV1"]),
+            expectedAssertionCount: 11,
+          })]),
+        }),
+        Object.freeze({
           filePath: "tests/unit/composite-graph-patch.test.ts",
           suites: Object.freeze([Object.freeze({
             ancestorTitles: Object.freeze(["Story 1.5 composite graph patch"]),
-            expectedAssertionCount: 5,
+            expectedAssertionCount: 8,
           })]),
         }),
         Object.freeze({
           filePath: "tests/unit/index-job-runtime.test.ts",
           suites: Object.freeze([Object.freeze({
             ancestorTitles: Object.freeze(["index job runtime"]),
-            expectedAssertionCount: 32,
+            expectedAssertionCount: 33,
           })]),
         }),
         Object.freeze({
@@ -106,7 +122,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
           filePath: "tests/unit/module-fact-batch.test.ts",
           suites: Object.freeze([Object.freeze({
             ancestorTitles: Object.freeze(["Story 1.5 source module FactBatch"]),
-            expectedAssertionCount: 3,
+            expectedAssertionCount: 4,
           })]),
         }),
         Object.freeze({
@@ -120,7 +136,7 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
           filePath: "tests/unit/typescript-analyzer-worker.test.ts",
           suites: Object.freeze([Object.freeze({
             ancestorTitles: Object.freeze(["Story 1.5 TypeScript Analyzer Worker"]),
-            expectedAssertionCount: 18,
+            expectedAssertionCount: 19,
           })]),
         }),
         Object.freeze({
@@ -144,13 +160,13 @@ export const TYPESCRIPT_MODULE_ANALYSIS_VERIFIER_MANIFEST = Object.freeze({
       /** 该计数是独立审阅后的权威，禁止从 reporter actual 动态派生并自授权。 */
       attestationVersion: 1,
       expectedSuiteCount: 2,
-      expectedTestCount: 50,
+      expectedTestCount: 60,
       expectedTestResults: Object.freeze([
         Object.freeze({
           filePath: "tests/unit/sqlite-module-dependencies.test.ts",
           suites: Object.freeze([Object.freeze({
             ancestorTitles: Object.freeze(["Story 1.5 SQLite module dependency storage"]),
-            expectedAssertionCount: 50,
+            expectedAssertionCount: 60,
           })]),
         }),
       ]),

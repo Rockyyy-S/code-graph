@@ -23,11 +23,32 @@ qualifier 词汇：
 
 - `contains`: `""`
 - `imports`: `value | type | dynamic`
-- `exports`: `star:value | star:type | reexport:{canonical-exported-name}:{canonical-imported-name}:value|type`
+- `exports`: `star:value | star:type | reexport:{canonical-exported-name}:{canonical-imported-name}:value|type | local:{canonical-exported-name}:value|type | default:value|type`
 
 `reexport` 的 exported/imported 两个 `ModuleExportName` 段分别使用既有解码语义读取，再由规范 serializer 重新编码；重新编码结果必须与输入逐字节相同。这是 edge 身份唯一性边界，不是普通格式检查：不可解码输入、非规范 percent 大小写、无必要 percent encoding、截断 percent 和内部 `%u` 退避表示全部 fail-closed。字面包含 `%u` 的合法名称使用标准 percent-encoding `%25u`，不与内部表示混淆。
 
+### ModuleExportName ASCII escape
+
+为使合法 TypeScript `ModuleExportName` 在 `reexport` qualifier 中保持可逆且满足 AD-4 的 canonical ASCII 边界，规范 serializer 只对以下两类输入使用 ASCII 逃逸：
+
+- 空名称编码为唯一的 `` `~e` ``，解码后恰为空字符串。
+- 含孤立 UTF-16 代理项的合法 AST 名称编码为 `` `~uXXXX...` ``：`~u` 后是一个或多个四位大写十六进制 UTF-16 code unit，按原始顺序完整保留名称；解码后必须逐 code unit 恢复原值。
+
+上述逃逸仅适用于已由 TypeScript 语法确认的合法 `ModuleExportName`，不是任意 qualifier 或普通字符串的通用转义。普通名称仍使用规范 percent-encoding，其中字面 `~` 必须编码为 `%7E`；`~e` 与匹配 `` `~u[0-9A-F]{4}+` `` 的文本因此不会与普通名称混淆。消费者必须执行 decode → canonical re-encode，并要求结果与输入逐字节相同；持久化 qualifier 本身始终为 ASCII，不包含 lone surrogate。真正非规范的内部 `%u` 退避仍按 AD-4 fail-closed 拒绝。
+
 同一 tuple 重放只产生同一 ID；若同一 ID 对应不同 tuple，必须抛出稳定错误 `GRAPH_EDGE_ID_COLLISION`。禁止 salt、覆盖或 fallback。
+
+`local` 与 `default` qualifier 仅用于 file→symbol 的 source-derived exports 边。`local` 的名称段复用上述 `ModuleExportName` 规范编码；`default` 不携带名称段。无法解析到受支持 `BasicSymbolV1` 的本地导出不生成 placeholder symbol，也不生成 file→file 假边。
+
+## BasicSymbol identity v1
+
+`buildBasicSymbolId` 的输出形式为 `cg://{workspaceKey}/symbol/v1/{digest}`，唯一预像为：
+
+```json
+["codegraph.basic-symbol-id",1,"workspaceKey","fileId","language","kind","qualifiedName","signatureDigest"]
+```
+
+`fileId` 必须是工作区作用域的 file ID；`qualifiedName` 与签名语义必须 Unicode NFC 规范化。range、`exported`、`detectedAt`、Worker 枚举顺序与宿主绝对路径不得进入身份。函数实现体不属于签名；参数、返回类型等签名语义变化则会产生新 ID。同名声明只在同一 `SourceFile` 内归并，跨文件 interface/namespace 因 `fileId` 不同必须保持独立身份与 ownership。
 
 ## Legacy compatibility
 

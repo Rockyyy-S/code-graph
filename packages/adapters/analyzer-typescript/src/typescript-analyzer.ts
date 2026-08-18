@@ -434,18 +434,24 @@ function isAnalysisOutput(value: unknown, input: AnalysisInputV1): value is Anal
   const manifestById = new Map(input.sourceFiles.map((file) => [file.fileId, file]));
   const manifestByPath = new Map(input.sourceFiles.map((file) => [file.path, file]));
   const sourceLengthById = new Map<string, number>();
+  const sourceTextById = new Map<string, string>();
   for (const source of input.sourceFiles) {
-    const sourceLength = decodeAnalyzerSourceLength(source.bytes);
-    if (sourceLength === null) {return false;}
-    sourceLengthById.set(source.fileId, sourceLength);
+    const sourceText = decodeAnalyzerSourceText(source.bytes);
+    if (sourceText === null) {return false;}
+    sourceLengthById.set(source.fileId, sourceText.length);
+    sourceTextById.set(source.fileId, sourceText);
   }
-  if (!isRecord(value) || !isStringArray(value.consultedLogicalPaths) ||
+  if (!isRecord(value) || !hasExactKeys(value, ["consultedLogicalPaths", "files"]) ||
+    !isStringArray(value.consultedLogicalPaths) ||
     !Array.isArray(value.files) || value.files.length !== input.sourceFiles.length) {
     return false;
   }
   const seenSourceIds = new Set<string>();
   return value.files.every((file) => {
-    if (!isRecord(file) || typeof file.sourceFileId !== "string" ||
+    if (!isRecord(file) || !hasExactKeys(file, [
+      "diagnostics", "language", "localExportBindings", "path", "relations", "sourceFileId",
+      "symbols",
+    ]) || typeof file.sourceFileId !== "string" ||
       seenSourceIds.has(file.sourceFileId)) {
       return false;
     }
@@ -454,7 +460,8 @@ function isAnalysisOutput(value: unknown, input: AnalysisInputV1): value is Anal
       return false;
     }
     const sourceLength = sourceLengthById.get(source.fileId);
-    if (sourceLength === undefined) {return false;}
+    const sourceText = sourceTextById.get(source.fileId);
+    if (sourceLength === undefined || sourceText === undefined) {return false;}
     seenSourceIds.add(file.sourceFileId);
     return Array.isArray(file.diagnostics) && file.diagnostics.every((diagnostic) =>
       isAnalysisDiagnostic(diagnostic, source.path, sourceLength)) &&
@@ -468,8 +475,65 @@ function isAnalysisOutput(value: unknown, input: AnalysisInputV1): value is Anal
           source.language,
           sourceLength,
           isProjectContextComplete(input.configSnapshot.effectiveCompilerOptions, source.path),
-        ));
+        )) && Array.isArray(file.symbols) && file.symbols.every((symbol) =>
+        isBasicSymbolSeed(symbol, source.fileId, source.language, sourceText));
   });
+}
+
+/** Worker symbol seed 必须封闭、file-scoped，且不允许伪造 symbolId 或绝对路径。 */
+function isBasicSymbolSeed(
+  value: unknown,
+  sourceFileId: string,
+  language: ModuleLanguageV1,
+  sourceText: string,
+): boolean {
+  if (!isRecord(value) || Object.keys(value).sort().join("\0") !==
+    ["exported", "kind", "language", "name", "qualifiedName", "range", "signatureDigest",
+      "sourceFileId"].sort().join("\0")) {
+    return false;
+  }
+  return typeof value.exported === "boolean" && isBasicSymbolKind(value.kind) &&
+    value.language === language && typeof value.name === "string" && value.name.length > 0 &&
+    typeof value.qualifiedName === "string" && value.qualifiedName.length > 0 &&
+    value.name.normalize("NFC") === value.name &&
+    value.qualifiedName.normalize("NFC") === value.qualifiedName &&
+    value.sourceFileId === sourceFileId && /^[a-f0-9]{64}$/u.test(String(value.signatureDigest)) &&
+    isNavigationRange(value.range, sourceText);
+}
+
+/** AD-27 的 kind 词汇在 Worker host 边界封闭。 */
+function isBasicSymbolKind(value: unknown): boolean {
+  return value === "function" || value === "class" || value === "interface" ||
+    value === "type-alias" || value === "enum" || value === "variable" ||
+    value === "namespace";
+}
+
+/** 公共行列范围只接受非负、严格递增的 0-based UTF-16 位置。 */
+function isNavigationRange(value: unknown, sourceText: string): boolean {
+  if (!isRecord(value) || !isRecord(value.start) || !isRecord(value.end)) {return false;}
+  if (!hasExactKeys(value, ["end", "start"]) ||
+    !hasExactKeys(value.start, ["character", "line"]) ||
+    !hasExactKeys(value.end, ["character", "line"])) {
+    return false;
+  }
+  const start = value.start;
+  const end = value.end;
+  if (!Number.isSafeInteger(start.line) || !Number.isSafeInteger(start.character) ||
+    !Number.isSafeInteger(end.line) || !Number.isSafeInteger(end.character) ||
+    (start.line as number) < 0 || (start.character as number) < 0 ||
+    (end.line as number) < 0 || (end.character as number) < 0) {
+    return false;
+  }
+  const lines = sourceText.split(/\r\n|\r|\n/u);
+  const startLine = start.line as number;
+  const endLine = end.line as number;
+  const startCharacter = start.character as number;
+  const endCharacter = end.character as number;
+  if (startLine >= lines.length || endLine >= lines.length ||
+    startCharacter > lines[startLine]!.length || endCharacter > lines[endLine]!.length) {
+    return false;
+  }
+  return endLine > startLine || (endLine === startLine && endCharacter > startCharacter);
 }
 
 /** Analyzer 诊断必须使用封闭 code/severity、规范范围和相对路径字符串。 */
@@ -614,22 +678,31 @@ function isProjectContextComplete(
     Array.isArray(project.sourcePaths) && project.sourcePaths.includes(sourcePath));
 }
 
-/** 主线程按 Worker 相同的 fatal BOM 合同计算 UTF-16 长度，不保留或输出源码正文。 */
-function decodeAnalyzerSourceLength(bytes: Uint8Array): number | null {
+/** 主线程按 Worker 相同的 fatal BOM 合同解码，仅在当次封闭协议校验中使用。 */
+function decodeAnalyzerSourceText(bytes: Uint8Array): string | null {
   try {
     const decoder = bytes[0] === 0xff && bytes[1] === 0xfe
       ? new TextDecoder("utf-16le", { fatal: true })
       : bytes[0] === 0xfe && bytes[1] === 0xff
         ? new TextDecoder("utf-16be", { fatal: true })
         : new TextDecoder("utf-8", { fatal: true });
-    return decoder.decode(bytes).length;
+    return decoder.decode(bytes);
   } catch {
     return null;
   }
 }
 
+/** 封闭 Worker 对象字段，防止未版本化字段或伪造身份渗入 host。 */
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const canonicalExpected = [...expected].sort();
+  return actual.length === expected.length && actual.every((key, index) =>
+    key === canonicalExpected[index]);
+}
+
 function isDiagnosticCode(value: unknown): boolean {
-  return value === "MODULE_DYNAMIC_SPECIFIER_NOT_LITERAL" ||
+  return value === "BASIC_SYMBOL_KIND_CONFLICT" ||
+    value === "MODULE_DYNAMIC_SPECIFIER_NOT_LITERAL" ||
     value === "MODULE_EXTERNAL_PACKAGE_METADATA_INVALID" ||
     value === "MODULE_RELATIVE_TARGET_UNRESOLVED" ||
     value === "MODULE_REQUIRE_SPECIFIER_NOT_LITERAL" || value === "MODULE_RESOLUTION_FAILED" ||

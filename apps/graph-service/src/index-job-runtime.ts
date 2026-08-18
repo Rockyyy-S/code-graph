@@ -664,8 +664,10 @@ async function analyzeModuleBatches(
     diagnostics: file.diagnostics,
     inputDigest: capture.readSet.inputDigest,
     localExportBindings: file.localExportBindings,
+    relativePath: file.path,
     relations: file.relations,
     sourceFileId: file.sourceFileId,
+    symbolSeeds: file.symbols,
     workspaceKey,
   }));
 }

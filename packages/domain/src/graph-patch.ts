@@ -78,7 +78,7 @@ export interface GraphPatchV1 {
   readSet: HierarchyReadSetV1;
 }
 
-/** composite patch 中单个 ownership slice 的完整 replacement mutation。 */
+/** composite patch 中单个 ownership slice 的原子 mutation；删除集由 coverage 语义决定。 */
 export interface GraphSliceMutationV1 {
   edgeDeletes: readonly string[];
   edgeUpserts: readonly GraphEdgeV1[];
@@ -97,7 +97,7 @@ export interface CompositeGraphReadSetV1 extends HierarchyReadSetV1 {
 /**
  * hierarchy 与全部 source slices 共用 base revision、read-set、digest 和一次提交。
  *
- * shared facts 不伪装成 source slice 独占；source slice 仅拥有 Evidence。
+ * shared module facts 不伪装成 source slice 独占；symbol、local export 与 Evidence 由 source slice 拥有。
  */
 export interface CompositeGraphPatchV1 {
   baseGraphRevision: number | null;

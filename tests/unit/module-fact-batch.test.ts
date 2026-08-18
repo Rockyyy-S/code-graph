@@ -88,4 +88,61 @@ describe("Story 1.5 source module FactBatch", () => {
       versionState: "unresolved",
     }));
   });
+
+  it("builds AD-4 edges for empty and lone-surrogate named re-exports", () => {
+    const sourceFileId = buildGraphEntityId(workspaceKey, "file", "src/index.ts");
+    const targetFileId = buildGraphEntityId(workspaceKey, "file", "src/dep.ts");
+    const batch = buildModuleSourceFactBatch({
+      analyzerKind: "typescript",
+      analyzerVersion: "6.0.3",
+      configDigest: "1".repeat(64),
+      coverage: "complete",
+      detectedAt: "2026-08-17T00:00:00.000Z",
+      diagnostics: [],
+      inputDigest: "2".repeat(64),
+      localExportBindings: [],
+      relations: [
+        {
+          confidence: "high",
+          language: "typescript",
+          normalizedRange: { end: 10, start: 1 },
+          provenance: "typescript-compiler-api",
+          qualifier: {
+            exportedName: "",
+            importedName: "value",
+            kind: "reexport",
+            typeOrValue: "value",
+            version: 1,
+          },
+          relationType: "exports",
+          target: { id: targetFileId, kind: "internal-file", resolvedPath: "src/dep.ts" },
+        },
+        {
+          confidence: "high",
+          language: "typescript",
+          normalizedRange: { end: 20, start: 11 },
+          provenance: "typescript-compiler-api",
+          qualifier: {
+            exportedName: "\uD800",
+            importedName: "value",
+            kind: "reexport",
+            typeOrValue: "value",
+            version: 1,
+          },
+          relationType: "exports",
+          target: { id: targetFileId, kind: "internal-file", resolvedPath: "src/dep.ts" },
+        },
+      ],
+      sourceFileId,
+      workspaceKey,
+    });
+
+    expect(batch.edges).toHaveLength(2);
+    expect(batch.edges.map(({ qualifier }) => qualifier)).toEqual(expect.arrayContaining([
+      "reexport:~e:value:value",
+      "reexport:~uD800:value:value",
+    ]));
+    expect(batch.edges.every(({ id }) => /^cg:\/\/[a-f0-9]{64}\/edge\/v1\/[a-f0-9]{64}$/u.test(id)))
+      .toBe(true);
+  });
 });

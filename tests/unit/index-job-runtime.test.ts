@@ -313,6 +313,68 @@ describe("index job runtime", () => {
     }
   }, 30_000);
 
+  it("commits empty and lone-surrogate named re-export qualifiers through the full analyzer pipeline", async () => {
+    const fixture = await createFixture();
+    await mkdir(path.join(fixture.indexingRoot, "src"), { recursive: true });
+    await writeFile(
+      path.join(fixture.indexingRoot, "src", "index.ts"),
+      [
+        'export { value as "" } from "./dep.js";',
+        'export { value as "\\uD800" } from "./dep.js";',
+      ].join("\n"),
+    );
+    await writeFile(path.join(fixture.indexingRoot, "src", "dep.ts"), "export const value = 1;\n");
+    await writeFile(
+      path.join(fixture.indexingRoot, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { module: "NodeNext", moduleResolution: "NodeNext" } }),
+    );
+    const store = await openSqliteGraphStore({
+      databasePath: path.join(fixture.cacheRoot, "graph.sqlite"),
+      workspaceKey: fixture.workspaceKey,
+    });
+    const analyzer = createTypeScriptAnalyzer({
+      workerUrl: pathToFileURL(path.resolve(
+        "packages/adapters/analyzer-typescript/dist/analyzer-worker.js",
+      )),
+    });
+    const runtime = createIndexJobRuntime({
+      analyzer,
+      ignoreState: await createInitialIgnoreState(fixture.indexingRoot),
+      indexingRoot: fixture.indexingRoot,
+      serviceInstanceId: "instance-module-unusual-qualifier",
+      statusEpoch: "epoch-module-unusual-qualifier",
+      store,
+      workspaceKey: fixture.workspaceKey,
+    });
+    try {
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(
+        () => expect(runtime.getStatus().lastIndexJob?.state).toBe("succeeded"),
+        { timeout: 20_000 },
+      );
+      const first = store.readCommittedSnapshot();
+      const qualifiers = first.allEdges
+        ?.filter((edge) => edge.relationType === "exports")
+        .map((edge) => edge.qualifier);
+      expect(qualifiers).toEqual(expect.arrayContaining([
+        "reexport:~e:value:value",
+        "reexport:~uD800:value:value",
+      ]));
+      const firstEdgeIds = first.allEdges?.map((edge) => edge.id).sort();
+
+      runtime.startJob({ kind: "rebuild" });
+      await vi.waitFor(
+        () => expect(runtime.getStatus().lastIndexJob?.state).toBe("succeeded"),
+        { timeout: 20_000 },
+      );
+      const replay = store.readCommittedSnapshot();
+      expect(replay.graphRevision).toBe(first.graphRevision);
+      expect(replay.allEdges?.map((edge) => edge.id).sort()).toEqual(firstEdgeIds);
+    } finally {
+      await runtime.close();
+    }
+  }, 30_000);
+
   it("rolls back consulted config changes inside the SQLite commit fence and reanalyzes paths", async () => {
     const fixture = await createFixture();
     await mkdir(path.join(fixture.indexingRoot, "configs"), { recursive: true });

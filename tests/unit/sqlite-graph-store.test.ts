@@ -3165,7 +3165,7 @@ describe("sqlite graph store", () => {
         applied_at TEXT NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at)
-      VALUES (5, '2026-07-25T00:00:00.000Z');
+      VALUES (6, '2026-07-25T00:00:00.000Z');
     `);
     expect(String(rawDatabase.pragma("journal_mode", { simple: true })).toLowerCase()).toBe("delete");
     rawDatabase.close();
@@ -3184,7 +3184,7 @@ describe("sqlite graph store", () => {
         .toBe("delete");
       expect(preservedDatabase.prepare(
         "SELECT MAX(version) AS version FROM schema_migrations",
-      ).get()).toEqual({ version: 5 });
+      ).get()).toEqual({ version: 6 });
     } finally {
       preservedDatabase.close();
     }
@@ -3202,7 +3202,7 @@ describe("sqlite graph store", () => {
         applied_at TEXT NOT NULL
       );
       INSERT INTO schema_migrations(version, applied_at)
-      VALUES (5, '2026-07-25T00:00:00.000Z');
+      VALUES (6, '2026-07-25T00:00:00.000Z');
     `);
     try {
       for (let attempt = 0; attempt < 5; attempt += 1) {

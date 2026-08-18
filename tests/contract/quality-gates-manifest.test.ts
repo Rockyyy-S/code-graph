@@ -124,7 +124,7 @@ function createPassingVitestReport(authority: VitestAuthority): string {
   return createVitestReport(authority);
 }
 
-/** 只改变 root/detail assertion 总数，供 49/51 与上下漂移 fail-closed 回归使用。 */
+/** 只改变 root/detail assertion 总数，供 59/61 与上下漂移 fail-closed 回归使用。 */
 function createDriftedVitestReport(authority: VitestAuthority, actualTestCount: number): string {
   const report = JSON.parse(createPassingVitestReport(authority)) as {
     numPassedTests: number;
@@ -389,6 +389,7 @@ describe("quality-gates.v1 registry", () => {
     const originalUnitTests = [
       "tests/unit/analyzer-config-capture.test.ts",
       "tests/unit/analyzer-config-snapshot.test.ts",
+      "tests/unit/basic-symbol.test.ts",
       "tests/unit/composite-graph-patch.test.ts",
       "tests/unit/index-job-runtime.test.ts",
       "tests/unit/index-read-set.test.ts",
@@ -429,9 +430,9 @@ describe("quality-gates.v1 registry", () => {
     expect(new Set(unitTests).size).toBe(unitTests.length);
     expect([...unitTests].sort()).toEqual([...originalUnitTests].sort());
     expect(unitShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(325);
+      .toBe(352);
     expect(allShards.reduce((total, { expectedTestCount }) => total + expectedTestCount, 0))
-      .toBe(331);
+      .toBe(362);
     /** 这些 suite/assertion 值来自冻结前真实 reporter，禁止从当前待验证输出临时派生。 */
     expect(allShards.map((shard) => ({
       attestationVersion: shard.attestationVersion,
@@ -448,18 +449,19 @@ describe("quality-gates.v1 registry", () => {
     }))).toEqual([
       {
         attestationVersion: 1,
-        expectedSuiteCount: 22,
-        expectedTestCount: 275,
+        expectedSuiteCount: 24,
+        expectedTestCount: 292,
         results: [
           ["tests/unit/analyzer-config-capture.test.ts", "Story 1.5 Analyzer configuration capture", 53],
           ["tests/unit/analyzer-config-snapshot.test.ts", "Story 1.5 analyzer config snapshot", 8],
-          ["tests/unit/composite-graph-patch.test.ts", "Story 1.5 composite graph patch", 5],
-          ["tests/unit/index-job-runtime.test.ts", "index job runtime", 32],
+          ["tests/unit/basic-symbol.test.ts", "Story 1.6 BasicSymbolV1", 11],
+          ["tests/unit/composite-graph-patch.test.ts", "Story 1.5 composite graph patch", 8],
+          ["tests/unit/index-job-runtime.test.ts", "index job runtime", 33],
           ["tests/unit/index-read-set.test.ts", "index read-set provider", 41],
           ["tests/unit/module-dependency-domain.test.ts", "Story 1.5 module dependency domain", 6],
-          ["tests/unit/module-fact-batch.test.ts", "Story 1.5 source module FactBatch", 3],
+          ["tests/unit/module-fact-batch.test.ts", "Story 1.5 source module FactBatch", 4],
           ["tests/unit/sqlite-graph-store.test.ts", "sqlite graph store", 79],
-          ["tests/unit/typescript-analyzer-worker.test.ts", "Story 1.5 TypeScript Analyzer Worker", 18],
+          ["tests/unit/typescript-analyzer-worker.test.ts", "Story 1.5 TypeScript Analyzer Worker", 19],
           ["tests/unit/typescript-module-resolution.test.ts", "Story 1.5 module target priority", 17],
           ["tests/unit/typescript-module-syntax.test.ts", "Story 1.5 AD-24 TypeScript syntax mapping", 13],
         ].map(([filePath, ancestorTitle, expectedAssertionCount]) => ({
@@ -471,24 +473,36 @@ describe("quality-gates.v1 registry", () => {
       {
         attestationVersion: 1,
         expectedSuiteCount: 2,
-        expectedTestCount: 50,
+        expectedTestCount: 60,
         results: [{
           filePath: "tests/unit/sqlite-module-dependencies.test.ts",
           suites: [{
             ancestorTitles: ["Story 1.5 SQLite module dependency storage"],
-            expectedAssertionCount: 50,
+            expectedAssertionCount: 60,
           }],
         }],
         shardId: "sqlite-module-dependencies",
       },
       {
         attestationVersion: 1,
-        expectedSuiteCount: 2,
-        expectedTestCount: 6,
-        results: [{
-          filePath: "tests/contract/graph-service-process.test.ts",
-          suites: [{ ancestorTitles: ["real graph-service process"], expectedAssertionCount: 6 }],
-        }],
+        expectedSuiteCount: 4,
+        expectedTestCount: 10,
+        results: [
+          {
+            filePath: "tests/contract/basic-symbol-contract.test.ts",
+            suites: [{
+              ancestorTitles: ["Story 1.6 BasicSymbolV1 contract"],
+              expectedAssertionCount: 4,
+            }],
+          },
+          {
+            filePath: "tests/contract/graph-service-process.test.ts",
+            suites: [{
+              ancestorTitles: ["real graph-service process"],
+              expectedAssertionCount: 6,
+            }],
+          },
+        ],
         shardId: "graph-service-process",
       },
     ]);
@@ -537,17 +551,17 @@ describe("quality-gates.v1 registry", () => {
     ])).toThrow(/BUILD_TOPOLOGY_INVALID/u);
   });
 
-  it("consumes exact 275 + 50 unit and 6 contract runtime attestations", async () => {
+  it("consumes exact 292 + 60 unit and 10 contract runtime attestations", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { executePnpm, status } = await runStoryVerifierWithOverrides();
 
     expect(status).toBe(0);
     expect(errorSpy).not.toHaveBeenCalled();
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("275/275 tests");
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("50/50 tests");
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("6/6 tests");
-    expect(logSpy.mock.calls.flat().join(" ")).toContain("22/22 suites");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("292/292 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("60/60 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("10/10 tests");
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("24/24 suites");
 
     const commands = executePnpm.mock.calls.map(([args]) => args);
     const buildFilters = commands
@@ -577,9 +591,9 @@ describe("quality-gates.v1 registry", () => {
   });
 
   it.each([
-    ["default unit lower drift", 0, 274],
-    ["SQLite unit lower drift", 1, 49],
-    ["contract lower drift", 2, 5],
+    ["default unit lower drift", 0, 291],
+    ["SQLite unit lower drift", 1, 59],
+    ["contract lower drift", 2, 9],
   ] as const)("rejects %s runtime totals", async (_label, shardIndex, reducedCount) => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -598,7 +612,7 @@ describe("quality-gates.v1 registry", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const overrides = new Map<number, FakeProcessResult>([
-      [1, createProcessResult(createDriftedVitestReport(storyShardAuthorities[1]!, 51))],
+      [1, createProcessResult(createDriftedVitestReport(storyShardAuthorities[1]!, 61))],
     ]);
 
     expect((await runStoryVerifierWithOverrides(overrides)).status).toBe(1);
@@ -609,7 +623,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "failed",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 274 }, () => "passed" as const),
+        ...Array.from({ length: 291 }, () => "passed" as const),
         "failed",
       ])),
       "VITEST_FAILED",
@@ -617,7 +631,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "pending",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 274 }, () => "passed" as const),
+        ...Array.from({ length: 291 }, () => "passed" as const),
         "pending",
       ])),
       "VITEST_NONPASSING",
@@ -625,7 +639,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "skipped",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 274 }, () => "passed" as const),
+        ...Array.from({ length: 291 }, () => "passed" as const),
         "skipped",
       ])),
       "VITEST_NONPASSING",
@@ -633,7 +647,7 @@ describe("quality-gates.v1 registry", () => {
     [
       "todo",
       createProcessResult(createVitestReport(defaultUnitAuthority, [
-        ...Array.from({ length: 274 }, () => "passed" as const),
+        ...Array.from({ length: 291 }, () => "passed" as const),
         "todo",
       ])),
       "VITEST_NONPASSING",

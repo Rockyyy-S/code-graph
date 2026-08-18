@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { isSupportedSourceFile } from "@codegraph/application";
 import {
+  assertSourceRange,
   buildGraphEdgeId,
   buildGraphEntityId,
   buildLegacyGraphEdgeIdV0,
@@ -8,6 +9,7 @@ import {
   buildNpmPackagePurl,
   buildUnresolvedNpmPackagePurl,
   decodeModuleExportName,
+  encodeModuleExportName,
   isCanonicalUtcTimestamp,
   normalizeNodeBuiltinId,
   normalizeRelativeGraphPath,
@@ -240,6 +242,19 @@ export function assertAd4ModuleDependencySchemaIntegrity(database: Database.Data
   assertModuleDependencySchemaIntegrityWithEdgeBuilder(database, buildGraphEdgeId, "v4");
 }
 
+/** v5 复用 v3/v4 的全局语义校验，仅扩展 symbol 节点与 source-derived export。 */
+export function assertBasicSymbolModuleDependencySemantics(
+  database: Database.Database,
+): void {
+  assertNoForeignKeyViolation(database);
+  assertCanonicalNodes(database, true);
+  assertCanonicalEdges(database, buildGraphEdgeId, "v4");
+  assertCanonicalEvidence(database);
+  assertOwnership(database, true);
+  assertHierarchyTopology(database);
+  assertModuleTopology(database, true);
+}
+
 /** 仅身份算法按 schema 版本切换，其余八表、Evidence 与 ownership 合同完全共享。 */
 function assertModuleDependencySchemaIntegrityWithEdgeBuilder(
   database: Database.Database,
@@ -257,7 +272,7 @@ function assertModuleDependencySchemaIntegrityWithEdgeBuilder(
 }
 
 /** 节点按 kind 回算稳定身份，外部实体不得携带 relative_path。 */
-function assertCanonicalNodes(database: Database.Database): void {
+function assertCanonicalNodes(database: Database.Database, allowBasicSymbols = false): void {
   const rows = database.prepare(`
     SELECT id, workspace_key, kind, relative_path, payload_json FROM nodes
   `).iterate() as Iterable<{
@@ -293,6 +308,26 @@ function assertCanonicalNodes(database: Database.Database): void {
           row.relative_path !== null || typeof payload.moduleName !== "string" ||
           row.id !== normalizeNodeBuiltinId(payload.moduleName)
         ) {throw new Error("invalid builtin node");}
+      } else if (allowBasicSymbols && row.kind === "symbol") {
+        if (row.relative_path !== null) {throw new Error("invalid symbol node");}
+        const record = payload;
+        const range = record.range;
+        if (
+          Object.keys(record).sort().join("\0") !==
+            ["exported", "kind", "name", "range", "relativePath", "symbolId"]
+              .sort().join("\0") ||
+          typeof record.exported !== "boolean" ||
+          !["class", "enum", "function", "interface", "namespace", "type-alias", "variable"]
+            .includes(String(record.kind)) ||
+          typeof record.name !== "string" || record.name.length === 0 ||
+          record.name.normalize("NFC") !== record.name ||
+          typeof record.relativePath !== "string" ||
+          normalizeRelativeGraphPath(record.relativePath) !== record.relativePath ||
+          record.symbolId !== row.id ||
+          !row.id.startsWith(`cg://${row.workspace_key}/symbol/v1/`) ||
+          typeof range !== "object" || range === null || Array.isArray(range)
+        ) {throw new Error("invalid symbol node");}
+        assertSourceRange(range as Parameters<typeof assertSourceRange>[0]);
       } else {
         throw new Error("unknown node kind");
       }
@@ -330,10 +365,15 @@ function assertCanonicalEdges(
       ) ||
       (row.relation_type === "contains" && row.qualifier !== "") ||
       (row.relation_type !== "contains" &&
-        !isCanonicalModuleQualifier(
-          row.relation_type as "exports" | "imports",
-          row.qualifier,
-        ))
+        !(schemaLabel === "v3"
+          ? isCanonicalLegacyV3ModuleQualifier(
+              row.relation_type as "exports" | "imports",
+              row.qualifier,
+            )
+          : isCanonicalModuleQualifier(
+              row.relation_type as "exports" | "imports",
+              row.qualifier,
+            )))
     ) {
       throw new Error(`SQLite ${schemaLabel} 包含非规范 module edge qualifier 或 edge 身份。`);
     }
@@ -348,8 +388,19 @@ function isCanonicalModuleQualifier(
   if (relationType === "imports") {
     return qualifier === "value" || qualifier === "type" || qualifier === "dynamic";
   }
-  if (qualifier === "star:value" || qualifier === "star:type") {return true;}
+  if (qualifier === "star:value" || qualifier === "star:type" ||
+    qualifier === "default:value" || qualifier === "default:type") {
+    return true;
+  }
   const segments = qualifier.split(":");
+  if (segments.length === 3 && segments[0] === "local" &&
+    (segments[2] === "value" || segments[2] === "type")) {
+    try {
+      return encodeModuleExportName(decodeModuleExportName(segments[1]!)) === segments[1];
+    } catch {
+      return false;
+    }
+  }
   if (segments.length !== 4 || segments[0] !== "reexport" ||
     (segments[3] !== "value" && segments[3] !== "type")) {
     return false;
@@ -360,6 +411,104 @@ function isCanonicalModuleQualifier(
   } catch {
     return false;
   }
+}
+
+/**
+ * 仅在 SQLite v3→v4 migration 边界验证历史 qualifier。
+ *
+ * v3 使用 `%u` UTF-16 逃逸且允许普通字面 `~`；绝不能调用 v4 decoder，
+ * 否则 `~e` 与 `~uXXXX` 会被错误重解释为新 ASCII 逃逸。
+ */
+function isCanonicalLegacyV3ModuleQualifier(
+  relationType: "exports" | "imports",
+  qualifier: string,
+): boolean {
+  try {
+    normalizeLegacyV3ModuleQualifier(relationType, qualifier);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把严格验证的 v3 qualifier 转为 v4 canonical 文本。
+ *
+ * 该入口只服务 004 migration 的单事务 rekey；常规读写必须继续使用当前 domain codec。
+ */
+export function normalizeLegacyV3ModuleQualifier(
+  relationType: "exports" | "imports",
+  qualifier: string,
+): string {
+  if (relationType === "imports") {
+    if (qualifier === "value" || qualifier === "type" || qualifier === "dynamic") {
+      return qualifier;
+    }
+    throw new TypeError("SQLite v3 imports qualifier 不符合历史合同。");
+  }
+  if (qualifier === "star:value" || qualifier === "star:type") {return qualifier;}
+  const segments = qualifier.split(":");
+  if (
+    segments.length !== 4 ||
+    segments[0] !== "reexport" ||
+    (segments[3] !== "value" && segments[3] !== "type")
+  ) {
+    throw new TypeError("SQLite v3 exports qualifier 不符合历史合同。");
+  }
+  return `reexport:${encodeModuleExportName(decodeLegacyV3ModuleExportName(segments[1]!))}:` +
+    `${encodeModuleExportName(decodeLegacyV3ModuleExportName(segments[2]!))}:${segments[3]}`;
+}
+
+/** 严格复刻 v3 ModuleExportName codec，保留旧字面 `~` 的原始语义。 */
+function decodeLegacyV3ModuleExportName(encoded: string): string {
+  if (encoded === "%u") {return "";}
+  if (/^(?:%u[0-9A-F]{4})+$/u.test(encoded)) {
+    let decoded = "";
+    for (let index = 0; index < encoded.length; index += 6) {
+      decoded += String.fromCharCode(Number.parseInt(encoded.slice(index + 2, index + 6), 16));
+    }
+    if (encodeLegacyV3ModuleExportName(decoded) !== encoded) {
+      throw new TypeError("SQLite v3 ModuleExportName UTF-16 编码不规范。");
+    }
+    return decoded;
+  }
+  try {
+    const decoded = decodeURIComponent(encoded);
+    if (encodeLegacyV3ModuleExportName(decoded) !== encoded) {
+      throw new TypeError("SQLite v3 ModuleExportName percent-encoding 不规范。");
+    }
+    return decoded;
+  } catch (error) {
+    throw new TypeError("SQLite v3 ModuleExportName 编码无法解码。", { cause: error });
+  }
+}
+
+/** 旧 codec 对空名/孤立代理使用 `%u`，普通 `~` 必须保持字面。 */
+function encodeLegacyV3ModuleExportName(value: string): string {
+  if (value.length > 0 && !containsLoneSurrogate(value)) {
+    return encodeURIComponent(value);
+  }
+  if (value.length === 0) {return "%u";}
+  let encoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    encoded += `%u${value.charCodeAt(index).toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  return encoded;
+}
+
+/** 判断旧 UTF-16 fallback 是否必要，配对代理仍走标准 UTF-8 percent-encoding。 */
+function containsLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {return true;}
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Evidence ID 按 AD-21 键回算，detectedAt 不参与身份。 */
@@ -404,7 +553,18 @@ function assertCanonicalEvidence(database: Database.Database): void {
 }
 
 /** module edge 与 Evidence 必须形成 file→module 的受支持拓扑且每条边有有效证据。 */
-function assertModuleTopology(database: Database.Database): void {
+function assertModuleTopology(database: Database.Database, allowBasicSymbols = false): void {
+  const supportedTargetKinds = allowBasicSymbols
+    ? "('file', 'external-package', 'node-builtin', 'symbol')"
+    : "('file', 'external-package', 'node-builtin')";
+  const symbolShape = allowBasicSymbols
+    ? `OR (target.kind = 'symbol' AND (
+        edge.relation_type <> 'exports' OR
+        (edge.qualifier NOT IN ('default:value', 'default:type') AND
+          edge.qualifier NOT LIKE 'local:%:value' AND
+          edge.qualifier NOT LIKE 'local:%:type')
+      ))`
+    : "";
   const invalidEdge = database.prepare(`
     SELECT 1 AS found
     FROM edges AS edge
@@ -414,12 +574,14 @@ function assertModuleTopology(database: Database.Database): void {
       AND target.id = edge.to_id
     WHERE edge.relation_type IN ('imports', 'exports') AND (
       source.kind <> 'file' OR
-      target.kind NOT IN ('file', 'external-package', 'node-builtin') OR
+      target.kind NOT IN ${supportedTargetKinds} OR
+      (target.kind = 'symbol' AND edge.relation_type <> 'exports') OR
       (edge.relation_type = 'imports' AND edge.qualifier NOT IN ('value', 'type', 'dynamic')) OR
-      (edge.relation_type = 'exports' AND
+      (target.kind <> 'symbol' AND edge.relation_type = 'exports' AND
         edge.qualifier NOT IN ('star:value', 'star:type') AND
         edge.qualifier NOT LIKE 'reexport:%:%:value' AND
         edge.qualifier NOT LIKE 'reexport:%:%:type')
+      ${symbolShape}
     )
     LIMIT 1
   `).get();
@@ -442,7 +604,8 @@ function assertModuleTopology(database: Database.Database): void {
   const unsupportedEdge = database.prepare(`
     SELECT 1 AS found
     FROM edges AS edge
-    WHERE edge.relation_type IN ('imports', 'exports') AND NOT EXISTS (
+    JOIN nodes AS target ON target.workspace_key = edge.workspace_key AND target.id = edge.to_id
+    WHERE edge.relation_type IN ('imports', 'exports') AND target.kind <> 'symbol' AND NOT EXISTS (
       SELECT 1 FROM evidence
       WHERE evidence.workspace_key = edge.workspace_key AND evidence.edge_id = edge.id
         AND evidence.source_file_id = edge.from_id
@@ -763,7 +926,7 @@ function normalizeCheckExpression(expression: string): string {
 }
 
 /** 多态 ownership 必须联结到声明类型的真实事实。 */
-function assertOwnership(database: Database.Database): void {
+function assertOwnership(database: Database.Database, allowBasicSymbols = false): void {
   const invalid = database.prepare(`
     SELECT 1 AS found
     FROM facts_ownership AS ownership
@@ -783,7 +946,40 @@ function assertOwnership(database: Database.Database): void {
   if (invalid !== undefined) {
     throw new Error("SQLite v3 facts_ownership 包含无效 fact 引用。");
   }
-  const invalidHierarchyOwner = database.prepare(`
+  const invalidHierarchyOwner = database.prepare(allowBasicSymbols ? `
+    SELECT 1 AS found
+    FROM facts_ownership AS ownership
+    LEFT JOIN nodes AS node ON node.workspace_key = ownership.workspace_key
+      AND node.id = ownership.fact_id AND ownership.fact_kind = 'node'
+    LEFT JOIN edges AS edge ON edge.workspace_key = ownership.workspace_key
+      AND edge.id = ownership.fact_id AND ownership.fact_kind = 'edge'
+    LEFT JOIN nodes AS target ON target.workspace_key = ownership.workspace_key
+      AND target.id = edge.to_id
+    LEFT JOIN nodes AS root ON root.workspace_key = ownership.workspace_key
+      AND root.kind = 'workspace'
+    LEFT JOIN nodes AS source_file ON source_file.workspace_key = ownership.workspace_key
+      AND ownership.owner_key = 'source:typescript:' || source_file.id
+      AND source_file.kind = 'file'
+    WHERE ownership.fact_kind IN ('node', 'edge') AND (
+      (node.kind IN ('workspace', 'directory', 'file') AND (
+        root.id IS NULL OR ownership.owner_key <> 'hierarchy:' || root.id
+      )) OR
+      (edge.relation_type = 'contains' AND (
+        root.id IS NULL OR ownership.owner_key <> 'hierarchy:' || root.id
+      )) OR
+      (node.kind = 'symbol' AND (
+        source_file.id IS NULL OR json_extract(node.payload_json, '$.relativePath') <>
+          source_file.relative_path
+      )) OR
+      (edge.relation_type = 'exports' AND target.kind = 'symbol' AND (
+        source_file.id IS NULL OR edge.from_id <> source_file.id OR
+        json_extract(target.payload_json, '$.relativePath') <> source_file.relative_path
+      )) OR
+      (node.kind IN ('external-package', 'node-builtin')) OR
+      (edge.relation_type IN ('imports', 'exports') AND COALESCE(target.kind, '') <> 'symbol')
+    )
+    LIMIT 1
+  ` : `
     SELECT 1 AS found
     FROM facts_ownership AS ownership
     LEFT JOIN nodes AS node ON node.workspace_key = ownership.workspace_key
@@ -830,9 +1026,35 @@ function assertOwnership(database: Database.Database): void {
     ) <> 1
     LIMIT 1
   `).get();
+  const incompleteSourceOwnership = allowBasicSymbols ? database.prepare(`
+    SELECT 1 AS found
+    FROM (
+      SELECT 'node' AS fact_kind, node.id AS fact_id, node.workspace_key,
+             'source:typescript:' || source.id AS owner_key
+      FROM nodes AS node
+      JOIN nodes AS source ON source.workspace_key = node.workspace_key
+        AND source.kind = 'file'
+        AND source.relative_path = json_extract(node.payload_json, '$.relativePath')
+      WHERE node.kind = 'symbol'
+      UNION ALL
+      SELECT 'edge', edge.id, edge.workspace_key, 'source:typescript:' || edge.from_id
+      FROM edges AS edge
+      JOIN nodes AS target ON target.workspace_key = edge.workspace_key
+        AND target.id = edge.to_id AND target.kind = 'symbol'
+      WHERE edge.relation_type = 'exports'
+    ) AS fact
+    WHERE (
+      SELECT COUNT(*) FROM facts_ownership AS ownership
+      WHERE ownership.workspace_key = fact.workspace_key
+        AND ownership.fact_kind = fact.fact_kind
+        AND ownership.fact_id = fact.fact_id
+        AND ownership.owner_key = fact.owner_key
+    ) <> 1
+    LIMIT 1
+  `).get() : undefined;
   if (
     invalidHierarchyOwner !== undefined || incompleteHierarchyOwnership !== undefined ||
-    invalidEvidenceOwner !== undefined
+    invalidEvidenceOwner !== undefined || incompleteSourceOwnership !== undefined
   ) {
     throw new Error("SQLite v3 ownership 未按 hierarchy/source 合同唯一绑定。");
   }
@@ -892,8 +1114,8 @@ function assertHierarchyTopology(database: Database.Database): void {
       AND target.workspace_key = edge.workspace_key
     WHERE edge.relation_type = 'contains' AND (
       edge.qualifier <> '' OR source.kind = 'file' OR target.kind = 'workspace' OR
-      source.kind IN ('external-package', 'node-builtin') OR
-      target.kind IN ('external-package', 'node-builtin') OR
+      source.kind NOT IN ('workspace', 'directory') OR
+      target.kind NOT IN ('directory', 'file') OR
       (source.kind = 'workspace' AND instr(target.relative_path, '/') <> 0) OR
       (source.kind = 'directory' AND (
         substr(target.relative_path, 1, length(source.relative_path) + 1) <>

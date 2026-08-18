@@ -51,17 +51,33 @@ function createModuleBatch(
   sourcePath: "src/a.ts" | "src/b.ts",
   targetPath: "src/a.ts" | "src/b.ts",
   detectedAt: string,
+  options: {
+    coverage?: "complete" | "failed" | "partial";
+    includeRelation?: boolean;
+    withSymbol?: boolean;
+  } = {},
 ): ModuleSourceFactBatchV1 {
+  const sourceFileId = buildGraphEntityId(workspaceKey, "file", sourcePath);
+  const withSymbol = options.withSymbol === true;
   return buildModuleSourceFactBatch({
     analyzerKind: "typescript",
     analyzerVersion: "6.0.3",
     configDigest: "3".repeat(64),
-    coverage: "complete",
+    coverage: options.coverage ?? "complete",
     detectedAt,
     diagnostics: [],
     inputDigest: "5".repeat(64),
-    localExportBindings: [],
-    relations: [{
+    localExportBindings: withSymbol ? [{
+      exportedName: "publicEntry",
+      language: "typescript",
+      localName: "entry",
+      normalizedRange: { end: 5, start: 0 },
+      sourceFileId,
+      stableSortKey: ["publicEntry", "entry", "value", 0, 5].join("\0"),
+      typeOrValue: "value",
+    }] : [],
+    relativePath: sourcePath,
+    relations: options.includeRelation === false ? [] : [{
       confidence: "high",
       language: "typescript",
       normalizedRange: { end: 18, start: 7 },
@@ -74,7 +90,20 @@ function createModuleBatch(
         resolvedPath: targetPath,
       },
     }],
-    sourceFileId: buildGraphEntityId(workspaceKey, "file", sourcePath),
+    sourceFileId,
+    symbolSeeds: withSymbol ? [{
+      exported: false,
+      kind: "variable",
+      language: "typescript",
+      name: "entry",
+      qualifiedName: "entry",
+      range: {
+        end: { character: 5, line: 0 },
+        start: { character: 0, line: 0 },
+      },
+      signatureDigest: "7".repeat(64),
+      sourceFileId,
+    }] : [],
     workspaceKey,
   });
 }
@@ -102,8 +131,12 @@ describe("Story 1.5 composite graph patch", () => {
       workspaceKey,
     });
     const batches = [
-      createModuleBatch("src/b.ts", "src/a.ts", "2026-07-27T00:00:00.000Z"),
-      createModuleBatch("src/a.ts", "src/b.ts", "2026-07-27T00:00:00.000Z"),
+      createModuleBatch("src/b.ts", "src/a.ts", "2026-07-27T00:00:00.000Z", {
+        withSymbol: true,
+      }),
+      createModuleBatch("src/a.ts", "src/b.ts", "2026-07-27T00:00:00.000Z", {
+        withSymbol: true,
+      }),
     ];
     const snapshot: CommittedCompositeGraphSnapshotV1 = {
       allEdges: [],
@@ -137,10 +170,10 @@ describe("Story 1.5 composite graph patch", () => {
       [...first.slices.map((slice) => slice.ownershipSliceId)].sort(),
     );
     expect(first.slices.filter((slice) => slice.ownershipSliceId.startsWith("source:"))
-      .every((slice) => slice.nodeUpserts.length === 0 && slice.edgeUpserts.length === 0 &&
+      .every((slice) => slice.nodeUpserts.length === 1 && slice.edgeUpserts.length === 1 &&
         slice.evidenceUpserts.length === 1)).toBe(true);
-    expect(first.targetNodeCount).toBe(hierarchy.nodes.length);
-    expect(first.targetEdgeCount).toBe(hierarchy.edges.length + 2);
+    expect(first.targetNodeCount).toBe(hierarchy.nodes.length + 2);
+    expect(first.targetEdgeCount).toBe(hierarchy.edges.length + 4);
   });
 
   it("treats detectedAt-only replay as a semantic no-op", () => {
@@ -158,24 +191,28 @@ describe("Story 1.5 composite graph patch", () => {
       "src/a.ts",
       "src/b.ts",
       "2026-07-27T00:00:00.000Z",
+      { withSymbol: true },
     );
     const replayBatch = createModuleBatch(
       "src/a.ts",
       "src/b.ts",
       "2026-07-27T00:00:10.000Z",
+      { withSymbol: true },
     );
+    const symbolIds = new Set(committedBatch.nodes.filter((node) => node.kind === "symbol")
+      .map((node) => node.id));
     const snapshot: CommittedCompositeGraphSnapshotV1 = {
       allEdges: [...hierarchy.edges, ...committedBatch.edges],
       allEvidence: committedBatch.evidence,
-      allNodes: hierarchy.nodes,
+      allNodes: [...hierarchy.nodes, ...committedBatch.nodes],
       committedReadSet: null,
       graphRevision: 7,
       ownedEdges: hierarchy.edges,
       ownedNodes: hierarchy.nodes,
       ownedSlices: [{
-        ownedEdges: [],
+        ownedEdges: committedBatch.edges.filter((edge) => symbolIds.has(edge.toId)),
         ownedEvidence: committedBatch.evidence,
-        ownedNodes: [],
+        ownedNodes: committedBatch.nodes.filter((node) => node.kind === "symbol"),
         ownershipSliceId: committedBatch.ownershipSliceId,
       }],
       ownershipSliceId: hierarchy.ownershipSliceId,
@@ -201,6 +238,183 @@ describe("Story 1.5 composite graph patch", () => {
     expect(replay.sharedEdgeUpserts).toEqual([]);
     expect(replay.sharedNodeDeletes).toEqual([]);
     expect(replay.sharedNodeUpserts).toEqual([]);
+  });
+
+  it("keeps symbol and module facts on partial or failed source coverage", () => {
+    const readSet = createReadSet(8);
+    const hierarchy = buildHierarchyFactBatch({
+      configDigest: readSet.configDigest,
+      coverage: "complete",
+      inputDigest: readSet.inputDigest,
+      manifestDigest: readSet.manifestDigest,
+      producerVersion: "hierarchy-v1",
+      relativePaths: readSet.manifest.map((entry) => entry.path),
+      workspaceKey,
+    });
+    const committedBatch = createModuleBatch(
+      "src/a.ts",
+      "src/b.ts",
+      "2026-08-17T00:00:00.000Z",
+      { withSymbol: true },
+    );
+    const symbolIds = new Set(committedBatch.nodes.filter((node) => node.kind === "symbol")
+      .map((node) => node.id));
+    const symbolEdges = committedBatch.edges.filter((edge) => symbolIds.has(edge.toId));
+    const snapshot: CommittedCompositeGraphSnapshotV1 = {
+      allEdges: [...hierarchy.edges, ...committedBatch.edges],
+      allEvidence: committedBatch.evidence,
+      allNodes: [...hierarchy.nodes, ...committedBatch.nodes],
+      committedReadSet: null,
+      graphRevision: 8,
+      ownedEdges: hierarchy.edges,
+      ownedNodes: hierarchy.nodes,
+      ownedSlices: [{
+        ownedEdges: symbolEdges,
+        ownedEvidence: committedBatch.evidence,
+        ownedNodes: committedBatch.nodes.filter((node) => node.kind === "symbol"),
+        ownershipSliceId: committedBatch.ownershipSliceId,
+      }],
+      ownershipSliceId: hierarchy.ownershipSliceId,
+      patchDigest: "6".repeat(64),
+    };
+
+    for (const coverage of ["partial", "failed"] as const) {
+      const incomplete = createModuleBatch(
+        "src/a.ts",
+        "src/b.ts",
+        "2026-08-17T00:00:10.000Z",
+        { coverage, includeRelation: false },
+      );
+      const patch = buildCompositeGraphPatch({
+        digestPort,
+        hierarchyBatch: hierarchy,
+        moduleBatches: [incomplete],
+        readSet,
+        snapshot,
+      });
+      const sourceSlice = patch.slices.find((slice) =>
+        slice.ownershipSliceId === committedBatch.ownershipSliceId);
+
+      expect(sourceSlice).toMatchObject({
+        edgeDeletes: [],
+        evidenceDeletes: [],
+        nodeDeletes: [],
+      });
+      expect(patch.sharedEdgeDeletes).toEqual([]);
+      expect(patch.targetEdgeCount).toBe(hierarchy.edges.length + committedBatch.edges.length);
+      expect(patch.targetNodeCount).toBe(hierarchy.nodes.length + committedBatch.nodes.length);
+    }
+  });
+
+  it("ignores every new shared module fact from a failed source batch", () => {
+    const readSet = createReadSet(10);
+    const hierarchy = buildHierarchyFactBatch({
+      configDigest: readSet.configDigest,
+      coverage: "complete",
+      inputDigest: readSet.inputDigest,
+      manifestDigest: readSet.manifestDigest,
+      producerVersion: "hierarchy-v1",
+      relativePaths: readSet.manifest.map((entry) => entry.path),
+      workspaceKey,
+    });
+    const failedBatch = createModuleBatch(
+      "src/a.ts",
+      "src/b.ts",
+      "2026-08-18T00:00:00.000Z",
+      { coverage: "failed" },
+    );
+    const patch = buildCompositeGraphPatch({
+      digestPort,
+      hierarchyBatch: hierarchy,
+      moduleBatches: [failedBatch],
+      readSet,
+      snapshot: {
+        allEdges: hierarchy.edges,
+        allEvidence: [],
+        allNodes: hierarchy.nodes,
+        committedReadSet: null,
+        graphRevision: 10,
+        ownedEdges: hierarchy.edges,
+        ownedNodes: hierarchy.nodes,
+        ownedSlices: [],
+        ownershipSliceId: hierarchy.ownershipSliceId,
+        patchDigest: "6".repeat(64),
+      },
+    });
+
+    /** failed 覆盖不可凭不完整的新结果新增共享 imports 或 Evidence。 */
+    expect(patch.sharedEdgeUpserts).toEqual([]);
+    expect(patch.targetEdgeCount).toBe(hierarchy.edges.length);
+    expect(patch.targetNodeCount).toBe(hierarchy.nodes.length);
+    expect(patch.slices.find((slice) => slice.ownershipSliceId ===
+      failedBatch.ownershipSliceId)).toMatchObject({
+      edgeUpserts: [],
+      evidenceUpserts: [],
+      nodeUpserts: [],
+    });
+  });
+
+  it("removes only the deleted file source slice during complete replacement", () => {
+    const readSet = createReadSet(9);
+    const hierarchy = buildHierarchyFactBatch({
+      configDigest: readSet.configDigest,
+      coverage: "complete",
+      inputDigest: readSet.inputDigest,
+      manifestDigest: readSet.manifestDigest,
+      producerVersion: "hierarchy-v1",
+      relativePaths: readSet.manifest.map((entry) => entry.path),
+      workspaceKey,
+    });
+    const first = createModuleBatch(
+      "src/a.ts",
+      "src/b.ts",
+      "2026-08-17T00:00:00.000Z",
+      { withSymbol: true },
+    );
+    const second = createModuleBatch(
+      "src/b.ts",
+      "src/a.ts",
+      "2026-08-17T00:00:00.000Z",
+      { withSymbol: true },
+    );
+    const ownedSlice = (batch: ModuleSourceFactBatchV1) => {
+      const symbolIds = new Set(batch.nodes.filter((node) => node.kind === "symbol")
+        .map((node) => node.id));
+      return {
+        ownedEdges: batch.edges.filter((edge) => symbolIds.has(edge.toId)),
+        ownedEvidence: batch.evidence,
+        ownedNodes: batch.nodes.filter((node) => node.kind === "symbol"),
+        ownershipSliceId: batch.ownershipSliceId,
+      };
+    };
+    const patch = buildCompositeGraphPatch({
+      digestPort,
+      hierarchyBatch: hierarchy,
+      moduleBatches: [second],
+      readSet,
+      snapshot: {
+        allEdges: [...hierarchy.edges, ...first.edges, ...second.edges],
+        allEvidence: [...first.evidence, ...second.evidence],
+        allNodes: [...hierarchy.nodes, ...first.nodes, ...second.nodes],
+        committedReadSet: null,
+        graphRevision: 9,
+        ownedEdges: hierarchy.edges,
+        ownedNodes: hierarchy.nodes,
+        ownedSlices: [ownedSlice(first), ownedSlice(second)],
+        ownershipSliceId: hierarchy.ownershipSliceId,
+        patchDigest: "6".repeat(64),
+      },
+    });
+    const removed = patch.slices.find((slice) =>
+      slice.ownershipSliceId === first.ownershipSliceId);
+    const retained = patch.slices.find((slice) =>
+      slice.ownershipSliceId === second.ownershipSliceId);
+
+    expect(removed?.nodeDeletes).toEqual(first.nodes.filter((node) => node.kind === "symbol")
+      .map((node) => node.id));
+    expect(removed?.edgeDeletes).toHaveLength(1);
+    expect(removed?.evidenceDeletes).toEqual(first.evidence.map((item) => item.id));
+    expect(retained).toMatchObject({ edgeDeletes: [], evidenceDeletes: [], nodeDeletes: [] });
   });
 
   it("retires removed source Evidence and its unsupported edge but preserves orphan shared nodes", () => {

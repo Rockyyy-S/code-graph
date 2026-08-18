@@ -22,9 +22,11 @@ import {
 import {
   buildGraphEntityId,
   buildLegacyGraphEdgeIdV0,
+  assertSourceRange,
   createExternalPackageNode,
   createNodeBuiltinNode,
   createUnresolvedExternalPackageNode,
+  normalizeRelativeGraphPath,
   type AnyGraphPatchV1,
   type CommittedCompositeGraphSnapshotV1,
   type CommittedGraphSnapshotV1,
@@ -39,13 +41,14 @@ import {
   type HierarchyReadSetV1,
   type ModuleEvidenceV1,
 } from "@codegraph/domain";
+import { assertAd4EdgeIdentitySchemaSupported } from "./migrations/004-ad4-edge-identity.js";
 import {
-  AD4_EDGE_IDENTITY_SCHEMA_VERSION,
-  AD4_EDGE_IDENTITY_TABLE_NAMES,
-  applyAd4EdgeIdentityMigration,
-  assertAd4EdgeIdentitySchemaIntegrity,
-  assertAd4EdgeIdentitySchemaSupported,
-} from "./migrations/004-ad4-edge-identity.js";
+  BASIC_SYMBOL_SCHEMA_VERSION,
+  BASIC_SYMBOL_TABLE_NAMES,
+  applyBasicSymbolMigration,
+  assertBasicSymbolSchemaIntegrity,
+  assertBasicSymbolSchemaSupported,
+} from "./migrations/005-basic-symbols.js";
 
 /** SQLite 锁竞争等待的固定上限。 */
 export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
@@ -1103,7 +1106,7 @@ export class SqliteGraphStore implements GraphStorePort {
       "原子提交触发了未声明的旁路表变更。",
     );
     // 提交公开前独立验证 module edge/Evidence 拓扑与精确 v3 Schema。
-    assertAd4EdgeIdentitySchemaIntegrity(this.#database, this.#digestPort);
+    assertBasicSymbolSchemaIntegrity(this.#database);
     // 最终公开前复用启动屏障，校验 topology、ownership、摘要及完整 read-set 绑定。
     this.readBootstrapState();
 
@@ -1588,17 +1591,17 @@ export async function openSqliteGraphStore(
   try {
     database = new Database(options.databasePath, { timeout: SQLITE_BUSY_TIMEOUT_MS });
     /** 未知未来 Schema 必须在 WAL 等持久设置前只读拒绝。 */
-    assertAd4EdgeIdentitySchemaSupported(database);
+    assertBasicSymbolSchemaSupported(database);
     configurePragmas(database);
     const schemaVersionBeforeMigration = readSchemaVersionForBackup(database);
     if (
       existedBeforeOpen &&
       schemaVersionBeforeMigration !== null &&
-      schemaVersionBeforeMigration < AD4_EDGE_IDENTITY_SCHEMA_VERSION
+      schemaVersionBeforeMigration < BASIC_SYMBOL_SCHEMA_VERSION
     ) {
       await createVerifiedAd4MigrationBackup(database, options.databasePath);
     }
-    applyAd4EdgeIdentityMigration(database, {
+    applyBasicSymbolMigration(database, {
       digestPort: options.digestPort,
       ...(options.faultInjector === undefined ? {} : { faultInjector: options.faultInjector }),
     });
@@ -1610,7 +1613,7 @@ export async function openSqliteGraphStore(
     readAndValidatePragmas(database);
     if (
       JSON.stringify(readTableNames(database)) !==
-      JSON.stringify(AD4_EDGE_IDENTITY_TABLE_NAMES)
+      JSON.stringify(BASIC_SYMBOL_TABLE_NAMES)
     ) {
       throw new Error("SQLite migration 未保持精确八表。");
     }
@@ -1860,6 +1863,9 @@ function hasCompositeOperations(patch: CompositeGraphPatchV1): boolean {
 
 /** 外部节点字段只进入结构化 payload，不伪造 relative_path。 */
 function serializeNodePayload(node: GraphNodeV1): string {
+  if (node.kind === "symbol") {
+    return JSON.stringify(node.symbol);
+  }
   if (node.kind === "external-package") {
     return JSON.stringify({
       packageName: node.packageName,
@@ -2266,11 +2272,33 @@ function readPersistedGraphCounts(
       FROM facts_ownership AS ownership
       LEFT JOIN evidence ON evidence.workspace_key = ownership.workspace_key
         AND evidence.id = ownership.fact_id
+      LEFT JOIN nodes ON nodes.workspace_key = ownership.workspace_key
+        AND nodes.id = ownership.fact_id
+      LEFT JOIN edges ON edges.workspace_key = ownership.workspace_key
+        AND edges.id = ownership.fact_id
       WHERE ownership.workspace_key = ? AND (
         (ownership.owner_key = ? AND ownership.fact_kind NOT IN ('node', 'edge')) OR
         (ownership.owner_key LIKE 'source:typescript:%' AND (
-          ownership.fact_kind <> 'evidence' OR evidence.id IS NULL OR
-          ownership.owner_key <> 'source:typescript:' || evidence.source_file_id
+          (ownership.fact_kind = 'evidence' AND (
+            evidence.id IS NULL OR
+            ownership.owner_key <> 'source:typescript:' || evidence.source_file_id
+          )) OR
+          (ownership.fact_kind = 'node' AND (nodes.id IS NULL OR nodes.kind <> 'symbol')) OR
+          (ownership.fact_kind = 'edge' AND (
+            edges.id IS NULL OR edges.relation_type <> 'exports' OR
+            ownership.owner_key <> 'source:typescript:' || edges.from_id OR
+            NOT EXISTS (
+              SELECT 1 FROM nodes AS target
+              JOIN facts_ownership AS target_owner
+                ON target_owner.workspace_key = target.workspace_key
+               AND target_owner.fact_kind = 'node'
+               AND target_owner.fact_id = target.id
+               AND target_owner.owner_key = ownership.owner_key
+              WHERE target.workspace_key = edges.workspace_key
+                AND target.id = edges.to_id AND target.kind = 'symbol'
+            )
+          )) OR
+          ownership.fact_kind NOT IN ('node', 'edge', 'evidence')
         ))
       )
       UNION ALL
@@ -3170,7 +3198,7 @@ function countsModuleFacts(database: Database.Database, workspaceKey: string): b
   const row = database.prepare(`
     SELECT
       EXISTS(SELECT 1 FROM nodes WHERE workspace_key = ?
-        AND kind IN ('external-package', 'node-builtin')) AS has_module_node,
+        AND kind IN ('external-package', 'node-builtin', 'symbol')) AS has_module_node,
       EXISTS(SELECT 1 FROM edges WHERE workspace_key = ?
         AND relation_type IN ('imports', 'exports')) AS has_module_edge,
       EXISTS(SELECT 1 FROM evidence WHERE workspace_key = ?) AS has_evidence
@@ -3270,6 +3298,33 @@ function mapGraphNode(row: GraphNodeRow): GraphNodeV1 {
     return Object.freeze({ id: row.id, kind: row.kind, relativePath: row.relative_path });
   }
   const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  if (row.kind === "symbol") {
+    if (row.relative_path !== null || typeof payload.symbolId !== "string" ||
+      payload.symbolId !== row.id || typeof payload.name !== "string" || payload.name.length === 0 ||
+      !isBasicSymbolKind(payload.kind) || typeof payload.exported !== "boolean" ||
+      typeof payload.relativePath !== "string" || !isRecord(payload.range)) {
+      throw new Error("symbol payload 不完整。");
+    }
+    const relativePath = normalizeRelativeGraphPath(payload.relativePath);
+    const range = payload.range as unknown as Parameters<typeof assertSourceRange>[0];
+    assertSourceRange(range);
+    const symbol = Object.freeze({
+      exported: payload.exported,
+      kind: payload.kind,
+      name: payload.name.normalize("NFC"),
+      range: Object.freeze({
+        end: Object.freeze({ ...range.end }),
+        start: Object.freeze({ ...range.start }),
+      }),
+      relativePath,
+      symbolId: row.id,
+    });
+    const node = Object.freeze({ id: row.id, kind: "symbol" as const, symbol });
+    if (symbol.name !== payload.name || serializeNodePayload(node) !== row.payload_json) {
+      throw new Error("symbol payload_json 不是唯一规范表示。");
+    }
+    return node;
+  }
   if (row.kind === "external-package") {
     if (typeof payload.packageName !== "string" ||
       (payload.versionState !== "resolved" && payload.versionState !== "unresolved") ||
@@ -3294,6 +3349,15 @@ function mapGraphNode(row: GraphNodeRow): GraphNodeV1 {
   }
   return node;
 }
+
+/** SQLite 恢复边界封闭 BasicSymbol kind。 */
+function isBasicSymbolKind(value: unknown): value is
+  "class" | "enum" | "function" | "interface" | "namespace" | "type-alias" | "variable" {
+  return value === "function" || value === "class" || value === "interface" ||
+    value === "type-alias" || value === "enum" || value === "variable" ||
+    value === "namespace";
+}
+
 
 /** SQLite v3 edge 行恢复为 contains/imports/exports 联合。 */
 function mapGraphEdge(row: GraphEdgeRow): GraphEdgeV1 {

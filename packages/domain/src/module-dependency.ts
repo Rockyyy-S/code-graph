@@ -1,9 +1,21 @@
 import type { HierarchyEdge, HierarchyNode } from "./hierarchy.js";
 
-/** 模块事实使用的公共源码范围：0-based UTF-16 code-unit、半开区间。 */
-export interface SourceRangeV1 {
+/** 模块 Evidence 内部使用的 UTF-16 offset 半开区间。 */
+export interface Utf16OffsetRangeV1 {
   end: number;
   start: number;
+}
+
+/** 公共导航位置使用 0-based UTF-16 code-unit 行列。 */
+export interface SourcePositionV1 {
+  character: number;
+  line: number;
+}
+
+/** 公共导航范围固定使用 `[start,end)`，不得与 SQLite offset 混用。 */
+export interface SourceRangeV1 {
+  end: SourcePositionV1;
+  start: SourcePositionV1;
 }
 
 /** AD-21 固定的 TypeScript/JavaScript 文件语言枚举。 */
@@ -19,6 +31,56 @@ export type ModuleConfidenceV1 = "high" | "low" | "medium";
 /** 模块关系类型不包含 references 或运行时调用。 */
 export type ModuleRelationTypeV1 = "exports" | "imports";
 
+/** AD-27 封闭的 BasicSymbolV1 声明种类。 */
+export type BasicSymbolKind =
+  | "class"
+  | "enum"
+  | "function"
+  | "interface"
+  | "namespace"
+  | "type-alias"
+  | "variable";
+
+/** Worker 返回的可审计身份材料；host 负责构造最终 symbolId。 */
+export interface BasicSymbolSeedV1 {
+  exported: boolean;
+  kind: BasicSymbolKind;
+  language: ModuleLanguageV1;
+  name: string;
+  qualifiedName: string;
+  range: SourceRangeV1;
+  signatureDigest: string;
+  sourceFileId: string;
+}
+
+/** AD-27 的稳定顶层符号事实合同。 */
+export interface BasicSymbolV1 {
+  exported: boolean;
+  kind: BasicSymbolKind;
+  name: string;
+  range: SourceRangeV1;
+  relativePath: string;
+  symbolId: string;
+}
+
+/** 持久图谱用 wrapper；默认 GraphViewNodeKind 仍不包含 symbol。 */
+export interface BasicSymbolNodeV1 {
+  id: string;
+  kind: "symbol";
+  symbol: BasicSymbolV1;
+}
+
+/** 后续查询与导航可以直接消费的封闭本地目标联合。 */
+export type NavigationTargetV1 =
+  | { relativePath: string; targetKind: "directory" }
+  | { relativePath: string; targetKind: "file" }
+  | {
+      range: SourceRangeV1;
+      relativePath: string;
+      symbolId: string;
+      targetKind: "symbol";
+    };
+
 /** imports qualifier 只由源码语法确定。 */
 export interface ImportsQualifierV1 {
   kind: "imports";
@@ -29,6 +91,21 @@ export interface ImportsQualifierV1 {
 /** star re-export qualifier。 */
 export interface StarExportQualifierV1 {
   kind: "star";
+  typeOrValue: "type" | "value";
+  version: 1;
+}
+
+/** 本地命名导出 qualifier。 */
+export interface LocalExportQualifierV1 {
+  exportedName: string;
+  kind: "local";
+  typeOrValue: "type" | "value";
+  version: 1;
+}
+
+/** 默认导出 qualifier。 */
+export interface DefaultExportQualifierV1 {
+  kind: "default";
   typeOrValue: "type" | "value";
   version: 1;
 }
@@ -44,7 +121,9 @@ export interface ReexportQualifierV1 {
 
 /** AD-24 唯一模块 qualifier 结构。 */
 export type ModuleQualifierV1 =
+  | DefaultExportQualifierV1
   | ImportsQualifierV1
+  | LocalExportQualifierV1
   | ReexportQualifierV1
   | StarExportQualifierV1;
 
@@ -65,7 +144,11 @@ export interface NodeBuiltinNodeV1 {
 }
 
 /** 当前图谱节点联合。 */
-export type GraphNodeV1 = ExternalPackageNodeV1 | HierarchyNode | NodeBuiltinNodeV1;
+export type GraphNodeV1 =
+  | BasicSymbolNodeV1
+  | ExternalPackageNodeV1
+  | HierarchyNode
+  | NodeBuiltinNodeV1;
 
 /** imports/exports 关系方向固定为 source file → target module entity。 */
 export interface ModuleEdgeV1 {
@@ -102,13 +185,14 @@ export type ModuleTargetV1 =
 /** Analyzer 只输出稳定、相对路径化且不含源码正文的诊断。 */
 export interface AnalysisDiagnosticV1 {
   code:
+    | "BASIC_SYMBOL_KIND_CONFLICT"
     | "MODULE_DYNAMIC_SPECIFIER_NOT_LITERAL"
     | "MODULE_EXTERNAL_PACKAGE_METADATA_INVALID"
     | "MODULE_RELATIVE_TARGET_UNRESOLVED"
     | "MODULE_REQUIRE_SPECIFIER_NOT_LITERAL"
     | "MODULE_RESOLUTION_FAILED"
     | "MODULE_SPECIFIER_INVALID";
-  normalizedRange: SourceRangeV1;
+  normalizedRange: Utf16OffsetRangeV1;
   path: string;
   severity: "warning";
   suggestedAction: string;
@@ -119,7 +203,7 @@ export interface LocalExportBindingSeedV1 {
   exportedName: string;
   language: ModuleLanguageV1;
   localName: string | "default";
-  normalizedRange: SourceRangeV1;
+  normalizedRange: Utf16OffsetRangeV1;
   sourceFileId: string;
   stableSortKey: string;
   typeOrValue: "type" | "value";
@@ -134,7 +218,7 @@ export interface ModuleEvidenceV1 {
   evidenceKind: "module-dependency";
   id: string;
   language: ModuleLanguageV1;
-  normalizedRange: SourceRangeV1;
+  normalizedRange: Utf16OffsetRangeV1;
   provenance: "typescript-compiler-api";
   sourceFileId: string;
 }
@@ -150,9 +234,10 @@ export interface ModuleSourceFactBatchV1 {
   evidence: readonly ModuleEvidenceV1[];
   inputDigest: string;
   localExportBindings: readonly LocalExportBindingSeedV1[];
-  nodes: readonly (ExternalPackageNodeV1 | NodeBuiltinNodeV1)[];
+  nodes: readonly (BasicSymbolNodeV1 | ExternalPackageNodeV1 | NodeBuiltinNodeV1)[];
   ownershipSliceId: string;
   sourceFileId: string;
+  symbols: readonly BasicSymbolV1[];
 }
 
 /** 把结构化 qualifier 唯一序列化为持久关系字段。 */
@@ -166,38 +251,45 @@ export function serializeModuleQualifier(qualifier: ModuleQualifierV1): string {
   if (qualifier.kind === "star") {
     return `star:${qualifier.typeOrValue}`;
   }
+  if (qualifier.kind === "default") {
+    return `default:${qualifier.typeOrValue}`;
+  }
+  if (qualifier.kind === "local") {
+    return `local:${encodeModuleExportName(qualifier.exportedName)}:${qualifier.typeOrValue}`;
+  }
   return `reexport:${encodeModuleExportName(qualifier.exportedName)}:${encodeModuleExportName(
     qualifier.importedName,
   )}:${qualifier.typeOrValue}`;
 }
 
 /**
- * ModuleExportName 优先沿用标准 percent-encoding；空串或孤立代理项使用 UTF-16 code-unit 编码。
+ * ModuleExportName 优先沿用规范 percent-encoding；空串或孤立代理项改用 ASCII 逃逸。
  *
- * `%u` 标记自身会被标准编码为 `%25u`，因此两条编码路径不会碰撞。
+ * `~` 始终编码为 `%7E`，保留 `~e` 和 `~uXXXX...` 给无法形成 JCS Unicode 字符串的
+ * 合法 TypeScript AST 名称。逃逸文本本身只含 ASCII，故可安全进入 AD-4 edge preimage。
  */
 export function encodeModuleExportName(value: string): string {
   if (value.length > 0 && !containsLoneSurrogate(value)) {
-    return encodeURIComponent(value);
+    return encodeURIComponent(value).replaceAll("~", "%7E");
   }
-  if (value.length === 0) {return "%u";}
+  if (value.length === 0) {return "~e";}
   let encoded = "";
   for (let index = 0; index < value.length; index += 1) {
-    encoded += `%u${value.charCodeAt(index).toString(16).toUpperCase().padStart(4, "0")}`;
+    encoded += value.charCodeAt(index).toString(16).toUpperCase().padStart(4, "0");
   }
-  return encoded;
+  return `~u${encoded}`;
 }
 
 /** 解码持久化 ModuleExportName，并拒绝非规范或不可逆表示。 */
 export function decodeModuleExportName(encoded: string): string {
-  if (encoded === "%u") {return "";}
-  if (/^(?:%u[0-9A-F]{4})+$/u.test(encoded)) {
+  if (encoded === "~e") {return "";}
+  if (/^~u(?:[0-9A-F]{4})+$/u.test(encoded)) {
     let decoded = "";
-    for (let index = 0; index < encoded.length; index += 6) {
-      decoded += String.fromCharCode(Number.parseInt(encoded.slice(index + 2, index + 6), 16));
+    for (let index = 2; index < encoded.length; index += 4) {
+      decoded += String.fromCharCode(Number.parseInt(encoded.slice(index, index + 4), 16));
     }
     if (encodeModuleExportName(decoded) !== encoded) {
-      throw new TypeError("ModuleExportName UTF-16 编码不规范。");
+      throw new TypeError("ModuleExportName ASCII 逃逸编码不规范。");
     }
     return decoded;
   }
@@ -341,7 +433,7 @@ export function buildModuleEvidenceId(input: Pick<
   "analyzerVersion" | "edgeId" | "evidenceKind" | "normalizedRange" | "provenance" |
   "sourceFileId"
 >): string {
-  assertSourceRange(input.normalizedRange);
+  assertUtf16OffsetRange(input.normalizedRange);
   const identity = [
     input.edgeId,
     input.provenance,
@@ -353,8 +445,8 @@ export function buildModuleEvidenceId(input: Pick<
   return `evidence:${encodeURIComponent(identity)}`;
 }
 
-/** 公共范围只接受递增的非负安全整数。 */
-export function assertSourceRange(range: SourceRangeV1): void {
+/** 内部 offset 范围只接受递增的非负安全整数。 */
+export function assertUtf16OffsetRange(range: Utf16OffsetRangeV1): void {
   if (
     !Number.isSafeInteger(range.start) ||
     !Number.isSafeInteger(range.end) ||
@@ -362,5 +454,18 @@ export function assertSourceRange(range: SourceRangeV1): void {
     range.end <= range.start
   ) {
     throw new TypeError("源码范围必须是非空的 0-based UTF-16 半开区间。");
+  }
+}
+
+/** 公共导航范围必须是非负、0-based 且按字典序形成半开区间。 */
+export function assertSourceRange(range: SourceRangeV1): void {
+  const positions = [range.start, range.end];
+  if (positions.some((position) => !Number.isSafeInteger(position.line) ||
+    !Number.isSafeInteger(position.character) || position.line < 0 || position.character < 0)) {
+    throw new TypeError("导航范围必须使用非负的 0-based UTF-16 行列。");
+  }
+  if (range.end.line < range.start.line ||
+    (range.end.line === range.start.line && range.end.character <= range.start.character)) {
+    throw new TypeError("导航范围必须是非空的 UTF-16 半开区间。");
   }
 }
