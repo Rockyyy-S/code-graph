@@ -8,7 +8,7 @@ import {
   type AnalysisDiagnosticV1,
   type ModuleConfidenceV1,
   type ModuleTargetV1,
-  type SourceRangeV1,
+  type Utf16OffsetRangeV1,
 } from "@codegraph/domain";
 
 /** 目标解析只消费逻辑路径、manifest 与受控 package metadata。 */
@@ -18,7 +18,7 @@ export interface ResolveModuleTargetOptions {
   /** 请求级稳定 canonical key；调用方必须在进入此层前丢弃 raw proof/token。 */
   hostPathIdentityKey?: (logicalPath: string) => string;
   indexingManifest: readonly { fileId: string; path: string }[];
-  normalizedRange?: SourceRangeV1;
+  normalizedRange?: Utf16OffsetRangeV1;
   /** 仅当源码明确归属已封口项目配置时，静态内部解析才可声明 high。 */
   projectContextComplete?: boolean;
   resolvedLogicalPath?: string;

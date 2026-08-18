@@ -1,12 +1,15 @@
+import { createHash } from "node:crypto";
 import ts from "typescript";
 import {
   serializeModuleQualifier,
   type AnalysisDiagnosticV1,
+  type BasicSymbolKind,
+  type BasicSymbolSeedV1,
   type LocalExportBindingSeedV1,
   type ModuleLanguageV1,
   type ModuleQualifierV1,
   type ModuleRelationTypeV1,
-  type SourceRangeV1,
+  type Utf16OffsetRangeV1,
 } from "@codegraph/domain";
 
 /** 语法提取输入只包含受信任源码快照，不包含物理路径。 */
@@ -17,7 +20,8 @@ export interface ExtractModuleSyntaxFactsOptions {
   language: ModuleLanguageV1;
   /** Worker 可注入增量预算；事实进入结果数组前先执行 MAX+1 检查。 */
   onFact?: (
-    fact: AnalysisDiagnosticV1 | LocalExportBindingSeedV1 | ModuleSyntaxRelationV1,
+    fact: AnalysisDiagnosticV1 | BasicSymbolSeedV1 | LocalExportBindingSeedV1 |
+      ModuleSyntaxRelationV1,
   ) => void;
   path: string;
   /** 持久 Program 已解析的同版本 SourceFile；提供时避免重复 AST 构建。 */
@@ -29,7 +33,7 @@ export interface ExtractModuleSyntaxFactsOptions {
 /** 尚未执行目标解析的 AD-24 关系 seed。 */
 export interface ModuleSyntaxRelationV1 {
   language: ModuleLanguageV1;
-  normalizedRange: SourceRangeV1;
+  normalizedRange: Utf16OffsetRangeV1;
   qualifier: string;
   qualifierModel: ModuleQualifierV1;
   relationType: ModuleRelationTypeV1;
@@ -44,6 +48,7 @@ export interface ModuleSyntaxFactsV1 {
   diagnostics: readonly AnalysisDiagnosticV1[];
   localExportBindings: readonly LocalExportBindingSeedV1[];
   relations: readonly ModuleSyntaxRelationV1[];
+  symbols: readonly BasicSymbolSeedV1[];
 }
 
 /**
@@ -293,11 +298,174 @@ export function extractModuleSyntaxFacts(
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
+  const symbols = extractBasicSymbols(options, sourceFile, localExportBindings, diagnostics);
   return Object.freeze({
     diagnostics: Object.freeze(diagnostics),
     localExportBindings: Object.freeze(localExportBindings),
     relations: Object.freeze(relations),
+    symbols: Object.freeze(symbols),
   });
+}
+
+interface SymbolDeclarationCandidate {
+  declaration: ts.Node;
+  exported: boolean;
+  hasImplementation: boolean;
+  kind: BasicSymbolKind;
+  name: ts.Identifier;
+  signature: string;
+}
+
+/**
+ * 只遍历 SourceFile 直接子节点，并在同一文件内按名字归并声明。
+ *
+ * 身份摘要跳过 trivia 与 export/default 修饰符；range、exported 和 Worker 枚举顺序均不进入摘要。
+ */
+function extractBasicSymbols(
+  options: ExtractModuleSyntaxFactsOptions,
+  sourceFile: ts.SourceFile,
+  localExportBindings: readonly LocalExportBindingSeedV1[],
+  diagnostics: AnalysisDiagnosticV1[],
+): readonly BasicSymbolSeedV1[] {
+  const candidates: SymbolDeclarationCandidate[] = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name)) {continue;}
+        candidates.push(createSymbolCandidate(
+          declaration,
+          declaration.name,
+          "variable",
+          sourceFile,
+          hasExportModifier(statement),
+          true,
+        ));
+      }
+      continue;
+    }
+    const named = namedSupportedDeclaration(statement);
+    if (named === null) {continue;}
+    candidates.push(createSymbolCandidate(
+      statement,
+      named.name,
+      named.kind,
+      sourceFile,
+      hasExportModifier(statement),
+      hasDeclarationImplementation(statement),
+    ));
+  }
+  const exportedNames = new Set(localExportBindings
+    .filter((binding) => binding.localName !== "default")
+    .map((binding) => binding.localName));
+  const byName = new Map<string, SymbolDeclarationCandidate[]>();
+  for (const candidate of candidates) {
+    const group = byName.get(candidate.name.text) ?? [];
+    group.push(candidate);
+    byName.set(candidate.name.text, group);
+  }
+  const symbols: { firstStart: number; seed: BasicSymbolSeedV1 }[] = [];
+  for (const [name, declarations] of byName) {
+    const kinds = new Set(declarations.map((declaration) => declaration.kind));
+    if (kinds.size !== 1) {
+      const first = [...declarations].sort((left, right) =>
+        left.name.getStart(sourceFile) - right.name.getStart(sourceFile))[0]!;
+      const diagnostic = Object.freeze({
+        code: "BASIC_SYMBOL_KIND_CONFLICT" as const,
+        normalizedRange: rangeOf(first.name, sourceFile),
+        path: options.path,
+        severity: "warning" as const,
+        suggestedAction: "将同名混合声明拆分为可稳定归并的单一 BasicSymbolKind。",
+      });
+      options.onFact?.(diagnostic);
+      diagnostics.push(diagnostic);
+      continue;
+    }
+    const implementations = declarations.filter((declaration) => declaration.hasImplementation);
+    const navigation = [...(implementations.length > 0 ? implementations : declarations)]
+      .sort((left, right) => left.name.getStart(sourceFile) - right.name.getStart(sourceFile))[0]!;
+    const signatureDigest = createHash("sha256")
+      .update(JSON.stringify([...new Set(declarations.map((item) => item.signature))].sort()), "utf8")
+      .digest("hex");
+    const start = sourceFile.getLineAndCharacterOfPosition(navigation.name.getStart(sourceFile));
+    const end = sourceFile.getLineAndCharacterOfPosition(navigation.name.end);
+    const seed = Object.freeze({
+      exported: declarations.some((declaration) => declaration.exported) || exportedNames.has(name),
+      kind: declarations[0]!.kind,
+      language: options.language,
+      name,
+      qualifiedName: name.normalize("NFC"),
+      range: Object.freeze({
+        end: Object.freeze({ character: end.character, line: end.line }),
+        start: Object.freeze({ character: start.character, line: start.line }),
+      }),
+      signatureDigest,
+      sourceFileId: options.sourceFileId,
+    });
+    options.onFact?.(seed);
+    symbols.push({ firstStart: Math.min(...declarations.map((item) =>
+      item.name.getStart(sourceFile))), seed });
+  }
+  return symbols.sort((left, right) => left.firstStart - right.firstStart)
+    .map((entry) => entry.seed);
+}
+
+/** 建立不含声明修饰符、注释与空白的稳定 token preimage。 */
+function createSymbolCandidate(
+  declaration: ts.Node,
+  name: ts.Identifier,
+  kind: BasicSymbolKind,
+  sourceFile: ts.SourceFile,
+  exported: boolean,
+  hasImplementation: boolean,
+): SymbolDeclarationCandidate {
+  /** 函数体不属于签名，实现内部改动不应使稳定 symbol ID 漂移。 */
+  const signatureEnd = ts.isFunctionDeclaration(declaration) && declaration.body !== undefined
+    ? declaration.body.getStart(sourceFile)
+    : declaration.end;
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    true,
+    sourceFile.languageVariant,
+    sourceFile.text.slice(name.getStart(sourceFile), signatureEnd),
+  );
+  const tokens: string[] = [];
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    tokens.push(`${token}:${scanner.getTokenText().normalize("NFC")}`);
+  }
+  return { declaration, exported, hasImplementation, kind, name, signature: tokens.join("\u0000") };
+}
+
+/** 将受支持声明收敛为封闭 kind，并排除匿名/字符串 module declaration。 */
+function namedSupportedDeclaration(node: ts.Statement): {
+  kind: BasicSymbolKind;
+  name: ts.Identifier;
+} | null {
+  if (ts.isFunctionDeclaration(node) && node.name !== undefined) {
+    return { kind: "function", name: node.name };
+  }
+  if (ts.isClassDeclaration(node) && node.name !== undefined) {
+    return { kind: "class", name: node.name };
+  }
+  if (ts.isInterfaceDeclaration(node)) {return { kind: "interface", name: node.name };}
+  if (ts.isTypeAliasDeclaration(node)) {return { kind: "type-alias", name: node.name };}
+  if (ts.isEnumDeclaration(node)) {return { kind: "enum", name: node.name };}
+  if (ts.isModuleDeclaration(node) && ts.isIdentifier(node.name)) {
+    return { kind: "namespace", name: node.name };
+  }
+  return null;
+}
+
+/** 实现声明优先；纯类型声明没有实现，按最早 name range 选择。 */
+function hasDeclarationImplementation(node: ts.Statement): boolean {
+  if (ts.isFunctionDeclaration(node)) {return node.body !== undefined;}
+  if (ts.isInterfaceDeclaration(node)) {return false;}
+  return true;
+}
+
+/** exported 只来自源码修饰符；alias 导出由 LocalExportBindingSeedV1 统一归并。 */
+function hasExportModifier(node: ts.Node): boolean {
+  return ts.canHaveModifiers(node) && ts.getModifiers(node)?.some((modifier) =>
+    modifier.kind === ts.SyntaxKind.ExportKeyword) === true;
 }
 
 /** 递归剥离不改变运行时值身份的透明表达式包装。 */
@@ -511,7 +679,7 @@ function isFunctionScope(node: ts.Node): boolean {
 }
 
 /** TypeScript Node 起止位置天然使用 UTF-16 code-unit 半开区间。 */
-function rangeOf(node: ts.Node, sourceFile: ts.SourceFile): SourceRangeV1 {
+function rangeOf(node: ts.Node, sourceFile: ts.SourceFile): Utf16OffsetRangeV1 {
   return Object.freeze({ end: node.end, start: node.getStart(sourceFile) });
 }
 
@@ -519,7 +687,7 @@ function rangeOf(node: ts.Node, sourceFile: ts.SourceFile): SourceRangeV1 {
 function createLiteralDiagnostic(
   code: "MODULE_DYNAMIC_SPECIFIER_NOT_LITERAL" | "MODULE_REQUIRE_SPECIFIER_NOT_LITERAL",
   path: string,
-  normalizedRange: SourceRangeV1,
+  normalizedRange: Utf16OffsetRangeV1,
   suggestedAction: string,
 ): AnalysisDiagnosticV1 {
   return Object.freeze({ code, normalizedRange, path, severity: "warning", suggestedAction });

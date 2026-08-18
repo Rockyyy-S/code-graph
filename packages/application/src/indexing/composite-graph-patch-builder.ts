@@ -25,7 +25,8 @@ export interface BuildCompositeGraphPatchOptions {
 /**
  * 将 hierarchy 与所有 source slices 收敛为一个确定性 composite patch。
  *
- * source slice 只 replacement 自己的 Evidence；共享 module edge/node 在顶层统一维护。
+ * complete source slice 执行 replacement；partial 只覆盖本次交付的事实，failed 保留已提交事实。
+ * 共享 module edge/node 仍在顶层统一维护，symbol 与 local export 则归 source slice 唯一拥有。
  */
 export function buildCompositeGraphPatch(
   options: BuildCompositeGraphPatchOptions,
@@ -40,7 +41,6 @@ export function buildCompositeGraphPatch(
   const batches = sortUniqueBatches(options.moduleBatches);
   for (const batch of batches) {
     if (
-      batch.coverage !== "complete" ||
       batch.configDigest !== readSet.configDigest ||
       batch.inputDigest !== readSet.inputDigest ||
       batch.ownershipSliceId !== `source:${batch.analyzerKind}:${batch.sourceFileId}`
@@ -52,35 +52,8 @@ export function buildCompositeGraphPatch(
   const currentNodes = sortUniqueFacts(snapshot.allNodes, "current node");
   const currentEdges = sortUniqueFacts(snapshot.allEdges, "current edge");
   const currentEvidence = sortUniqueEvidence(snapshot.allEvidence);
-  const targetModuleNodes = sortUniqueFacts(batches.flatMap((batch) => batch.nodes), "module node");
-  const targetModuleEdges = sortUniqueFacts(batches.flatMap((batch) => batch.edges), "module edge");
-  const targetEvidence = sortUniqueEvidence(batches.flatMap((batch) => batch.evidence));
   const currentNodeById = new Map(currentNodes.map((node) => [node.id, node]));
   const currentEdgeById = new Map(currentEdges.map((edge) => [edge.id, edge]));
-  const targetModuleNodeIds = new Set(targetModuleNodes.map((node) => node.id));
-  const targetModuleEdgeIds = new Set(targetModuleEdges.map((edge) => edge.id));
-  const currentModuleNodes = currentNodes.filter((node) =>
-    node.kind === "external-package" || node.kind === "node-builtin");
-  const currentModuleEdges = currentEdges.filter((edge) => edge.relationType !== "contains");
-  /** Story 1.5 不回收孤立共享节点；最后引用回收由 Story 1.7 统一负责。 */
-  const retainedSharedNodes = currentModuleNodes.filter((node) =>
-    !targetModuleNodeIds.has(node.id));
-  const targetNodes = sortUniqueFacts(
-    [...hierarchyBatch.nodes, ...targetModuleNodes, ...retainedSharedNodes],
-    "target node",
-  );
-  const targetEdges = sortUniqueFacts(
-    [...hierarchyBatch.edges, ...targetModuleEdges],
-    "target edge",
-  );
-  const sharedNodeUpserts = targetModuleNodes.filter((node) =>
-    !sameFact(currentNodeById.get(node.id), node));
-  const sharedEdgeUpserts = targetModuleEdges.filter((edge) =>
-    !sameFact(currentEdgeById.get(edge.id), edge));
-  const sharedNodeDeletes: readonly string[] = [];
-  const sharedEdgeDeletes = currentModuleEdges.map((edge) => edge.id)
-    .filter((id) => !targetModuleEdgeIds.has(id));
-
   const currentSourceSlices = new Map(
     snapshot.ownedSlices
       .filter((slice) => slice.ownershipSliceId.startsWith("source:"))
@@ -92,23 +65,133 @@ export function buildCompositeGraphPatch(
     ...currentSourceSlices.keys(),
     ...targetSourceBatches.keys(),
   ])].sort(compareCanonicalGraphText);
-  const sourceSlices = sourceSliceIds.map<GraphSliceMutationV1>((ownershipSliceId) => {
-    const current = sortUniqueEvidence(
-      currentSourceSlices.get(ownershipSliceId)?.ownedEvidence ??
+  const targetSourceStates = sourceSliceIds.map((ownershipSliceId) => {
+    const currentSlice = currentSourceSlices.get(ownershipSliceId);
+    const currentOwnedEvidence = sortUniqueEvidence(
+      currentSlice?.ownedEvidence ??
       currentEvidence.filter((item) => `source:typescript:${item.sourceFileId}` === ownershipSliceId),
     );
-    const target = sortUniqueEvidence(targetSourceBatches.get(ownershipSliceId)?.evidence ?? []);
-    const currentById = new Map(current.map((item) => [item.id, item]));
-    const targetIds = new Set(target.map((item) => item.id));
-    return freezeSlice({
-      edgeDeletes: [],
-      edgeUpserts: [],
-      evidenceDeletes: current.map((item) => item.id).filter((id) => !targetIds.has(id)),
-      evidenceUpserts: target.filter((item) =>
-        !sameEvidence(currentById.get(item.id), item)),
-      nodeDeletes: [],
-      nodeUpserts: [],
+    const currentOwnedNodes = sortUniqueFacts(
+      currentSlice?.ownedNodes ?? [],
+      "owned symbol node",
+    );
+    const currentOwnedEdges = sortUniqueFacts(
+      currentSlice?.ownedEdges ?? [],
+      "owned symbol edge",
+    );
+    const targetBatch = targetSourceBatches.get(ownershipSliceId);
+    const batchSymbolNodes = sortUniqueFacts(
+      targetBatch?.nodes.filter((node) => node.kind === "symbol") ?? [],
+      "target symbol node",
+    );
+    const batchSymbolNodeIds = new Set(batchSymbolNodes.map((node) => node.id));
+    const batchSymbolEdges = sortUniqueFacts(
+      targetBatch?.edges.filter((edge) => batchSymbolNodeIds.has(edge.toId)) ?? [],
+      "target symbol edge",
+    );
+    const batchEvidence = sortUniqueEvidence(targetBatch?.evidence ?? []);
+    const coverage = targetBatch?.coverage ?? "complete";
+
+    return Object.freeze({
+      currentEdges: currentOwnedEdges,
+      currentEvidence: currentOwnedEvidence,
+      currentNodes: currentOwnedNodes,
+      edges: coverage === "failed"
+        ? currentOwnedEdges
+        : coverage === "partial"
+          ? overlayFacts(currentOwnedEdges, batchSymbolEdges, "partial symbol edge")
+          : batchSymbolEdges,
+      evidence: coverage === "failed"
+        ? currentOwnedEvidence
+        : coverage === "partial"
+          ? overlayEvidence(currentOwnedEvidence, batchEvidence)
+          : batchEvidence,
+      nodes: coverage === "failed"
+        ? currentOwnedNodes
+        : coverage === "partial"
+          ? overlayFacts(currentOwnedNodes, batchSymbolNodes, "partial symbol node")
+          : batchSymbolNodes,
       ownershipSliceId,
+    });
+  });
+  /** failed 覆盖没有可信新模块事实；只能由 retainedIncompleteModuleEdges 保留已提交边。 */
+  const deliveredModuleBatches = batches.filter((batch) => batch.coverage !== "failed");
+  const targetModuleNodes = sortUniqueFacts(deliveredModuleBatches.flatMap((batch) =>
+    batch.nodes.filter((node) => node.kind !== "symbol")), "module node");
+  const targetSourceNodes = sortUniqueFacts(
+    targetSourceStates.flatMap((state) => state.nodes),
+    "symbol node",
+  );
+  const retainedIncompleteModuleEdges = batches.flatMap((batch) => {
+    if (batch.coverage === "complete") {return [];}
+    const state = targetSourceStates.find((item) =>
+      item.ownershipSliceId === batch.ownershipSliceId);
+    return (state?.currentEvidence ?? []).flatMap((item) => {
+      const edge = currentEdgeById.get(item.edgeId);
+      return edge === undefined || currentNodeById.get(edge.toId)?.kind === "symbol"
+        ? []
+        : [edge];
+    });
+  });
+  const targetModuleEdges = sortUniqueFacts([
+    ...deliveredModuleBatches.flatMap((batch) => {
+      const batchSymbolIds = new Set(batch.nodes.filter((node) => node.kind === "symbol")
+        .map((node) => node.id));
+      return batch.edges.filter((edge) => !batchSymbolIds.has(edge.toId));
+    }),
+    ...retainedIncompleteModuleEdges,
+  ], "module edge");
+  const targetSourceEdges = sortUniqueFacts(
+    targetSourceStates.flatMap((state) => state.edges),
+    "symbol export edge",
+  );
+  const targetEvidence = sortUniqueEvidence(
+    targetSourceStates.flatMap((state) => state.evidence),
+  );
+  const targetModuleNodeIds = new Set(targetModuleNodes.map((node) => node.id));
+  const targetModuleEdgeIds = new Set(targetModuleEdges.map((edge) => edge.id));
+  const currentModuleNodes = currentNodes.filter((node) =>
+    node.kind === "external-package" || node.kind === "node-builtin");
+  const currentModuleEdges = currentEdges.filter((edge) => edge.relationType !== "contains" &&
+    currentNodeById.get(edge.toId)?.kind !== "symbol");
+  /** Story 1.5 不回收孤立共享节点；最后引用回收由 Story 1.7 统一负责。 */
+  const retainedSharedNodes = currentModuleNodes.filter((node) =>
+    !targetModuleNodeIds.has(node.id));
+  const targetNodes = sortUniqueFacts(
+    [...hierarchyBatch.nodes, ...targetModuleNodes, ...targetSourceNodes, ...retainedSharedNodes],
+    "target node",
+  );
+  const targetEdges = sortUniqueFacts(
+    [...hierarchyBatch.edges, ...targetModuleEdges, ...targetSourceEdges],
+    "target edge",
+  );
+  const sharedNodeUpserts = targetModuleNodes.filter((node) =>
+    !sameFact(currentNodeById.get(node.id), node));
+  const sharedEdgeUpserts = targetModuleEdges.filter((edge) =>
+    !sameFact(currentEdgeById.get(edge.id), edge));
+  const sharedNodeDeletes: readonly string[] = [];
+  const sharedEdgeDeletes = currentModuleEdges.map((edge) => edge.id)
+    .filter((id) => !targetModuleEdgeIds.has(id));
+
+  const sourceSlices = targetSourceStates.map<GraphSliceMutationV1>((state) => {
+    const currentById = new Map(state.currentEvidence.map((item) => [item.id, item]));
+    const targetIds = new Set(state.evidence.map((item) => item.id));
+    const currentNodeByIdForSlice = new Map(state.currentNodes.map((item) => [item.id, item]));
+    const currentEdgeByIdForSlice = new Map(state.currentEdges.map((item) => [item.id, item]));
+    const nextNodeIds = new Set(state.nodes.map((item) => item.id));
+    const nextEdgeIds = new Set(state.edges.map((item) => item.id));
+    return freezeSlice({
+      edgeDeletes: [...currentEdgeByIdForSlice.keys()].filter((id) => !nextEdgeIds.has(id)),
+      edgeUpserts: state.edges.filter((item) =>
+        !sameFact(currentEdgeByIdForSlice.get(item.id), item)),
+      evidenceDeletes: state.currentEvidence.map((item) => item.id)
+        .filter((id) => !targetIds.has(id)),
+      evidenceUpserts: state.evidence.filter((item) =>
+        !sameEvidence(currentById.get(item.id), item)),
+      nodeDeletes: [...currentNodeByIdForSlice.keys()].filter((id) => !nextNodeIds.has(id)),
+      nodeUpserts: state.nodes.filter((item) =>
+        !sameFact(currentNodeByIdForSlice.get(item.id), item)),
+      ownershipSliceId: state.ownershipSliceId,
     });
   });
   const hierarchySlice = freezeSlice({
@@ -132,11 +215,21 @@ export function buildCompositeGraphPatch(
       factKind: "node" as const,
       ownerKey: hierarchyBatch.ownershipSliceId,
     })),
-    ...batches.flatMap((batch) => batch.evidence.map((item) => ({
+    ...targetSourceStates.flatMap((state) => state.evidence.map((item) => ({
       factId: item.id,
       factKind: "evidence" as const,
-      ownerKey: batch.ownershipSliceId,
+      ownerKey: state.ownershipSliceId,
     }))),
+    ...targetSourceStates.flatMap((state) => state.nodes.map((item) => ({
+        factId: item.id,
+        factKind: "node" as const,
+        ownerKey: state.ownershipSliceId,
+      }))),
+    ...targetSourceStates.flatMap((state) => state.edges.map((item) => ({
+        factId: item.id,
+        factKind: "edge" as const,
+        ownerKey: state.ownershipSliceId,
+      }))),
   ].sort(compareOwnership);
   const targetGraphDigest = options.digestPort.digest({
     edges: targetEdges,
@@ -172,6 +265,32 @@ export function buildCompositeGraphPatch(
     targetNodeCount: targetNodes.length,
     version: 1,
   });
+}
+
+/** partial batch 只覆盖同 ID 事实，未重新交付的已提交事实必须保留。 */
+function overlayFacts<T extends GraphNodeV1 | GraphEdgeV1>(
+  current: readonly T[],
+  incoming: readonly T[],
+  label: string,
+): readonly T[] {
+  const overlaid = new Map(sortUniqueFacts(current, `${label} current`)
+    .map((item) => [item.id, item] as const));
+  for (const item of sortUniqueFacts(incoming, `${label} incoming`)) {
+    overlaid.set(item.id, item);
+  }
+  return sortUniqueFacts([...overlaid.values()], label);
+}
+
+/** partial Evidence 允许刷新 detectedAt，但不得因缺失删除旧 Evidence。 */
+function overlayEvidence(
+  current: readonly ModuleEvidenceV1[],
+  incoming: readonly ModuleEvidenceV1[],
+): readonly ModuleEvidenceV1[] {
+  const overlaid = new Map(sortUniqueEvidence(current).map((item) => [item.id, item] as const));
+  for (const item of sortUniqueEvidence(incoming)) {
+    overlaid.set(item.id, item);
+  }
+  return sortUniqueEvidence([...overlaid.values()]);
 }
 
 /** ownership slice 必须唯一，输入排列不影响后续 patch。 */

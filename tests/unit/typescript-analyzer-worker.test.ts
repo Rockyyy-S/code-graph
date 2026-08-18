@@ -672,6 +672,7 @@ describe("Story 1.5 TypeScript Analyzer Worker", () => {
       path: "src/index.ts",
       relations: [baseRelation],
       sourceFileId: sourceId,
+      symbols: [],
     };
     const invalidFiles = [
       { ...baseFile, diagnostics: [{
@@ -760,6 +761,99 @@ describe("Story 1.5 TypeScript Analyzer Worker", () => {
               path: "src/dep.ts",
             },
           ],
+          workspaceKey,
+        })).rejects.toMatchObject({ analyzerCode: "ANALYZER_PROTOCOL_INVALID" });
+      } finally {
+        await analyzer.close();
+      }
+    }
+  });
+
+  it("rejects forged or non-closed BasicSymbol Worker payloads", async () => {
+    const sourceId = buildGraphEntityId(workspaceKey, "file", "src/index.ts");
+    const sourceText = "export const value = 1;\n";
+    const baseSymbol = {
+      exported: true,
+      kind: "variable",
+      language: "typescript",
+      name: "value",
+      qualifiedName: "value",
+      range: {
+        end: { character: 18, line: 0 },
+        start: { character: 13, line: 0 },
+      },
+      signatureDigest: "9".repeat(64),
+      sourceFileId: sourceId,
+    };
+    const baseFile = {
+      diagnostics: [],
+      language: "typescript",
+      localExportBindings: [],
+      path: "src/index.ts",
+      relations: [],
+      sourceFileId: sourceId,
+      symbols: [baseSymbol],
+    };
+    const invalidValues = [
+      { consultedLogicalPaths: [], files: [{
+        ...baseFile,
+        symbols: [{ ...baseSymbol, symbolId: "forged" }],
+      }] },
+      { consultedLogicalPaths: [], files: [{
+        ...baseFile,
+        symbols: [{ ...baseSymbol, sourceFileId: "file-spoof" }],
+      }] },
+      { consultedLogicalPaths: [], files: [{
+        ...baseFile,
+        symbols: [{ ...baseSymbol, language: "javascript" }],
+      }] },
+      { consultedLogicalPaths: [], files: [{
+        ...baseFile,
+        symbols: [{ ...baseSymbol, kind: "method" }],
+      }] },
+      { consultedLogicalPaths: [], files: [{
+        ...baseFile,
+        symbols: [{
+          ...baseSymbol,
+          range: { ...baseSymbol.range, end: { character: 99, line: 0 } },
+        }],
+      }] },
+      { consultedLogicalPaths: [], files: [{ ...baseFile, unexpected: true }] },
+      { consultedLogicalPaths: [], files: [baseFile], unexpected: true },
+    ];
+
+    for (const value of invalidValues) {
+      const workerUrl = new URL(
+        "data:text/javascript," + encodeURIComponent([
+          "import { parentPort } from 'node:worker_threads';",
+          `const value = ${JSON.stringify(value)};`,
+          "parentPort.on('message', (message) => parentPort.postMessage({ requestId: message.requestId, ok: true, value }));",
+        ].join("\n")),
+      );
+      const analyzer = createTypeScriptAnalyzer({ workerUrl });
+      try {
+        await expect(analyzer.analyze({
+          configDigest: "1".repeat(64),
+          configSnapshot: {
+            analyzerKind: "typescript",
+            analyzerVersion: "6.0.3",
+            consultedFiles: [],
+            effectiveCompilerOptions: {},
+            effectiveIgnore: { effectiveDigest: "2".repeat(64), version: 1 },
+            version: 1,
+            workspacePackages: [],
+          },
+          configurationFiles: [],
+          detectedAt: "2026-08-17T00:00:00.000Z",
+          inputDigest: "3".repeat(64),
+          resolutionFiles: [],
+          sourceFiles: [{
+            bytes: new TextEncoder().encode(sourceText),
+            contentHash: "4".repeat(64),
+            fileId: sourceId,
+            language: "typescript",
+            path: "src/index.ts",
+          }],
           workspaceKey,
         })).rejects.toMatchObject({ analyzerCode: "ANALYZER_PROTOCOL_INVALID" });
       } finally {

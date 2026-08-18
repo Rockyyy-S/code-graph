@@ -124,6 +124,8 @@ source owner；一次 logical rebuild 只调用一次 `commitAtomicGraphUpdate()
 一个 graph revision。`detectedAt` 不进入身份或语义 digest；移除 import 或删除 source slice 会在 complete
 replacement 中退休旧 Evidence 与失去支持的模块 edge。
 
+Story 1.6 将顶层 `BasicSymbolV1` 节点、可解析的 file→symbol local/default exports 边和既有 Evidence 统一收敛到同一 `source:typescript:<fileId>` slice。complete 覆盖可删除消失事实，partial 只覆盖本次交付的事实，failed 保留旧 slice；三种路径都仍通过上述唯一 mutation channel 提交。symbol 是领域/导航事实，不进入默认 `GraphViewNodeKind`，也不在本 Story 发布查询 RPC、导航 UI、调用图或 references。
+
 service-instance 级 `IndexReadSetProvider` 捕获规范 manifest/hash、完整 ignore snapshot、
 `bootstrapGeneration`、`statusEpoch` 与 `baseGraphRevision`。`inputDigest/configDigest` 只绑定规范输入和
 有效 ignore/producer 语义，generation/revision 仅作为完整 CAS 栅栏。提交前重新采集 read-set；过期
@@ -146,6 +148,8 @@ migration v3 仍保持精确八表，通过单事务表重建扩展封闭 node/e
 `contains|imports|exports` 且唯一性包含 qualifier。结构化 Evidence 保存 AD-21 ID 所需字段并由
 `source:typescript:<fileId>` 唯一持有。重启恢复分别验证 hierarchy 树、source ownership、完整全图
 `targetGraphDigest`、Job/read-set/patch digest 与 workspace 摘要，不能用全图计数冒充 hierarchy 子图计数。
+
+migration v4 在同一八表模型内按 AD-4 重键 module edge/Evidence；migration v5 只通过新的版本化表重建将 `symbol` 纳入 `nodes.kind` 封闭词汇。BasicSymbol 载荷保存在 `nodes.payload_json`，source ownership 仍使用 `facts_ownership`，不创建旁路 symbol store。v4→v5 迁移保留已有 ID、revision、hierarchy/module 语义与精确八表；任一重建故障整体回滚，未知高版本继续 fail closed。
 
 “从未构建”仍为 `availability=absent`、`freshness=null`、`completeness=empty`、
 `committed=null`、`graphRevision=null`。真实提交为 available/current，partial、failed、cancelled 或

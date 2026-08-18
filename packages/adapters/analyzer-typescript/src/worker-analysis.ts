@@ -480,6 +480,7 @@ export function analyzeTypeScriptModules(input: AnalysisInputV1): AnalysisOutput
         path: file.path,
         relations: Object.freeze(relations),
         sourceFileId: file.fileId,
+        symbols: syntax.symbols,
       });
       return result;
     });
@@ -1591,6 +1592,7 @@ function extractCachedModuleSyntaxFacts(
         ...cached.facts.diagnostics,
         ...cached.facts.localExportBindings,
         ...cached.facts.relations,
+        ...cached.facts.symbols,
       ]) {
         onFact(fact);
       }
@@ -1608,7 +1610,7 @@ function extractCachedModuleSyntaxFacts(
     sourceText,
   });
   const factCount = created.diagnostics.length + created.localExportBindings.length +
-    created.relations.length;
+    created.relations.length + created.symbols.length;
   const retainedBytes = new TextEncoder().encode(sourceText).byteLength +
     new TextEncoder().encode(cacheKey).byteLength + factCount * 256;
   if (retainedBytes <= WORKER_ANALYSIS_CACHE_LIMITS.maxSyntaxRetainedBytes &&

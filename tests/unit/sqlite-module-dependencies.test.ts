@@ -15,17 +15,24 @@ import {
 import { sha256CanonicalJson } from "../../packages/contracts/src/index.js";
 import {
   buildGraphEntityId,
+  buildGraphEdgeId,
   buildLegacyGraphEdgeIdV0,
   buildModuleEvidenceId,
+  decodeModuleExportName,
+  encodeModuleExportName,
+  type ModuleQualifierV1,
   type HierarchyReadSetV1,
 } from "../../packages/domain/src/index.js";
 import {
   AD4_EDGE_IDENTITY_SCHEMA_VERSION,
+  BASIC_SYMBOL_SCHEMA_VERSION,
   applyBootstrapMigration,
   applyAd4EdgeIdentityMigration,
+  applyBasicSymbolMigration,
   applyDeterministicCommitMigration,
   applyModuleDependencyMigration,
   assertAd4ModuleDependencySchemaIntegrity,
+  assertBasicSymbolSchemaIntegrity,
   assertModuleDependencySchemaIntegrity,
   GraphEdgeIdCollisionError,
   MODULE_DEPENDENCY_SCHEMA_VERSION,
@@ -77,7 +84,10 @@ async function createDatabasePath(): Promise<string> {
 }
 
 /** 构造带 current composite 证据的真实 v3 数据库，供 v4 rekey/恢复测试复用。 */
-async function seedLegacyV3CompositeDatabase(databasePath: string): Promise<{
+async function seedLegacyV3CompositeDatabase(
+  databasePath: string,
+  moduleQualifier: ModuleQualifierV1 = { kind: "imports", typeOrValue: "value", version: 1 },
+): Promise<{
   canonicalEdgeIds: readonly string[];
   canonicalEvidenceIds: readonly string[];
   canonicalPatchDigest: string;
@@ -101,7 +111,7 @@ async function seedLegacyV3CompositeDatabase(databasePath: string): Promise<{
     ownershipSliceId: `hierarchy:${buildGraphEntityId(workspaceKey, "workspace", "")}`,
     patchDigest: null,
   } as const;
-  const patch = createPatch(emptySnapshot, "2026-07-27T00:00:00.000Z");
+  const patch = createPatch(emptySnapshot, "2026-07-27T00:00:00.000Z", {}, moduleQualifier);
   const hierarchySlice = patch.slices.find((slice) =>
     slice.ownershipSliceId.startsWith("hierarchy:"));
   const sourceSlice = patch.slices.find((slice) =>
@@ -113,12 +123,13 @@ async function seedLegacyV3CompositeDatabase(databasePath: string): Promise<{
     .sort((left, right) => left.id.localeCompare(right.id));
   const legacyEdges = canonicalEdges.map((edge) => Object.freeze({
     ...edge,
+    qualifier: toLegacyModuleQualifier(edge.qualifier, edge.relationType),
     id: buildLegacyGraphEdgeIdV0(
       workspaceKey,
       edge.fromId,
       edge.relationType,
       edge.toId,
-      edge.qualifier,
+      toLegacyModuleQualifier(edge.qualifier, edge.relationType),
     ),
   })).sort((left, right) => left.id.localeCompare(right.id));
   const legacyEdgeIdByCanonical = new Map(canonicalEdges.map((edge) => [
@@ -128,7 +139,7 @@ async function seedLegacyV3CompositeDatabase(databasePath: string): Promise<{
       edge.fromId,
       edge.relationType,
       edge.toId,
-      edge.qualifier,
+      toLegacyModuleQualifier(edge.qualifier, edge.relationType),
     ),
   ]));
   const legacyEvidence = sourceSlice.evidenceUpserts.map((item) => {
@@ -413,6 +424,8 @@ function createPatch(
     Parameters<typeof createAnalyzerConfigFenceSnapshot>[0],
     "consultedFiles"
   > = {},
+  moduleQualifier: ModuleQualifierV1 = { kind: "imports", typeOrValue: "value", version: 1 },
+  withSymbol = false,
 ) {
   const manifest = [{ contentHash: "1".repeat(64), path: "src/index.ts" }] as const;
   const analyzerConfig = createAnalyzerConfigSnapshot({
@@ -472,17 +485,39 @@ function createPatch(
     detectedAt,
     diagnostics: [],
     inputDigest: readSet.inputDigest,
-    localExportBindings: [],
+    localExportBindings: withSymbol ? [{
+      exportedName: "publicValue",
+      language: "typescript",
+      localName: "value",
+      normalizedRange: { end: 5, start: 0 },
+      sourceFileId,
+      stableSortKey: ["publicValue", "value", "value", 0, 5].join("\0"),
+      typeOrValue: "value",
+    }] : [],
+    relativePath: "src/index.ts",
     relations: [{
       confidence: "high",
       language: "typescript",
       normalizedRange: { end: 16, start: 7 },
       provenance: "typescript-compiler-api",
-      qualifier: { kind: "imports", typeOrValue: "value", version: 1 },
-      relationType: "imports",
+      qualifier: moduleQualifier,
+      relationType: moduleQualifier.kind === "imports" ? "imports" : "exports",
       target: { id: "node:path", kind: "node-builtin", moduleName: "path" },
     }],
     sourceFileId,
+    symbolSeeds: withSymbol ? [{
+      exported: false,
+      kind: "variable",
+      language: "typescript",
+      name: "value",
+      qualifiedName: "value",
+      range: {
+        end: { character: 5, line: 0 },
+        start: { character: 0, line: 0 },
+      },
+      signatureDigest: "9".repeat(64),
+      sourceFileId,
+    }] : [],
     workspaceKey,
   });
   return buildCompositeGraphPatch({
@@ -494,7 +529,97 @@ function createPatch(
   });
 }
 
+/** 将当前 canonical qualifier 严格转换为 SQLite v3 历史 codec，仅供迁移 fixture。 */
+function toLegacyModuleQualifier(qualifier: string, relationType: string): string {
+  if (relationType !== "exports" || !qualifier.startsWith("reexport:")) {
+    return qualifier;
+  }
+  const segments = qualifier.split(":");
+  if (segments.length !== 4) {throw new Error("fixture re-export qualifier 形状不合法。");}
+  return `reexport:${encodeLegacyModuleExportName(decodeModuleExportName(segments[1]!))}:` +
+    `${encodeLegacyModuleExportName(decodeModuleExportName(segments[2]!))}:${segments[3]}`;
+}
+
+/** 复刻 commit 56bcaf4 的 v3 ModuleExportName 编码，不得用于生产新写入。 */
+function encodeLegacyModuleExportName(value: string): string {
+  if (value.length > 0 && !containsLoneSurrogate(value)) {
+    return encodeURIComponent(value);
+  }
+  if (value.length === 0) {return "%u";}
+  let encoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    encoded += `%u${value.charCodeAt(index).toString(16).toUpperCase().padStart(4, "0")}`;
+  }
+  return encoded;
+}
+
+function containsLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {return true;}
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 describe("Story 1.5 SQLite module dependency storage", () => {
+  it("Story 1.6 persists symbol nodes and source-owned local export edges through reopen", async () => {
+    const databasePath = await createDatabasePath();
+    const store = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
+    const snapshot = store.readCommittedSnapshot();
+    const patch = createPatch(
+      snapshot,
+      "2026-08-17T00:00:00.000Z",
+      {},
+      { kind: "imports", typeOrValue: "value", version: 1 },
+      true,
+    );
+    store.createJob({
+      baseGraphRevision: null,
+      id: "basic-symbol-commit",
+      kind: "initial-index",
+      requestedAt: "2026-08-17T00:00:00.000Z",
+    });
+    store.markJobRunning("basic-symbol-commit", "2026-08-17T00:00:00.000Z");
+    store.commitAtomicGraphUpdate({
+      completedAt: "2026-08-17T00:00:01.000Z",
+      expectedSnapshot: snapshot,
+      finalReadSetFence: (commit) => {commit(); return true;},
+      jobId: "basic-symbol-commit",
+      patch,
+      summary: {
+        builtinRulesVersion: "builtin-ignore-v1",
+        edgeCount: patch.targetEdgeCount,
+        excludedPathCount: 0,
+        generatedAt: "2026-08-17T00:00:01.000Z",
+        indexedFileCount: 1,
+        nodeCount: patch.targetNodeCount,
+      },
+    });
+    store.close();
+
+    const reopened = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
+    const committed = reopened.readCommittedSnapshot();
+    const symbol = committed.allNodes.find((node) => node.kind === "symbol");
+    expect(symbol).toMatchObject({
+      kind: "symbol",
+      symbol: { exported: true, name: "value", relativePath: "src/index.ts" },
+    });
+    const sourceSlice = committed.ownedSlices.find((slice) =>
+      slice.ownershipSliceId.startsWith("source:typescript:"));
+    expect(sourceSlice?.ownedNodes).toContainEqual(symbol);
+    expect(sourceSlice?.ownedEdges).toContainEqual(expect.objectContaining({
+      qualifier: "local:publicValue:value",
+      relationType: "exports",
+    }));
+    reopened.close();
+  });
+
   it("DIAGNOSIS23 S2 persists fence state while keeping it outside recovered configDigest", async () => {
     const databasePath = await createDatabasePath();
     const store = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
@@ -603,7 +728,10 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     const store = await openSqliteGraphStore({
       databasePath,
       digestPort,
-      faultInjector: ({ stage }) => mutationStages.push(stage),
+      faultInjector: ({ entityIndex, stage }) => {
+        /** 负索引属于打开数据库时的 migration 检查点，本断言只观测提交 mutation。 */
+        if (entityIndex >= 0) {mutationStages.push(stage);}
+      },
       workspaceKey,
     });
     const snapshot = store.readCommittedSnapshot();
@@ -761,7 +889,7 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     const databasePath = await createDatabasePath();
     const store = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
     const schema = new RawSqlite(databasePath, { readonly: true });
-    expect(databaseVersion(schema)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect(databaseVersion(schema)).toBe(BASIC_SYMBOL_SCHEMA_VERSION);
     schema.close();
     const snapshot = store.readCommittedSnapshot();
     const patch = createPatch(snapshot, "2026-07-27T00:00:00.000Z");
@@ -1214,7 +1342,7 @@ describe("Story 1.5 SQLite module dependency storage", () => {
       VALUES ('evidence', ?, ?, ?)
     `).run(pollutedId, `source:typescript:${valid.source_file_id}`, otherWorkspaceKey);
 
-    expect(() => assertAd4ModuleDependencySchemaIntegrity(database as never))
+    expect(() => assertBasicSymbolSchemaIntegrity(database as never))
       .toThrow(/workspace|Evidence|拓扑/u);
     } finally {
       database.close();
@@ -1328,7 +1456,7 @@ describe("Story 1.5 SQLite module dependency storage", () => {
       UPDATE facts_ownership SET fact_id = ?
       WHERE fact_kind = 'evidence' AND fact_id = ?
     `).run(invalidEvidenceId, evidence.id);
-    expect(() => assertAd4ModuleDependencySchemaIntegrity(runtime as never))
+    expect(() => assertBasicSymbolSchemaIntegrity(runtime as never))
       .toThrow(/Evidence|词汇|provenance|evidence_kind/u);
     } finally {
       runtime.close();
@@ -1509,6 +1637,105 @@ describe("Story 1.5 SQLite module dependency storage", () => {
       read_set_json: fixture.historicalReadSetJson,
     });
     database.close();
+  });
+
+  it.each([
+    ["literal-tilde", "~foo"],
+    ["legacy-empty-looking", "~e"],
+    ["legacy-unicode-looking", "~uD800"],
+    ["legacy-hex-looking", "~u0041"],
+    ["legacy-empty-escape", ""],
+    ["legacy-utf16-escape", "\ud800"],
+    ["legacy-percent-unicode", "名字"],
+  ] as const)(
+    "migrates v3 legacy ModuleExportName codec without semantic drift: %s",
+    async (_label, exportedName) => {
+      const databasePath = await createDatabasePath();
+      const fixture = await seedLegacyV3CompositeDatabase(databasePath, {
+        exportedName,
+        importedName: "名字",
+        kind: "reexport",
+        typeOrValue: "value",
+        version: 1,
+      });
+      const database = new RawSqlite(databasePath);
+      try {
+        const beforeRevision = (database.prepare(
+          "SELECT graph_revision FROM workspace WHERE workspace_key = ?",
+        ).get(workspaceKey) as { graph_revision: number }).graph_revision;
+
+        expect(() => assertModuleDependencySchemaIntegrity(database as never)).not.toThrow();
+        applyAd4EdgeIdentityMigration(database as never, { digestPort });
+
+        const expectedQualifier = `reexport:${encodeModuleExportName(exportedName)}:` +
+          `${encodeModuleExportName("名字")}:value`;
+        const edge = database.prepare(`
+          SELECT id, qualifier, from_id, to_id, workspace_key
+          FROM edges WHERE relation_type = 'exports'
+        `).get() as {
+          from_id: string;
+          id: string;
+          qualifier: string;
+          to_id: string;
+          workspace_key: string;
+        };
+        expect(edge.qualifier).toBe(expectedQualifier);
+        expect(edge.id).toBe(buildGraphEdgeId(
+          edge.workspace_key,
+          edge.from_id,
+          "exports",
+          edge.to_id,
+          expectedQualifier,
+        ));
+        expect(fixture.legacyEdgeIds).not.toContain(edge.id);
+
+        const evidence = database.prepare(`
+          SELECT id, edge_id FROM evidence WHERE edge_id = ?
+        `).get(edge.id) as { edge_id: string; id: string };
+        expect(evidence.edge_id).toBe(edge.id);
+        expect(fixture.legacyEvidenceIds).not.toContain(evidence.id);
+        expect((database.prepare(
+          "SELECT graph_revision FROM workspace WHERE workspace_key = ?",
+        ).get(workspaceKey) as { graph_revision: number }).graph_revision).toBe(beforeRevision);
+        expect(() => assertAd4ModuleDependencySchemaIntegrity(database as never)).not.toThrow();
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it("fails closed on a malformed v3 internal UTF-16 escape before rekeying", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath, {
+      exportedName: "~foo",
+      importedName: "名字",
+      kind: "reexport",
+      typeOrValue: "value",
+      version: 1,
+    });
+    const database = new RawSqlite(databasePath);
+    try {
+      const edge = database.prepare(`
+        SELECT id
+        FROM edges WHERE relation_type = 'exports'
+      `).get() as {
+        id: string;
+      };
+      const malformedQualifier = "reexport:%uD80G:%E5%90%8D%E5%AD%97:value";
+      database.prepare("UPDATE edges SET qualifier = ? WHERE id = ?").run(
+        malformedQualifier,
+        edge.id,
+      );
+      const before = readApplicationState(database);
+
+      expect(() => applyAd4EdgeIdentityMigration(database as never, { digestPort })).toThrow(
+        "SQLite v3 包含非规范 module edge qualifier 或 edge 身份。",
+      );
+      expect(databaseVersion(database)).toBe(MODULE_DEPENDENCY_SCHEMA_VERSION);
+      expect(readApplicationState(database)).toEqual(before);
+    } finally {
+      database.close();
+    }
   });
 
   it("validates every legal terminal Job shape before committing schema v4", async () => {
@@ -1795,21 +2022,44 @@ describe("Story 1.5 SQLite module dependency storage", () => {
     database.close();
   });
 
-  it("is v4 reopen-idempotent and preserves every application row", async () => {
+  it("is v5 reopen-idempotent and preserves every application row", async () => {
     const databasePath = await createDatabasePath();
     await seedLegacyV3CompositeDatabase(databasePath);
     let database = new RawSqlite(databasePath);
     applyAd4EdgeIdentityMigration(database as never, { digestPort });
-    const migrated = readApplicationState(database);
     database.close();
 
     const reopened = await openSqliteGraphStore({ databasePath, digestPort, workspaceKey });
     reopened.close();
     database = new RawSqlite(databasePath);
-    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+    const migrated = readApplicationState(database);
+    applyBasicSymbolMigration(database as never, { digestPort });
 
-    expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect(databaseVersion(database)).toBe(BASIC_SYMBOL_SCHEMA_VERSION);
     expect(readApplicationState(database)).toEqual(migrated);
+    database.close();
+  });
+
+  it("rolls back the v5 table rebuild when the BasicSymbol migration fault is injected", async () => {
+    const databasePath = await createDatabasePath();
+    await seedLegacyV3CompositeDatabase(databasePath);
+    const database = new RawSqlite(databasePath);
+    applyAd4EdgeIdentityMigration(database as never, { digestPort });
+    const before = readApplicationState(database);
+
+    expect(() => applyBasicSymbolMigration(database as never, {
+      digestPort,
+      faultInjector: ({ entityIndex, stage }) => {
+        if (entityIndex === -5 && stage === "node") {
+          throw new Error("injected v5 node rebuild failure");
+        }
+      },
+    })).toThrow("injected v5 node rebuild failure");
+    expect(databaseVersion(database)).toBe(AD4_EDGE_IDENTITY_SCHEMA_VERSION);
+    expect(readApplicationState(database)).toEqual(before);
+
+    applyBasicSymbolMigration(database as never, { digestPort });
+    expect(databaseVersion(database)).toBe(BASIC_SYMBOL_SCHEMA_VERSION);
     database.close();
   });
 

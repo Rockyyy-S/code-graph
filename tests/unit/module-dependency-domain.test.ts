@@ -83,14 +83,14 @@ describe("Story 1.5 module dependency domain", () => {
       kind: "reexport",
       typeOrValue: "value",
       version: 1,
-    })).toBe("reexport:%u:value:value");
+    })).toBe("reexport:~e:value:value");
     expect(serializeModuleQualifier({
       exportedName: "\uD800",
       importedName: "value",
       kind: "reexport",
       typeOrValue: "value",
       version: 1,
-    })).toBe("reexport:%uD800:value:value");
+    })).toBe("reexport:~uD800:value:value");
     expect(() => buildNpmPackagePurl("example", "01.2.3")).toThrow(/版本/u);
     expect(() => buildNpmPackagePurl("example", "1.2.3-..")).toThrow(/版本/u);
     expect(() => buildNpmPackagePurl("example", "1.2.3+..")).toThrow(/版本/u);

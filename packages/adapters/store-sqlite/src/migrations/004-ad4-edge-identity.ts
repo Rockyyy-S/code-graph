@@ -30,6 +30,7 @@ import {
   assertAd4ModuleDependencySchemaIntegrity,
   assertModuleDependencySchemaIntegrity,
   MODULE_DEPENDENCY_SCHEMA_VERSION,
+  normalizeLegacyV3ModuleQualifier,
 } from "./003-module-dependencies.js";
 
 /** AD-4 eager rekey 后的 SQLite schema 版本。 */
@@ -71,6 +72,7 @@ interface EdgeIdentityRow {
 
 interface EdgeIdentityMapping extends EdgeIdentityRow {
   new_id: string;
+  new_qualifier: string;
   tuple_key: string;
 }
 
@@ -199,7 +201,10 @@ export function applyAd4EdgeIdentityMigration(
     database.pragma("defer_foreign_keys = ON");
     database.exec(`
       UPDATE edges
-      SET id = (SELECT new_id FROM temp.ad4_edge_rekey WHERE old_id = edges.id)
+      SET id = (SELECT new_id FROM temp.ad4_edge_rekey WHERE old_id = edges.id),
+          qualifier = (
+            SELECT new_qualifier FROM temp.ad4_edge_rekey WHERE old_id = edges.id
+          )
       WHERE EXISTS (SELECT 1 FROM temp.ad4_edge_rekey WHERE old_id = edges.id);
 
       UPDATE evidence
@@ -273,23 +278,29 @@ export function assertAd4EdgeIdentitySchemaIntegrity(
 
 /** 以 readonly 集合构造旧 ID→AD-4 ID 映射，mutation 只发生在 SQLite 临时表内。 */
 function buildEdgeMappings(rows: ReadonlyArray<EdgeIdentityRow>): ReadonlyArray<EdgeIdentityMapping> {
-  return Object.freeze(rows.map((row) => Object.freeze({
-    ...row,
-    new_id: buildGraphEdgeId(
-      row.workspace_key,
-      row.from_id,
-      row.relation_type,
-      row.to_id,
-      row.qualifier,
-    ),
-    tuple_key: JSON.stringify([
-      row.workspace_key,
-      row.relation_type,
-      row.from_id,
-      row.to_id,
-      row.qualifier,
-    ]),
-  })));
+  return Object.freeze(rows.map((row) => {
+    const newQualifier = row.relation_type === "contains"
+      ? ""
+      : normalizeLegacyV3ModuleQualifier(row.relation_type, row.qualifier);
+    return Object.freeze({
+      ...row,
+      new_id: buildGraphEdgeId(
+        row.workspace_key,
+        row.from_id,
+        row.relation_type,
+        row.to_id,
+        newQualifier,
+      ),
+      new_qualifier: newQualifier,
+      tuple_key: JSON.stringify([
+        row.workspace_key,
+        row.relation_type,
+        row.from_id,
+        row.to_id,
+        newQualifier,
+      ]),
+    });
+  }));
 }
 
 /** Evidence 身份包含 edge ID，因此必须与 edge 引用在同一事务同步重算。 */
@@ -333,6 +344,7 @@ function createMigrationMaps(
     CREATE TEMP TABLE ad4_edge_rekey (
       old_id TEXT NOT NULL,
       new_id TEXT NOT NULL,
+      new_qualifier TEXT NOT NULL,
       tuple_key TEXT NOT NULL
     );
     CREATE TEMP TABLE ad4_evidence_rekey (
@@ -346,10 +358,11 @@ function createMigrationMaps(
     ON ad4_evidence_rekey(old_id);
   `);
   const insertEdge = database.prepare(`
-    INSERT INTO temp.ad4_edge_rekey(old_id, new_id, tuple_key) VALUES (?, ?, ?)
+    INSERT INTO temp.ad4_edge_rekey(old_id, new_id, new_qualifier, tuple_key)
+    VALUES (?, ?, ?, ?)
   `);
   for (const mapping of edges) {
-    insertEdge.run(mapping.id, mapping.new_id, mapping.tuple_key);
+    insertEdge.run(mapping.id, mapping.new_id, mapping.new_qualifier, mapping.tuple_key);
   }
   const insertEvidence = database.prepare(`
     INSERT INTO temp.ad4_evidence_rekey(old_id, new_id, new_edge_id) VALUES (?, ?, ?)

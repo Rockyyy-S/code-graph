@@ -1,5 +1,6 @@
 import type {
   AnalysisDiagnosticV1,
+  BasicSymbolSeedV1,
   LocalExportBindingSeedV1,
   ModuleLanguageV1,
 } from "@codegraph/domain";
@@ -144,6 +145,7 @@ export interface AnalyzedModuleFileV1 {
   path: string;
   relations: readonly ModuleRelationSeedV1[];
   sourceFileId: string;
+  symbols: readonly BasicSymbolSeedV1[];
 }
 
 /** 单轮 Worker 分析输出。 */

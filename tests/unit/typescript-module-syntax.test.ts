@@ -210,8 +210,8 @@ describe("Story 1.5 AD-24 TypeScript syntax mapping", () => {
 
     expect(result.relations.filter((relation) => relation.relationType === "exports")
       .map((relation) => relation.qualifier)).toEqual([
-        "reexport:%u:value:value",
-        "reexport:%uD800:value:value",
+        "reexport:~e:value:value",
+        "reexport:~uD800:value:value",
       ]);
   });
 

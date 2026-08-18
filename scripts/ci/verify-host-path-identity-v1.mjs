@@ -71,10 +71,10 @@ const allowedProductionImports = new Set([
 ]);
 const expectedProductionSourceDigest = "902408ae9828938ea39ebea5f8ec91dfa8759f90212ded60cf54daea5a03ac73";
 const expectedAnalyzerSidecarAuthoritySourceDigests = new Map([
-  [analyzerPortPath, "7bf991bb2569ff1a9f52cc3bbe9a455f61457086c320d713e640ffd3ffaa78b9"],
+  [analyzerPortPath, "13483552aa15260dce901325456a6e0db34b2354c6e59c16683e6f3ff8c6f4c8"],
   [graphServiceCompositionRootPath, "0e9d61ac11d46a55ac3d524a2ade98192269a252781abc9fa3cd21ed38785430"],
-  [analyzerParentPath, "dd9301c5375b27efcd2b816aeac176d27af7e8c6af6ae0efebf61b35f1f835a9"],
-  [analyzerWorkerPath, "7e731fee9d80afbd55a2e828d4321ba8f539737568f36536a9f10db1f423f283"],
+  [analyzerParentPath, "d519da774a9f148a4dec96c8304124880ee9ab396d4ca42d008fb8e21d3fcf2d"],
+  [analyzerWorkerPath, "299a81082698d817b53e473065cbd4bc5d6f1b2d52fa1dc19e6acb91fabd65e1"],
 ]);
 const expectedPosixAdapterSourceDigests = new Map([
   [posixAdapterCapabilityPath, "4e2f2746660aeb8fafab091af382192acd4ebb74a57029a02cda36d35ef8cb06"],
